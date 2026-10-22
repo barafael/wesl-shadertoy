@@ -4,9 +4,9 @@ pub mod fullscreen_material;
 
 use bevy::ecs::component::Component;
 use bevy::math::Vec4;
+use bevy::render::RenderApp;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::ShaderType;
-use bevy::render::RenderApp;
 
 pub use fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin, ShaderToyFragment};
 

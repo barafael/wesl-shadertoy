@@ -306,7 +306,10 @@ fn compile_and_apply(mut p: CompileParams) {
         }
         Err(e) => {
             let msg = e.to_string();
-            warn!("shader compile failed: {}", msg.lines().next().unwrap_or("error"));
+            warn!(
+                "shader compile failed: {}",
+                msg.lines().next().unwrap_or("error")
+            );
             p.status.error = Some(msg);
         }
     }
@@ -412,7 +415,9 @@ fn ui(mut p: UiParams) {
                 {
                     p.wins.errors_expanded = !p.wins.errors_expanded;
                 }
-                ui.label(egui::RichText::new(summary).color(egui::Color32::from_rgb(0xf4, 0x87, 0x7f)));
+                ui.label(
+                    egui::RichText::new(summary).color(egui::Color32::from_rgb(0xf4, 0x87, 0x7f)),
+                );
             } else if let Some(ms) = p.status.last_ms {
                 ui.label(
                     egui::RichText::new(format!("✓ compiled in {ms:.1} ms"))
@@ -423,20 +428,21 @@ fn ui(mut p: UiParams) {
             }
         });
         if p.wins.errors_expanded
-            && let Some(err) = &p.status.error {
-                ui.push_id("error_text", |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(140.0)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut err.as_str())
-                                    .font(egui::TextStyle::Monospace)
-                                    .desired_width(f32::INFINITY),
-                            );
-                        });
-                });
-            }
+            && let Some(err) = &p.status.error
+        {
+            ui.push_id("error_text", |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut err.as_str())
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+            });
+        }
         // Block canvas clicks through empty status-bar space.
         ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
     });
@@ -562,12 +568,7 @@ fn date_uniforms() -> Vec4 {
         day_of_year += 1;
     }
     let dow = (days.rem_euclid(7) + 4) as f32 % 7.0; // 1970-01-01 was a Thursday
-    Vec4::new(
-        seconds_of_day as f32,
-        month as f32,
-        dow,
-        day_of_year as f32,
-    )
+    Vec4::new(seconds_of_day as f32, month as f32, dow, day_of_year as f32)
 }
 
 // --- document persistence ---------------------------------------------------
@@ -594,7 +595,10 @@ fn save_dirty(ctx: &egui::Context, text: &str) {
     let due = LAST_SAVE.with(|t| now - *t.borrow() > 0.5);
     if due {
         LAST_SAVE.with(|t| *t.borrow_mut() = now);
-        if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok()).flatten() {
+        if let Some(ls) = web_sys::window()
+            .and_then(|w| w.local_storage().ok())
+            .flatten()
+        {
             let _ = ls.set_item("wesl-shadertoy.doc", text);
         }
     }

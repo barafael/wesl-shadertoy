@@ -80,8 +80,10 @@ pub fn show_code_editor(ui: &mut Ui, text: &mut String) -> EditorOutput {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
 
                 // --- line-number gutter ---
-                let gutter_text: String =
-                    (1..=display_lines).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+                let gutter_text: String = (1..=display_lines)
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let mut gutter_job = LayoutJob::simple(
                     gutter_text,
                     font_id.clone(),
@@ -208,14 +210,19 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {
         text.insert_str(byte, INDENT);
         state
             .cursor
-            .set_char_range(Some(CCursorRange::one(CCursor::new(ccursor.index + INDENT.len()))));
+            .set_char_range(Some(CCursorRange::one(CCursor::new(
+                ccursor.index + INDENT.len(),
+            ))));
     }
     state.store(ctx, id);
 }
 
 /// egui keeps these functions private to `text_cursor_state`; ours are tiny.
 fn byte_index_from_char_index(s: &str, char_index: usize) -> usize {
-    s.char_indices().nth(char_index).map(|(i, _)| i).unwrap_or(s.len())
+    s.char_indices()
+        .nth(char_index)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
 }
 
 fn char_index_from_byte_index(s: &str, byte_index: usize) -> usize {

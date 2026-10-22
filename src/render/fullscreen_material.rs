@@ -127,11 +127,7 @@ pub struct FullscreenMaterialPipeline<T: FullscreenMaterial> {
 }
 
 impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
-    fn rebuild_variants(
-        &mut self,
-        shader: Handle<Shader>,
-        label: Option<String>,
-    ) {
+    fn rebuild_variants(&mut self, shader: Handle<Shader>, label: Option<String>) {
         let desc = RenderPipelineDescriptor {
             label: label.map(std::borrow::Cow::Owned),
             layout: vec![self.layout.clone()],

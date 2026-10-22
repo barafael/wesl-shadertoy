@@ -25,7 +25,10 @@
 //! `automerge`); the `ShaderEdit` payload then becomes an opaque CRDT update
 //! and `apply_edit` becomes a merge. Nothing else in the app has to change.
 
-#![allow(dead_code, reason = "multiplayer seams: wired up when a real transport lands")]
+#![allow(
+    dead_code,
+    reason = "multiplayer seams: wired up when a real transport lands"
+)]
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -213,7 +216,8 @@ pub struct NetPlugin;
 
 impl bevy::app::Plugin for NetPlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        app.init_resource::<SessionState>().init_resource::<NetTransport>();
+        app.init_resource::<SessionState>()
+            .init_resource::<NetTransport>();
     }
 }
 
