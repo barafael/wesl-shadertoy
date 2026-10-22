@@ -1,0 +1,54 @@
+[package]
+name = "wesl-shadertoy"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A shadertoy-style live shader editor for WESL, built on Bevy 0.20 and egui, running natively and in the browser via WASM."
+
+[dependencies]
+# Bevy 0.20: WESL is the native shader language. Granular feature set: the
+# app is a fullscreen render pass + egui, so we skip the `2d`/`3d`/`ui`
+# umbrella features (which drag in bevy_pbr, bevy_gltf, gizmos, picking,
+# scene, anti-aliasing — tens of MB of wasm) and take only what the vendored
+# fullscreen-material plugin and the egui integration actually need.
+# `default_platform` already enables `webgl2`, so the wasm build runs in any
+# WebGL2 browser; add the `webgpu` feature to require WebGPU instead.
+bevy = { version = "0.20", default-features = false, features = [
+    "default_app",
+    "default_platform",
+    "bevy_render",
+    "bevy_core_pipeline",
+] }
+bevy_egui = "0.43.1"
+
+# The WESL compiler (crate is published as `wesl`, not `wesl-compiler`).
+wesl = "0.6"
+# Same major as the naga inside wgpu 30 (Bevy 0.20's renderer), so anything
+# we validate here is accepted by the pipeline cache there.
+naga = { version = "30", features = ["wgsl-in"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Fast native rebuilds (same trick as omdurman's app crate).
+bevy = { version = "0.20", features = ["dynamic_linking"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Storage"] }
+js-sys = "0.3"
+
+# Size-focused release profile for the wasm bundle built by trunk.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Keep native dev builds usable with Bevy in the tree.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
