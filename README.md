@@ -13,7 +13,7 @@ Runs natively and in the browser as WASM.
 | --- | --- |
 | Compile & apply | `▶ Run` button or **Ctrl/Cmd+Enter** |
 | Pause / resume the clock, reset, speed | toolbar |
-| Presets | `preset:` combobox (Plasma / Raymarch / Mandelbrot) |
+| Presets | `preset:` combobox — 11 shadertoy classics (Plasma, Star Nest, Menger, …) |
 | Windows | `Code`, `WGSL` (composed output), `Session` toggles |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
@@ -60,6 +60,10 @@ Available uniforms (import from `package::shadertoy`):
 `frag_coord` is in pixels, origin **top-left** (WGSL framebuffer convention,
 like shadertoy's `gl_FragCoord`).
 
+One dialect gotcha when porting snippets: `mod` is a reserved word in WESL (it
+declares a module), so write the builtin out as `x - y * floor(x / y)` instead
+of calling `mod(x, y)`.
+
 The pipeline: the editor text is linked by the WESL compiler, the composed
 WGSL is parsed and validated with `naga` (same major version as the wgpu
 inside Bevy 0.20, so type errors surface in the UI instead of the browser
@@ -80,7 +84,7 @@ src/
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
   editor.rs     the code editor: highlighted galley behind a transparent
                 TextEdit, line-number gutter, Tab/Shift-Tab
-  presets.rs    Plasma / Raymarch / Mandelbrot (compile-checked in tests)
+  presets.rs    11 compile-checked shadertoy classic presets
   net.rs        multiplayer seams (see below)
 ```
 
