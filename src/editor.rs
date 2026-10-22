@@ -17,8 +17,8 @@ use bevy_egui::egui::text::LayoutJob;
 use bevy_egui::egui::text_selection::CCursorRange;
 use bevy_egui::egui::widgets::text_edit::TextEditState;
 use bevy_egui::egui::{
-    Color32, Context, FontId, Frame, Id, Key, Margin, Modifiers, ScrollArea, Sense, TextEdit, Ui,
-    Vec2, pos2,
+    Align, Color32, Context, FontId, Frame, Id, Key, Label, Layout, Margin, Modifiers, ScrollArea,
+    Sense, TextEdit, Ui, Vec2, pos2,
 };
 
 use crate::highlight::highlight_job;
@@ -125,6 +125,58 @@ pub fn show_code_editor(ui: &mut Ui, text: &mut String) -> EditorOutput {
         });
 
     EditorOutput { changed }
+}
+
+/// Show a read-only, syntax-highlighted code view with a line-number gutter.
+///
+/// This is the generated-WGSL viewer: same tokenizer and colors as the
+/// editor, but the text is painted as selectable [`Label`] galleys instead of
+/// a `TextEdit`, since there is nothing to edit.
+pub fn show_code_view(ui: &mut Ui, text: &str) {
+    let ctx = ui.ctx().clone();
+    let font_id = FontId::monospace(13.0);
+    let default_color = ui.visuals().text_color();
+
+    let display_lines = text.matches('\n').count() + 1;
+    let gutter_text: String = (1..=display_lines).map(|i| i.to_string()).collect();
+    let gutter_width = (display_lines.ilog10() as usize + 1).max(2) as f32
+        * ctx.fonts_mut(|f| f.glyph_width(&font_id, '0'))
+        + 12.0;
+
+    ScrollArea::both()
+        .id_salt("code_view_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            // Top-aligned so gutter rows and code rows share the same baselines.
+            ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+                // --- line-number gutter (same painted galley as the editor) ---
+                let mut gutter_job = LayoutJob::simple(
+                    gutter_text,
+                    font_id.clone(),
+                    ui.visuals().weak_text_color(),
+                    f32::INFINITY,
+                );
+                gutter_job.wrap.max_width = f32::INFINITY;
+                let gutter_galley = ctx.fonts_mut(|f| f.layout_job(gutter_job));
+                let (gutter_rect, _) = ui.allocate_at_least(
+                    Vec2::new(gutter_width, gutter_galley.size().y),
+                    Sense::hover(),
+                );
+                ui.painter().galley(
+                    pos2(
+                        gutter_rect.max.x - gutter_galley.size().x,
+                        gutter_rect.min.y,
+                    ),
+                    gutter_galley,
+                    ui.visuals().weak_text_color(),
+                );
+
+                // --- highlighted code, selectable for copy-paste ---
+                let job = highlight_job(text, font_id.clone(), default_color);
+                ui.add(Label::new(job).selectable(true));
+            });
+        });
 }
 
 fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {

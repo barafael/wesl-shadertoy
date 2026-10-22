@@ -19,11 +19,14 @@ mod net;
 mod presets;
 mod render;
 
-use std::time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::ecs::system::SystemParam;
+// std's Instant panics on wasm32-unknown-unknown; Bevy's platform module is
+// web-time under the hood on the web, std elsewhere.
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
@@ -140,23 +143,25 @@ impl Default for UiWindows {
     }
 }
 
-fn setup(
-    mut commands: Commands,
-    mut shaders: ResMut<Assets<Shader>>,
-    mut doc: ResMut<ShaderDoc>,
-    mut current: ResMut<CurrentShader>,
-    mut run: ResMut<RunRequest>,
-    mut state: ResMut<ShaderToyState>,
-) {
+/// The app-state resources [`setup`] seeds, bundled into one parameter.
+#[derive(SystemParam)]
+struct StartupParams<'w> {
+    doc: ResMut<'w, ShaderDoc>,
+    current: ResMut<'w, CurrentShader>,
+    run: ResMut<'w, RunRequest>,
+    state: ResMut<'w, ShaderToyState>,
+}
+
+fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: StartupParams) {
     // Restore a saved document (browser localStorage) or start from preset.
     match load_saved() {
         Some(saved) => {
-            doc.text = saved;
-            state.last_preset = "saved";
+            app.doc.text = saved;
+            app.state.last_preset = "saved";
         }
         None => {
-            doc.text = presets::DEFAULT.to_string();
-            state.last_preset = "Plasma";
+            app.doc.text = presets::DEFAULT.to_string();
+            app.state.last_preset = "Plasma";
         }
     }
 
@@ -164,7 +169,7 @@ fn setup(
     // successful compile lands later this frame.
     let placeholder = Shader::from_wgsl(render::placeholder_wgsl(), "shadertoy://placeholder");
     let handle = shaders.add(placeholder);
-    current.handle = handle.clone();
+    app.current.handle = handle.clone();
 
     commands.spawn((
         Camera3d::default(),
@@ -181,32 +186,37 @@ fn setup(
     ));
 
     // Compile whatever is in the editor on the first frame.
-    run.0 = true;
+    app.run.0 = true;
+}
+
+/// Everything [`update_uniforms`] reads or writes, bundled into one parameter.
+#[derive(SystemParam)]
+struct UniformParams<'w, 's> {
+    contexts: EguiContexts<'w, 's>,
+    state: ResMut<'w, ShaderToyState>,
+    time: Res<'w, Time>,
+    windows: Query<'w, 's, &'static Window>,
+    uniforms: Single<'w, 's, &'static mut ShaderToyUniform>,
 }
 
 /// Advance the shadertoy clock, count frames, track iMouse and viewport size.
-fn update_uniforms(
-    mut contexts: EguiContexts,
-    mut state: ResMut<ShaderToyState>,
-    time: Res<Time>,
-    windows: Query<&Window>,
-    mut uniforms: Single<&mut ShaderToyUniform>,
-) {
+fn update_uniforms(mut p: UniformParams) {
     // Clamp so a backgrounded tab does not teleport the clock on resume.
-    let dt = time.delta_secs().min(0.1);
-    if !state.paused {
-        state.time += dt * state.speed;
+    let dt = p.time.delta_secs().min(0.1);
+    if !p.state.paused {
+        p.state.time += dt * p.state.speed;
     }
-    state.frame += 1;
+    p.state.frame += 1;
     if dt > 0.0 {
-        state.fps = if state.fps == 0.0 {
+        p.state.fps = if p.state.fps == 0.0 {
             1.0 / dt
         } else {
-            state.fps * 0.95 + (1.0 / dt) * 0.05
+            p.state.fps * 0.95 + (1.0 / dt) * 0.05
         };
     }
 
-    let resolution = windows
+    let resolution = p
+        .windows
         .iter()
         .next()
         .map(|w| {
@@ -222,7 +232,7 @@ fn update_uniforms(
     // --- iMouse, via egui's pointer (logical points -> physical pixels).
     // WGSL `@builtin(position)` has its origin top-left, same as egui, so no
     // y-flip is needed. Clicks that start on an egui widget are ignored.
-    if let Ok(ctx) = contexts.ctx_mut() {
+    if let Ok(ctx) = p.contexts.ctx_mut() {
         let ppp = ctx.pixels_per_point();
         let (hover, pressed, released, held) = ctx.input(|i| {
             (
@@ -240,85 +250,91 @@ fn update_uniforms(
         if let Some(pos) = hover {
             let px = pos * ppp;
             if pressed && !over_ui {
-                state.mouse = Vec4::new(px.x, px.y, px.x, px.y);
-                state.mouse_held = true;
-            } else if held && state.mouse_held {
-                state.mouse = Vec4::new(px.x, px.y, state.mouse.z, state.mouse.w);
+                p.state.mouse = Vec4::new(px.x, px.y, px.x, px.y);
+                p.state.mouse_held = true;
+            } else if held && p.state.mouse_held {
+                p.state.mouse = Vec4::new(px.x, px.y, p.state.mouse.z, p.state.mouse.w);
             }
-            if released && state.mouse_held {
-                state.mouse_held = false;
-                state.mouse = Vec4::new(px.x, px.y, -state.mouse.z, -state.mouse.w);
+            if released && p.state.mouse_held {
+                p.state.mouse_held = false;
+                p.state.mouse = Vec4::new(px.x, px.y, -p.state.mouse.z, -p.state.mouse.w);
             }
         }
     }
 
-    uniforms.time = state.time;
-    uniforms.time_delta = if state.paused { 0.0 } else { dt };
-    uniforms.frame = state.frame;
-    uniforms.resolution = resolution;
-    uniforms.mouse = state.mouse;
-    uniforms.date = date_uniforms();
+    p.uniforms.time = p.state.time;
+    p.uniforms.time_delta = if p.state.paused { 0.0 } else { dt };
+    p.uniforms.frame = p.state.frame;
+    p.uniforms.resolution = resolution;
+    p.uniforms.mouse = p.state.mouse;
+    p.uniforms.date = date_uniforms();
+}
+
+/// Everything [`compile_and_apply`] reads or writes, bundled into one parameter.
+#[derive(SystemParam)]
+struct CompileParams<'w, 's> {
+    run: ResMut<'w, RunRequest>,
+    status: ResMut<'w, CompileStatus>,
+    doc: Res<'w, ShaderDoc>,
+    shaders: ResMut<'w, Assets<Shader>>,
+    current: ResMut<'w, CurrentShader>,
+    fragment: Single<'w, 's, &'static mut ShaderToyFragment>,
 }
 
 /// Compile the editor text and, on success, hot-swap the running shader.
 /// On error the previous shader keeps running and the message lands in
 /// [`CompileStatus`] for the UI.
-fn compile_and_apply(
-    mut run: ResMut<RunRequest>,
-    status: ResMut<CompileStatus>,
-    doc: Res<ShaderDoc>,
-    mut shaders: ResMut<Assets<Shader>>,
-    mut current: ResMut<CurrentShader>,
-    mut fragment: Single<&mut ShaderToyFragment>,
-) {
-    if !run.0 {
+fn compile_and_apply(mut p: CompileParams) {
+    if !p.run.0 {
         return;
     }
-    run.0 = false;
+    p.run.0 = false;
 
     let started = Instant::now();
-    match compile::compile_user_shader(&doc.text) {
+    match compile::compile_user_shader(&p.doc.text) {
         Ok(wgsl) => {
             let shader = Shader::from_wgsl(wgsl.clone(), "shadertoy://user");
-            let handle = shaders.add(shader);
-            fragment.0 = handle.clone();
-            current.handle = handle;
-            current.wgsl = wgsl;
-            let status = status.into_inner();
-            status.error = None;
+            let handle = p.shaders.add(shader);
+            p.fragment.0 = handle.clone();
+            p.current.handle = handle;
+            p.current.wgsl = wgsl;
             let ms = started.elapsed().as_secs_f32() * 1000.0;
-            status.last_ms = Some(ms);
-            status.ok_count += 1;
+            p.status.error = None;
+            p.status.last_ms = Some(ms);
+            p.status.ok_count += 1;
             info!("shader compiled and applied in {ms:.1} ms");
         }
         Err(e) => {
-            let status = status.into_inner();
             let msg = e.to_string();
             warn!("shader compile failed: {}", msg.lines().next().unwrap_or("error"));
-            status.error = Some(msg);
+            p.status.error = Some(msg);
         }
     }
 }
 
+/// Everything the [`ui`] system reads or writes, bundled into one parameter.
+#[derive(SystemParam)]
+struct UiParams<'w, 's> {
+    contexts: EguiContexts<'w, 's>,
+    doc: ResMut<'w, ShaderDoc>,
+    state: ResMut<'w, ShaderToyState>,
+    status: Res<'w, CompileStatus>,
+    run: ResMut<'w, RunRequest>,
+    wins: ResMut<'w, UiWindows>,
+    current: Res<'w, CurrentShader>,
+    session: Res<'w, SessionState>,
+    transport: ResMut<'w, NetTransport>,
+}
+
 /// All egui UI: toolbar, editor window, error panel, WGSL viewer, session.
-fn ui(
-    mut contexts: EguiContexts,
-    mut doc: ResMut<ShaderDoc>,
-    mut state: ResMut<ShaderToyState>,
-    status: Res<CompileStatus>,
-    mut run: ResMut<RunRequest>,
-    mut wins: ResMut<UiWindows>,
-    current: Res<CurrentShader>,
-    session: Res<SessionState>,
-    mut transport: ResMut<NetTransport>,
-) {
-    let Ok(ctx) = contexts.ctx_mut() else {
+fn ui(mut p: UiParams) {
+    let Ok(ctx) = p.contexts.ctx_mut() else {
         return;
     };
 
     // Global Ctrl/Cmd+Enter runs the shader.
     if ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
-        run.0 = true;
+        p.run.0 = true;
     }
 
     // egui 0.36 attaches panels to a `Ui`, not to the `Context`: build the
@@ -339,46 +355,46 @@ fn ui(
                 .on_hover_text("Compile & apply (Ctrl+Enter)")
                 .clicked()
             {
-                run.0 = true;
+                p.run.0 = true;
             }
-            let pause_label = if state.paused { "⏸" } else { "▶︎" };
-            ui.toggle_value(&mut state.paused, pause_label)
+            let pause_label = if p.state.paused { "⏸" } else { "▶︎" };
+            ui.toggle_value(&mut p.state.paused, pause_label)
                 .on_hover_text("Pause / resume the clock");
             if ui.button("⟲").on_hover_text("Reset time").clicked() {
-                state.time = 0.0;
+                p.state.time = 0.0;
             }
             ui.add(
-                egui::Slider::new(&mut state.speed, 0.0..=4.0)
+                egui::Slider::new(&mut p.state.speed, 0.0..=4.0)
                     .text("speed")
                     .max_decimals(2),
             );
-            ui.label(format!("t = {:.1}s", state.time));
-            ui.label(format!("{:.0} fps", state.fps));
+            ui.label(format!("t = {:.1}s", p.state.time));
+            ui.label(format!("{:.0} fps", p.state.fps));
 
             ui.separator();
 
             egui::ComboBox::from_id_salt("presets")
-                .selected_text(format!("preset: {}", state.last_preset))
+                .selected_text(format!("preset: {}", p.state.last_preset))
                 .show_ui(ui, |ui| {
                     for preset in presets::ALL {
                         if ui
-                            .selectable_label(state.last_preset == preset.name, preset.name)
+                            .selectable_label(p.state.last_preset == preset.name, preset.name)
                             .clicked()
                         {
-                            doc.text = preset.code.to_string();
-                            doc.version += 1;
-                            state.last_preset = preset.name;
-                            run.0 = true;
+                            p.doc.text = preset.code.to_string();
+                            p.doc.version += 1;
+                            p.state.last_preset = preset.name;
+                            p.run.0 = true;
                         }
                     }
                 });
 
-            ui.checkbox(&mut state.auto_run, "auto-run");
+            ui.checkbox(&mut p.state.auto_run, "auto-run");
 
             ui.separator();
-            ui.toggle_value(&mut wins.editor, "Code");
-            ui.toggle_value(&mut wins.wgsl, "WGSL");
-            ui.toggle_value(&mut wins.session, "Session");
+            ui.toggle_value(&mut p.wins.editor, "Code");
+            ui.toggle_value(&mut p.wins.wgsl, "WGSL");
+            ui.toggle_value(&mut p.wins.session, "Session");
         });
         // Block canvas clicks through empty toolbar space.
         ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
@@ -387,17 +403,17 @@ fn ui(
     // --- status / error panel ----------------------------------------------
     egui::Panel::bottom("status").show(&mut root_ui, |ui| {
         ui.horizontal(|ui| {
-            if let Some(err) = &status.error {
+            if let Some(err) = &p.status.error {
                 let summary = err.lines().next().unwrap_or("error").to_string();
                 if ui
-                    .selectable_label(wins.errors_expanded, "✗ compile failed")
+                    .selectable_label(p.wins.errors_expanded, "✗ compile failed")
                     .on_hover_text("The previous shader keeps running")
                     .clicked()
                 {
-                    wins.errors_expanded = !wins.errors_expanded;
+                    p.wins.errors_expanded = !p.wins.errors_expanded;
                 }
                 ui.label(egui::RichText::new(summary).color(egui::Color32::from_rgb(0xf4, 0x87, 0x7f)));
-            } else if let Some(ms) = status.last_ms {
+            } else if let Some(ms) = p.status.last_ms {
                 ui.label(
                     egui::RichText::new(format!("✓ compiled in {ms:.1} ms"))
                         .color(egui::Color32::from_rgb(0x89, 0xd1, 0x8c)),
@@ -406,8 +422,8 @@ fn ui(
                 ui.label("not compiled yet");
             }
         });
-        if wins.errors_expanded {
-            if let Some(err) = &status.error {
+        if p.wins.errors_expanded
+            && let Some(err) = &p.status.error {
                 ui.push_id("error_text", |ui| {
                     egui::ScrollArea::vertical()
                         .max_height(140.0)
@@ -421,76 +437,67 @@ fn ui(
                         });
                 });
             }
-        }
         // Block canvas clicks through empty status-bar space.
         ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
     });
 
     // --- editor window -------------------------------------------------------
-    if wins.editor {
+    if p.wins.editor {
         egui::Window::new("Code — package::user")
             .id(egui::Id::new("code_window"))
             .default_pos([12.0, 44.0])
             .default_size([640.0, 460.0])
-            .open(&mut wins.editor)
+            .open(&mut p.wins.editor)
             .show(ctx, |ui| {
-                let before = doc.text.clone();
-                let out = editor::show_code_editor(ui, &mut doc.text);
+                let before = p.doc.text.clone();
+                let out = editor::show_code_editor(ui, &mut p.doc.text);
                 if out.changed {
-                    doc.version += 1;
+                    p.doc.version += 1;
                     // Multiplayer seam: publish the edit (see net.rs).
-                    match diff_edit(doc.version - 1, &before, &doc.text) {
-                        Some(intent) => transport.send(SessionMessage::ShaderEdit {
-                            from: session.local_peer,
+                    match diff_edit(p.doc.version - 1, &before, &p.doc.text) {
+                        Some(intent) => p.transport.send(SessionMessage::ShaderEdit {
+                            from: p.session.local_peer,
                             base_version: intent.base_version,
                             range: intent.range,
                             insert: intent.insert,
                         }),
-                        None => transport.send(SessionMessage::ShaderFull {
-                            from: session.local_peer,
-                            version: doc.version,
-                            text: doc.text.clone(),
+                        None => p.transport.send(SessionMessage::ShaderFull {
+                            from: p.session.local_peer,
+                            version: p.doc.version,
+                            text: p.doc.text.clone(),
                         }),
                     }
-                    save_dirty(ctx, &doc.text);
-                    if state.auto_run {
-                        run.0 = true;
+                    save_dirty(ctx, &p.doc.text);
+                    if p.state.auto_run {
+                        p.run.0 = true;
                     }
                 }
             });
     }
 
     // --- generated WGSL viewer -----------------------------------------------
-    if wins.wgsl {
+    if p.wins.wgsl {
         egui::Window::new("Generated WGSL — package::main")
             .id(egui::Id::new("wgsl_window"))
             .default_pos([680.0, 60.0])
             .default_size([520.0, 480.0])
-            .open(&mut wins.wgsl)
+            .open(&mut p.wins.wgsl)
             .show(ctx, |ui| {
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut current.wgsl.as_str())
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
+                editor::show_code_view(ui, &p.current.wgsl);
             });
     }
 
     // --- session window --------------------------------------------------------
-    if wins.session {
+    if p.wins.session {
         egui::Window::new("Session")
             .id(egui::Id::new("session_window"))
             .default_pos([680.0, 120.0])
             .default_size([340.0, 240.0])
-            .open(&mut wins.session)
+            .open(&mut p.wins.session)
             .show(ctx, |ui| {
-                ui.label(format!("transport: {:?}", session.status));
-                ui.label(format!("you: peer #{}", session.local_peer));
-                if session.peers.is_empty() {
+                ui.label(format!("transport: {:?}", p.session.status));
+                ui.label(format!("you: peer #{}", p.session.local_peer));
+                if p.session.peers.is_empty() {
                     ui.weak("No other peers yet.");
                     ui.separator();
                     ui.label(
@@ -500,7 +507,7 @@ fn ui(
                          channels (see src/net.rs).",
                     );
                 } else {
-                    for (id, name) in &session.peers {
+                    for (id, name) in &p.session.peers {
                         ui.label(format!("peer #{id} — {name}"));
                     }
                 }
