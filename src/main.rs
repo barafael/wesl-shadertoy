@@ -32,6 +32,10 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use render::{ShaderToyFragment, ShaderToyRenderPlugin, ShaderToyUniform};
 use theme::Theme;
 
+/// Seconds of typing quiet before an auto-run compile fires (so a burst of
+/// keystrokes compiles once, not once per character).
+const AUTO_RUN_DELAY: f64 = 0.25;
+
 fn main() {
     App::new()
         .add_plugins(
@@ -59,6 +63,7 @@ fn main() {
         .init_resource::<CompileStatus>()
         .init_resource::<RunRequest>()
         .init_resource::<UiWindows>()
+        .init_resource::<editor::HighlightCache>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .add_systems(Startup, setup)
@@ -84,6 +89,10 @@ struct ShaderToyState {
     mouse_held: bool,
     fps: f32,
     auto_run: bool,
+    /// egui time of the last edit while auto-run is on; the `ui` system
+    /// raises a run request once [`AUTO_RUN_DELAY`] seconds go by without a
+    /// new edit (debounce, so typing does not compile per keystroke).
+    pending_run: Option<f64>,
     last_preset: &'static str,
 }
 
@@ -98,6 +107,7 @@ impl Default for ShaderToyState {
             mouse_held: false,
             fps: 0.0,
             auto_run: false,
+            pending_run: None,
             last_preset: "Plasma",
         }
     }
@@ -282,18 +292,18 @@ fn update_uniforms(mut p: UniformParams) {
     // y-flip is needed. Clicks that start on an egui widget are ignored.
     if let Ok(ctx) = p.contexts.ctx_mut() {
         let ppp = ctx.pixels_per_point();
-        let (hover, pressed, released, held) = ctx.input(|i| {
+        // A pointer over an egui window/panel "interacts" with that area's
+        // background widget, so `interact_pos` is Some; over the raw canvas
+        // (which is not an egui widget) it is None.
+        let (hover, pressed, released, held, over_ui) = ctx.input(|i| {
             (
                 i.pointer.hover_pos(),
                 i.pointer.button_pressed(egui::PointerButton::Primary),
                 i.pointer.button_released(egui::PointerButton::Primary),
                 i.pointer.button_down(egui::PointerButton::Primary),
+                i.pointer.interact_pos().is_some(),
             )
         });
-        // A pointer over an egui window/panel "interacts" with that area's
-        // background widget, so `interact_pos` is Some; over the raw canvas
-        // (which is not an egui widget) it is None.
-        let over_ui = ctx.input(|i| i.pointer.interact_pos().is_some());
 
         if let Some(pos) = hover {
             let px = pos * ppp;
@@ -344,9 +354,13 @@ fn compile_and_apply(mut p: CompileParams) {
         Ok(wgsl) => {
             let shader = Shader::from_wgsl(wgsl.clone(), "shadertoy://user");
             let handle = p.shaders.add(shader);
-            p.fragment.0 = handle.clone();
-            p.current.handle = handle;
+            let replaced = std::mem::replace(&mut p.current.handle, handle.clone());
+            p.fragment.0 = handle;
             p.current.wgsl = wgsl;
+            // `Assets` keeps every added asset alive until it is removed, so
+            // without this each compile (auto-run!) leaks a Shader plus its
+            // extracted copy and pipeline-cache entry.
+            p.shaders.remove(&replaced);
             let ms = started.elapsed().as_secs_f32() * 1000.0;
             p.status.error = None;
             p.status.last_ms = Some(ms);
@@ -374,6 +388,7 @@ struct UiParams<'w, 's> {
     wins: ResMut<'w, UiWindows>,
     settings: ResMut<'w, Settings>,
     current: Res<'w, CurrentShader>,
+    highlight: ResMut<'w, editor::HighlightCache>,
 }
 
 /// All egui UI: toolbar, editor window, error panel, WGSL viewer.
@@ -395,6 +410,7 @@ fn ui(mut p: UiParams) {
     });
     if run {
         p.run.0 = true;
+        p.state.pending_run = None;
     }
     if save {
         p.status.note = match persist::save_now(&p.doc.text) {
@@ -448,6 +464,7 @@ fn ui(mut p: UiParams) {
                 .clicked()
             {
                 p.run.0 = true;
+                p.state.pending_run = None;
             }
             let pause_label = if p.state.paused { "⏸" } else { "▶︎" };
             ui.toggle_value(&mut p.state.paused, pause_label)
@@ -476,6 +493,7 @@ fn ui(mut p: UiParams) {
                         {
                             p.doc.text = preset.code.to_string();
                             p.state.last_preset = preset.name;
+                            p.state.pending_run = None;
                             p.run.0 = true;
                         }
                     }
@@ -552,15 +570,25 @@ fn ui(mut p: UiParams) {
             .default_size([640.0, 460.0])
             .open(&mut p.wins.editor)
             .show(ctx, |ui| {
-                let syntax = p.settings.theme.syntax();
-                let out = editor::show_code_editor(ui, &mut p.doc.text, &syntax);
+                let theme = p.settings.theme;
+                let out = editor::show_code_editor(ui, &mut p.doc.text, theme, &mut p.highlight);
                 if out.changed {
                     persist::save_dirty(ctx, &p.doc.text);
                     if p.state.auto_run {
-                        p.run.0 = true;
+                        // Debounced: the compile fires AUTO_RUN_DELAY after
+                        // the last keystroke, not once per character.
+                        p.state.pending_run = Some(ctx.input(|i| i.time));
                     }
                 }
             });
+    }
+
+    // --- debounced auto-run --------------------------------------------------
+    if let Some(at) = p.state.pending_run
+        && ctx.input(|i| i.time) - at >= AUTO_RUN_DELAY
+    {
+        p.state.pending_run = None;
+        p.run.0 = true;
     }
 
     // --- generated WGSL viewer -----------------------------------------------
@@ -571,8 +599,8 @@ fn ui(mut p: UiParams) {
             .default_size([520.0, 480.0])
             .open(&mut p.wins.wgsl)
             .show(ctx, |ui| {
-                let syntax = p.settings.theme.syntax();
-                editor::show_code_view(ui, &p.current.wgsl, &syntax);
+                let theme = p.settings.theme;
+                editor::show_code_view(ui, &p.current.wgsl, theme, &mut p.highlight);
             });
     }
 
@@ -646,6 +674,7 @@ fn open_into(
 ) {
     doc.text = text;
     state.last_preset = "file";
+    state.pending_run = None;
     run.0 = true;
     status.note = Some((format!("opened {name}"), true));
 }

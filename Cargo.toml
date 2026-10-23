@@ -19,7 +19,15 @@ bevy = { version = "0.20", default-features = false, features = [
     "bevy_render",
     "bevy_core_pipeline",
 ] }
-bevy_egui = "0.43.1"
+# Only the core integration is used: egui paints everything, so the optional
+# bevy_ui / bevy_picking bridges (and the bevy_ui/bevy_sprite/bevy_picking
+# crates they drag into the wasm) stay off.
+bevy_egui = { version = "0.43.1", default-features = false, features = [
+    "render",
+    "default_fonts",
+    "manage_clipboard",
+    "open_url",
+] }
 
 # The WESL compiler (crate is published as `wesl`, not `wesl-compiler`).
 wesl = "0.6"
