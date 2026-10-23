@@ -23,7 +23,7 @@ use wesl::syntax::ModulePath;
 use wesl::{CompileOptions, Compiler};
 
 /// The hidden `package::shadertoy` module: uniforms + accessors.
-pub const SHADERTOY_MODULE: &str = r#"// The shadertoy environment, provided by wesl-shadertoy.
+pub(crate) const SHADERTOY_MODULE: &str = r#"// The shadertoy environment, provided by wesl-shadertoy.
 // Uniforms live in the dynamic uniform buffer the fullscreen-material
 // pipeline binds at @group(0) @binding(2).
 
@@ -60,7 +60,7 @@ fn i_date() -> vec4<f32> { return st_uniforms.i_date; }
 "#;
 
 /// The hidden entry module `package::main`.
-pub const MAIN_MODULE: &str = r#"import package::shadertoy::FullscreenVertexOutput;
+pub(crate) const MAIN_MODULE: &str = r#"import package::shadertoy::FullscreenVertexOutput;
 import package::user::main_image;
 
 @fragment

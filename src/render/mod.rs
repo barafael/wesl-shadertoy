@@ -8,7 +8,8 @@ use bevy::render::RenderApp;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::ShaderType;
 
-pub use fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin, ShaderToyFragment};
+pub use fullscreen_material::ShaderToyFragment;
+use fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin};
 
 /// Per-frame shadertoy uniforms, extracted to the render world as a dynamic
 /// uniform buffer bound at `@group(0) @binding(2)`.

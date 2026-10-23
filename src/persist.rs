@@ -11,9 +11,9 @@
 use bevy_egui::egui::Context;
 
 #[cfg(target_arch = "wasm32")]
-pub const DOC_KEY: &str = "wesl-shadertoy.doc";
+const DOC_KEY: &str = "wesl-shadertoy.doc";
 #[cfg(target_arch = "wasm32")]
-pub const SETTINGS_KEY: &str = "wesl-shadertoy.settings";
+const SETTINGS_KEY: &str = "wesl-shadertoy.settings";
 
 #[cfg(target_arch = "wasm32")]
 fn local_storage() -> Option<web_sys::Storage> {

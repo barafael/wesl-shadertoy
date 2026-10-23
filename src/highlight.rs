@@ -125,15 +125,6 @@ const BUILTINS: &[&str] = &[
     "length",
     "log",
     "log2",
-    "mat2x2",
-    "mat2x3",
-    "mat2x4",
-    "mat3x2",
-    "mat3x3",
-    "mat3x4",
-    "mat4x2",
-    "mat4x3",
-    "mat4x4",
     "max",
     "min",
     "mix",
@@ -186,16 +177,15 @@ const BUILTINS: &[&str] = &[
     "workgroupBarrier",
     "workgroupMemoryBarrier",
     "workgroupUniformLoad",
-    // vector/matrix constructors that read like types but are used like calls
+    // Vector constructors that read like types but are used like calls. (The
+    // scalar and matrix constructors are already covered by `TYPES`, which
+    // `classify_word` checks first.)
     "vec2",
     "vec3",
     "vec4",
     "bool2",
     "bool3",
     "bool4",
-    "i32",
-    "u32",
-    "f32",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
