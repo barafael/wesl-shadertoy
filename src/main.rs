@@ -67,7 +67,10 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .add_systems(Startup, setup)
-        .add_systems(Update, (update_uniforms, compile_and_apply).chain())
+        .add_systems(
+            Update,
+            (install_fonts, (update_uniforms, compile_and_apply).chain()),
+        )
         .add_systems(EguiPrimaryContextPass, ui)
         .run();
 }
@@ -252,6 +255,37 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
 
     // Compile whatever is in the editor on the first frame.
     app.run.0 = true;
+}
+
+/// Embed the Lucide icon font (bundled by the `lucide-icons` crate) as the
+/// last fallback of the proportional family. The toolbar and status bar use
+/// Lucide's private-use-area codepoints, which no system font carries, so
+/// this is what makes the icons render identically on every platform.
+/// Runs in Update (once) because bevy_egui only creates the primary context
+/// after it first sees a camera, which is too late for a Startup system.
+fn install_fonts(mut contexts: EguiContexts, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    ctx.set_fonts(lucide_fonts());
+    *done = true;
+}
+
+/// egui's default fonts plus the Lucide icon font as the final proportional
+/// fallback (the font behind [`icon`]).
+fn lucide_fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "lucide".to_owned(),
+        egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES).into(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("lucide".to_owned());
+    fonts
 }
 
 /// Everything [`update_uniforms`] reads or writes, bundled into one parameter.
@@ -466,10 +500,18 @@ fn ui(mut p: UiParams) {
                 p.run.0 = true;
                 p.state.pending_run = None;
             }
-            let pause_label = if p.state.paused { "⏸" } else { "▶︎" };
+            let pause_label = if p.state.paused {
+                icon(lucide_icons::Icon::Pause)
+            } else {
+                icon(lucide_icons::Icon::Play)
+            };
             ui.toggle_value(&mut p.state.paused, pause_label)
                 .on_hover_text("Pause / resume the clock");
-            if ui.button("⟲").on_hover_text("Reset time").clicked() {
+            if ui
+                .button(icon(lucide_icons::Icon::RotateCcw))
+                .on_hover_text("Reset time")
+                .clicked()
+            {
                 p.state.time = 0.0;
             }
             ui.add(
@@ -504,7 +546,7 @@ fn ui(mut p: UiParams) {
             ui.separator();
             ui.toggle_value(&mut p.wins.editor, "Code");
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
-            ui.toggle_value(&mut p.wins.settings, "⚙")
+            ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
                 .on_hover_text("Settings");
             ui.toggle_value(&mut p.wins.about, "?")
                 .on_hover_text("About");
@@ -519,7 +561,10 @@ fn ui(mut p: UiParams) {
             if let Some(err) = &p.status.error {
                 let summary = err.lines().next().unwrap_or("error").to_string();
                 if ui
-                    .selectable_label(p.wins.errors_expanded, "✗ compile failed")
+                    .selectable_label(
+                        p.wins.errors_expanded,
+                        format!("{} compile failed", icon(lucide_icons::Icon::CircleX)),
+                    )
                     .on_hover_text("The previous shader keeps running")
                     .clicked()
                 {
@@ -535,8 +580,11 @@ fn ui(mut p: UiParams) {
                 ui.label(egui::RichText::new(note.clone()).color(color));
             } else if let Some(ms) = p.status.last_ms {
                 ui.label(
-                    egui::RichText::new(format!("✓ compiled in {ms:.1} ms"))
-                        .color(p.settings.theme.ok_color()),
+                    egui::RichText::new(format!(
+                        "{} compiled in {ms:.1} ms",
+                        icon(lucide_icons::Icon::Check)
+                    ))
+                    .color(p.settings.theme.ok_color()),
                 );
             } else {
                 ui.label("not compiled yet");
@@ -689,6 +737,12 @@ fn random_preset() -> &'static presets::Preset {
     &presets::ALL[idx]
 }
 
+/// A Lucide icon as a one-char string; [`install_fonts`] registers the font
+/// that maps these private-use codepoints to glyphs.
+fn icon(i: lucide_icons::Icon) -> String {
+    char::from(i).to_string()
+}
+
 /// A label in a fixed-width slot, so changing digits never reflows the toolbar.
 fn readout(ui: &mut egui::Ui, text: String, width: f32) {
     ui.add_sized(
@@ -745,4 +799,37 @@ fn date_uniforms() -> Vec4 {
     }
     let dow = (days.rem_euclid(7) + 4) as f32 % 7.0; // 1970-01-01 was a Thursday
     Vec4::new(seconds_of_day as f32, month as f32, dow, day_of_year as f32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The toolbar and status bar render Lucide icons as private-use-area
+    /// codepoints; guard that the font setup behind [`install_fonts`] can
+    /// actually resolve every icon we use, or they would show as tofu.
+    #[test]
+    fn lucide_icons_resolve_in_proportional_fonts() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(lucide_fonts());
+        // Fonts only exist after the first pass (pixels-per-point is set there).
+        ctx.run_ui(egui::RawInput::default(), |_ui| {})
+            .drop_without_applying_deltas();
+        let font_id = egui::FontId::proportional(14.0);
+        for icon in [
+            lucide_icons::Icon::Play,
+            lucide_icons::Icon::Pause,
+            lucide_icons::Icon::RotateCcw,
+            lucide_icons::Icon::Settings,
+            lucide_icons::Icon::CircleX,
+            lucide_icons::Icon::Check,
+        ] {
+            let ch = char::from(icon);
+            assert!(
+                ctx.fonts_mut(|f| f.has_glyph(&font_id, ch)),
+                "lucide glyph {icon:?} (U+{:04X}) missing from the proportional fallback chain",
+                ch as u32
+            );
+        }
+    }
 }

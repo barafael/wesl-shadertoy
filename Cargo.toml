@@ -34,6 +34,7 @@ wesl = "0.6"
 # Same major as the naga inside wgpu 30 (Bevy 0.20's renderer), so anything
 # we validate here is accepted by the pipeline cache there.
 naga = { version = "30", features = ["wgsl-in"] }
+lucide-icons = "1.61.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Fast native rebuilds (same trick as omdurman's app crate).
