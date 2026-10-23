@@ -12,15 +12,16 @@ Runs natively and in the browser as WASM.
 | What | How |
 | --- | --- |
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
+| Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
 | Pause / resume the clock, reset, speed | toolbar |
-| Presets | `preset:` combobox — 11 shadertoy classics (Plasma, Star Nest, Menger, …) |
-| Windows | `Code`, `WGSL` (composed output) toggles |
+| Presets | `preset:` combobox — 12 shadertoy classics (Plasma, Star Nest, Menger, …); fresh sessions roll a random one |
+| Windows | `Code`, `WGSL` (composed output) toggles; `⚙` settings (Gruvbox dark/light), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
 
 The document auto-saves to `localStorage` (browser builds) and is restored on
-load. Compile errors appear in the bottom panel — the last good shader keeps
-running while you fix them.
+load, along with your theme. Compile errors appear in the bottom panel — the
+last good shader keeps running while you fix them.
 
 ## The shader dialect
 
@@ -75,8 +76,10 @@ blanks the screen.
 
 ```
 src/
-  main.rs       app wiring, resources, per-frame uniforms, egui UI, persistence
+  main.rs       app wiring, resources, per-frame uniforms, egui UI
   compile.rs    WESL link + naga validate (the shader contract above)
+  persist.rs    document/settings IO: localStorage, shader.wesl, file picker
+  theme.rs      Gruvbox egui Visuals + per-theme syntax palettes (dark/light)
   render/
     mod.rs                    ShaderToyUniform/Fragment components + plugin
     fullscreen_material.rs    vendored from Bevy 0.20, modified to rebuild
@@ -84,7 +87,7 @@ src/
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
   editor.rs     the code editor: TextEdit with a custom layouter that paints
                 the highlighted job, line-number gutter, Tab/Shift-Tab
-  presets.rs    11 compile-checked shadertoy classic presets
+  presets.rs    12 compile-checked shadertoy classic presets
 ```
 
 Rendering is the vendored Bevy `fullscreen_material` plugin: the user shader
