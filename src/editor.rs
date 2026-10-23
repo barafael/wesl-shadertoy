@@ -24,8 +24,8 @@ use bevy_egui::egui::text::LayoutJob;
 use bevy_egui::egui::text_selection::CCursorRange;
 use bevy_egui::egui::widgets::text_edit::TextEditState;
 use bevy_egui::egui::{
-    Align, Context, FontId, Frame, Galley, Id, Key, Label, Layout, Margin, Modifiers, ScrollArea,
-    Sense, TextBuffer, TextEdit, TextWrapMode, Ui, Vec2, pos2,
+    Align, Color32, Context, FontId, Frame, Galley, Id, Key, Label, Layout, Margin, Modifiers,
+    ScrollArea, Sense, TextBuffer, TextEdit, TextWrapMode, Ui, Vec2, pos2,
 };
 
 use crate::highlight::highlight_job;
@@ -62,6 +62,19 @@ struct CachedGutter {
     lines: usize,
     theme: Theme,
     galley: Arc<Galley>,
+}
+
+/// Lay out the line-number column, one number per row. Shared by both
+/// gutters so they cannot drift apart (a `collect::<String>()` once stacked
+/// every number on the first row of the viewer gutter).
+fn layout_gutter(ctx: &Context, font_id: &FontId, color: Color32, lines: usize) -> Arc<Galley> {
+    let gutter_text: String = (1..=lines)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut gutter_job = LayoutJob::simple(gutter_text, font_id.clone(), color, f32::INFINITY);
+    gutter_job.wrap.max_width = f32::INFINITY;
+    ctx.fonts_mut(|f| f.layout_job(gutter_job))
 }
 
 /// Stable id used to remember which `TextEdit` id the editor got last frame
@@ -137,18 +150,12 @@ pub fn show_code_editor(
                 {
                     Some(galley) => galley,
                     None => {
-                        let gutter_text: String = (1..=display_lines)
-                            .map(|i| i.to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let mut gutter_job = LayoutJob::simple(
-                            gutter_text,
-                            font_id.clone(),
+                        let galley = layout_gutter(
+                            &ctx,
+                            &font_id,
                             ui.visuals().weak_text_color(),
-                            f32::INFINITY,
+                            display_lines,
                         );
-                        gutter_job.wrap.max_width = f32::INFINITY;
-                        let galley = ctx.fonts_mut(|f| f.layout_job(gutter_job));
                         cache.editor_gutter = Some(CachedGutter {
                             lines: display_lines,
                             theme,
@@ -246,16 +253,12 @@ pub fn show_code_view(ui: &mut Ui, text: &str, theme: Theme, cache: &mut Highlig
                 {
                     Some(galley) => galley,
                     None => {
-                        let gutter_text: String =
-                            (1..=display_lines).map(|i| i.to_string()).collect();
-                        let mut gutter_job = LayoutJob::simple(
-                            gutter_text,
-                            font_id.clone(),
+                        let galley = layout_gutter(
+                            &ctx,
+                            &font_id,
                             ui.visuals().weak_text_color(),
-                            f32::INFINITY,
+                            display_lines,
                         );
-                        gutter_job.wrap.max_width = f32::INFINITY;
-                        let galley = ctx.fonts_mut(|f| f.layout_job(gutter_job));
                         cache.viewer_gutter = Some(CachedGutter {
                             lines: display_lines,
                             theme,
@@ -377,7 +380,8 @@ mod tests {
         let cached = cache.editor.as_ref().expect("editor galley cached");
         assert_eq!(cached.galley.text(), text.as_str());
         assert!(cached.galley.rows.len() > 10);
-        assert!(cache.editor_gutter.is_some());
+        let gutter = cache.editor_gutter.as_ref().expect("editor gutter cached");
+        assert_eq!(gutter.galley.rows.len(), text.matches('\n').count() + 1);
     }
 
     #[test]
@@ -393,6 +397,9 @@ mod tests {
         }
         let cached = cache.viewer.as_ref().expect("viewer job cached");
         assert_eq!(cached.job.text, text);
-        assert!(cache.viewer_gutter.is_some());
+        let gutter = cache.viewer_gutter.as_ref().expect("viewer gutter cached");
+        // One row per line — the original bug stacked every number on row 1.
+        assert_eq!(gutter.galley.rows.len(), text.matches('\n').count() + 1);
+        assert!(gutter.galley.text().starts_with("1\n2\n3\n"));
     }
 }
