@@ -26,7 +26,7 @@ use bevy::ecs::system::SystemParam;
 // web-time under the hood on the web, std elsewhere.
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
-use bevy::window::PresentMode;
+use bevy::window::{PresentMode, PrimaryWindow};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use render::{ShaderToyFragment, ShaderToyRenderPlugin, ShaderToyUniform};
@@ -250,7 +250,7 @@ struct UniformParams<'w, 's> {
     contexts: EguiContexts<'w, 's>,
     state: ResMut<'w, ShaderToyState>,
     time: Res<'w, Time>,
-    windows: Query<'w, 's, &'static Window>,
+    windows: Single<'w, 's, &'static Window, With<PrimaryWindow>>,
     uniforms: Single<'w, 's, &'static mut ShaderToyUniform>,
 }
 
@@ -270,19 +270,12 @@ fn update_uniforms(mut p: UniformParams) {
         };
     }
 
-    let resolution = p
-        .windows
-        .iter()
-        .next()
-        .map(|w| {
-            Vec4::new(
-                w.resolution.physical_width() as f32,
-                w.resolution.physical_height() as f32,
-                1.0,
-                0.0,
-            )
-        })
-        .unwrap_or(Vec4::new(1.0, 1.0, 1.0, 0.0));
+    let resolution = Vec4::new(
+        p.windows.resolution.physical_width() as f32,
+        p.windows.resolution.physical_height() as f32,
+        1.0,
+        0.0,
+    );
 
     // --- iMouse, via egui's pointer (logical points -> physical pixels).
     // WGSL `@builtin(position)` has its origin top-left, same as egui, so no
