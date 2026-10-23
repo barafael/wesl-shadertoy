@@ -39,6 +39,11 @@ lucide-icons = "1.61.0"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Fast native rebuilds (same trick as omdurman's app crate).
 bevy = { version = "0.20", features = ["dynamic_linking"] }
+# Offscreen `--render` smoke shots (src/headless.rs): windowless wgpu, a tiny
+# block_on for the async adapter/device requests, and PNG encoding.
+wgpu = "30"
+pollster = "0.4"
+png = "0.17"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = [

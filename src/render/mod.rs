@@ -31,8 +31,23 @@ pub struct ShaderToyUniform {
     pub resolution: Vec4,
     /// Shadertoy-style mouse (see `i_mouse` in the environment module).
     pub mouse: Vec4,
-    /// x: seconds since midnight, y: month, z: day of week (0 = Sunday), w: day of year.
+    /// x: year, y: month (1-12), z: day of month, w: seconds since midnight.
     pub date: Vec4,
+    /// Audio sample rate in Hz (44100; there is no audio input).
+    pub sample_rate: f32,
+    /// Padding so `channel_time` starts on a 16-byte boundary (the WGSL side
+    /// spells this gap as three scalar pads, not a `vec3`, whose align-16
+    /// rule would insert a different implicit gap).
+    pub _pad2: f32,
+    /// More padding.
+    pub _pad3: f32,
+    /// More padding.
+    pub _pad4: f32,
+    /// Playback time of buffer channels A..D (0.0 while a channel is unused).
+    pub channel_time: Vec4,
+    /// Size of buffer channels A..D in pixels (zero while a channel is unused).
+    /// The WGSL side reads these as `vec3` (z = 0 for 2D buffers).
+    pub channel_resolution: [Vec4; 4],
 }
 
 impl FullscreenMaterial for ShaderToyUniform {

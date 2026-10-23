@@ -222,11 +222,11 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let uv = (frag_coord - 0.5 * res) / res.y;
     let t = i_time();
 
-    // Scroll the noise toward -y (screen up) so the flames rise.
-    let q = vec2<f32>(uv.x, uv.y + t * 0.9);
+    // Scroll the noise toward +y (screen up) so the flames rise.
+    let q = vec2<f32>(uv.x, uv.y - t * 0.9);
     var f = fbm(q * 3.5);
     // Hot at the bottom of the screen, dying out toward the top.
-    f = f * clamp((uv.y + 0.5) * 2.0, 0.0, 1.0);
+    f = f * clamp((0.5 - uv.y) * 2.0, 0.0, 1.0);
     f = clamp(f * 2.4 - 0.55, 0.0, 1.0);
 
     var col = mix(vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.9, 0.15, 0.0), smoothstep(0.0, 0.5, f));

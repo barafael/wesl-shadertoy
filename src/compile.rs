@@ -10,7 +10,8 @@
 //!   (`i_time()`, `i_resolution()`, ...).
 //! * `package::main` — the entry module. It imports `user::main_image` and
 //!   defines the `@fragment fn fragment` entry point that the pipeline looks
-//!   for.
+//!   for, flipping `@builtin(position)` to shadertoy's bottom-left `fragCoord`
+//!   origin on the way in.
 //!
 //! The composed WGSL is then parsed and validated with `naga` (same major
 //! version as the wgpu inside Bevy 0.20) so type errors in user code are
@@ -40,6 +41,12 @@ struct ShaderToyUniforms {
     i_resolution: vec4<f32>,
     i_mouse: vec4<f32>,
     i_date: vec4<f32>,
+    i_sample_rate: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+    i_channel_time: vec4<f32>,
+    i_channel_resolution: array<vec4<f32>, 4>,
 }
 
 @group(0) @binding(2) var<uniform> st_uniforms: ShaderToyUniforms;
@@ -53,19 +60,31 @@ fn i_frame() -> u32 { return st_uniforms.i_frame; }
 /// Viewport size in pixels (z = 1.0).
 fn i_resolution() -> vec3<f32> { return st_uniforms.i_resolution.xyz; }
 /// xy: pointer position while dragging (else last position),
-/// zw: click position; positive while a button is held, negative after release.
+/// zw: click position; positive while a button is held, negative after
+/// release. Origin bottom-left, like shadertoy's iMouse.
 fn i_mouse() -> vec4<f32> { return st_uniforms.i_mouse; }
-/// x: seconds since midnight, y: month, z: day of week (0 = Sunday), w: day of year.
+/// x: year, y: month (1-12), z: day of month, w: seconds since midnight.
 fn i_date() -> vec4<f32> { return st_uniforms.i_date; }
+/// Audio sample rate in Hz. Fixed at 44100 — there is no audio input.
+fn i_sample_rate() -> f32 { return st_uniforms.i_sample_rate; }
+/// Playback time of buffer channel i (0..3); 0.0 while the channel is unused.
+fn i_channel_time(i: u32) -> f32 { return st_uniforms.i_channel_time[i]; }
+/// Size of buffer channel i (0..3) in pixels (z = 0 for 2D buffers);
+/// (0, 0, 0) while the channel is unused.
+fn i_channel_resolution(i: u32) -> vec3<f32> { return st_uniforms.i_channel_resolution[i].xyz; }
 "#;
 
 /// The hidden entry module `package::main`.
 pub(crate) const MAIN_MODULE: &str = r#"import package::shadertoy::FullscreenVertexOutput;
+import package::shadertoy::i_resolution;
 import package::user::main_image;
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    return main_image(in.position.xy);
+    // shadertoy's fragCoord has its origin bottom-left; wgpu's
+    // @builtin(position) is top-left, so flip y to match shadertoy.
+    let p = in.position.xy;
+    return main_image(vec2<f32>(p.x, i_resolution().y - p.y));
 }
 "#;
 
@@ -149,6 +168,49 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         let wgsl = compile_user_shader(src).expect("should compile");
         assert!(wgsl.contains("fragment"), "entry point missing:\n{wgsl}");
         assert!(wgsl.contains("@group(0) @binding(2)"));
+        // frag_coord must arrive with shadertoy's bottom-left origin.
+        assert!(wgsl.contains("i_resolution().y - p.y"), "no y-flip:\n{wgsl}");
+    }
+
+    #[test]
+    fn compiles_channel_and_clock_accessors() {
+        let src = r#"
+import package::shadertoy::i_sample_rate;
+import package::shadertoy::i_channel_time;
+import package::shadertoy::i_channel_resolution;
+import package::shadertoy::i_date;
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    var acc = i_sample_rate() + i_date().w * 1e-5;
+    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+        acc = acc + i_channel_time(i) + i_channel_resolution(i).x;
+    }
+    return vec4<f32>(vec3<f32>(acc), 1.0);
+}
+"#;
+        compile_user_shader(src).expect("should compile");
+    }
+
+    /// The Rust uniform struct and the WGSL `ShaderToyUniforms` struct are
+    /// maintained on both sides of FFI-bytes; guard that their sizes agree.
+    #[test]
+    fn rust_uniform_struct_matches_wgsl_layout() {
+        use bevy::render::render_resource::ShaderType;
+
+        use crate::render::ShaderToyUniform;
+
+        let module = naga::front::wgsl::parse_str(SHADERTOY_MODULE)
+            .expect("shadertoy module parses");
+        let handle = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("ShaderToyUniforms"))
+            .map(|(h, _)| h)
+            .expect("ShaderToyUniforms present");
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).unwrap();
+        let wgsl_size = u64::from(layouter[handle].size);
+        assert_eq!(wgsl_size, ShaderToyUniform::min_size().get());
     }
 
     #[test]

@@ -11,6 +11,8 @@
 
 mod compile;
 mod editor;
+#[cfg(not(target_arch = "wasm32"))]
+mod headless;
 mod highlight;
 mod persist;
 mod presets;
@@ -36,7 +38,20 @@ use theme::Theme;
 /// keystrokes compiles once, not once per character).
 const AUTO_RUN_DELAY: f64 = 0.25;
 
+/// Value reported by `i_sample_rate()`. shadertoy reports the audio sample
+/// rate; there is no audio here, so we report the conventional 44.1 kHz.
+const SAMPLE_RATE_HZ: f32 = 44100.0;
+
 fn main() {
+    // Native-only offscreen smoke render; never touches the display server.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--render") {
+            headless::run_render_cli(&args);
+            return;
+        }
+    }
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -223,11 +238,9 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
             app.state.last_preset = "saved";
         }
         None => {
-            let preset = if random {
-                random_preset()
-            } else {
-                presets::DEFAULT
-            };
+            let preset = cli_preset()
+                .or(random.then(random_preset))
+                .unwrap_or(presets::DEFAULT);
             app.doc.text = preset.code.to_string();
             app.state.last_preset = preset.name;
         }
@@ -322,8 +335,9 @@ fn update_uniforms(mut p: UniformParams) {
     );
 
     // --- iMouse, via egui's pointer (logical points -> physical pixels).
-    // WGSL `@builtin(position)` has its origin top-left, same as egui, so no
-    // y-flip is needed. Clicks that start on an egui widget are ignored.
+    // egui's pointer origin is top-left; shadertoy's iMouse is bottom-left,
+    // so y is flipped to match (the `package::main` wrapper flips
+    // frag_coord the same way). Clicks on an egui widget are ignored.
     if let Ok(ctx) = p.contexts.ctx_mut() {
         let ppp = ctx.pixels_per_point();
         // A pointer over an egui window/panel "interacts" with that area's
@@ -341,15 +355,16 @@ fn update_uniforms(mut p: UniformParams) {
 
         if let Some(pos) = hover {
             let px = pos * ppp;
+            let py = resolution.y - px.y;
             if pressed && !over_ui {
-                p.state.mouse = Vec4::new(px.x, px.y, px.x, px.y);
+                p.state.mouse = Vec4::new(px.x, py, px.x, py);
                 p.state.mouse_held = true;
             } else if held && p.state.mouse_held {
-                p.state.mouse = Vec4::new(px.x, px.y, p.state.mouse.z, p.state.mouse.w);
+                p.state.mouse = Vec4::new(px.x, py, p.state.mouse.z, p.state.mouse.w);
             }
             if released && p.state.mouse_held {
                 p.state.mouse_held = false;
-                p.state.mouse = Vec4::new(px.x, px.y, -p.state.mouse.z, -p.state.mouse.w);
+                p.state.mouse = Vec4::new(px.x, py, -p.state.mouse.z, -p.state.mouse.w);
             }
         }
     }
@@ -360,6 +375,11 @@ fn update_uniforms(mut p: UniformParams) {
     p.uniforms.resolution = resolution;
     p.uniforms.mouse = p.state.mouse;
     p.uniforms.date = date_uniforms();
+    p.uniforms.sample_rate = SAMPLE_RATE_HZ;
+    // Buffer channels arrive with the multi-pass renderer; until then every
+    // channel is unused, which shadertoy reports as time 0 / resolution 0.
+    p.uniforms.channel_time = Vec4::ZERO;
+    p.uniforms.channel_resolution = [Vec4::ZERO; 4];
 }
 
 /// Everything [`compile_and_apply`] reads or writes, bundled into one parameter.
@@ -727,6 +747,30 @@ fn open_into(
     status.note = Some((format!("opened {name}"), true));
 }
 
+/// Native-only: `--preset <name>` picks the startup preset (case-insensitive
+/// match against [`presets::ALL`]), so scripted screenshot runs can pin a
+/// deterministic shader. Web builds have no argv and always return `None`.
+fn cli_preset() -> Option<&'static presets::Preset> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut args = std::env::args();
+        while let Some(arg) = args.next() {
+            if arg == "--preset"
+                && let Some(name) = args.next()
+            {
+                return presets::ALL
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(&name));
+            }
+        }
+        None
+    }
+}
+
 /// Time-seeded xorshift pick — no `rand` dependency for one roll per start.
 fn random_preset() -> &'static presets::Preset {
     let mut x = (now_epoch_secs() * 1.0e6) as u64;
@@ -784,21 +828,20 @@ pub(crate) fn now_epoch_secs() -> f64 {
     }
 }
 
-/// x: seconds since midnight, y: month, z: day of week (0 = Sunday),
-/// w: day of year. (Matches the `i_date` docs in the environment module.)
+/// x: year, y: month (1-12), z: day of month, w: seconds since midnight.
+/// (shadertoy's `iDate` convention; matches the `i_date` docs in the
+/// environment module.)
 fn date_uniforms() -> Vec4 {
     let secs = now_epoch_secs();
     let days = (secs / 86400.0).floor() as i64;
     let seconds_of_day = secs - days as f64 * 86400.0;
     let (year, month, day) = civil_from_days(days);
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    const CUM: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let mut day_of_year = CUM[(month as usize - 1).min(11)] + day;
-    if leap && month > 2 {
-        day_of_year += 1;
-    }
-    let dow = (days.rem_euclid(7) + 4) as f32 % 7.0; // 1970-01-01 was a Thursday
-    Vec4::new(seconds_of_day as f32, month as f32, dow, day_of_year as f32)
+    Vec4::new(
+        year as f32,
+        month as f32,
+        day as f32,
+        seconds_of_day as f32,
+    )
 }
 
 #[cfg(test)]
