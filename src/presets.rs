@@ -1,6 +1,10 @@
 //! Built-in example shaders, written in the wesl-shadertoy dialect: the
 //! editor text is the `package::user` module, so each preset starts with the
 //! `import package::shadertoy::...` lines that pull in the uniforms it uses.
+//!
+//! The hand-written examples live below as raw strings; the shadertoy ports
+//! live as standalone files in `presets/` (each carries its own attribution
+//! header) and are pulled in with `include_str!`.
 
 pub struct Preset {
     pub name: &'static str,
@@ -590,6 +594,14 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 }
 "#;
 
+// Ports of classic shadertoy shaders, adapted to this dialect. The sources
+// live in `presets/*.wgsl` so they can be edited and diffed as plain WGSL.
+const SUNSET: &str = include_str!("../presets/sunset.wgsl");
+const FIRE2: &str = include_str!("../presets/fire2.wgsl");
+const SEASCAPE: &str = include_str!("../presets/seascape.wgsl");
+const PROTEAN_CLOUDS: &str = include_str!("../presets/protean_clouds.wgsl");
+const SOUL: &str = include_str!("../presets/soul.wgsl");
+
 pub const ALL: &[Preset] = &[
     Preset {
         name: "Plasma",
@@ -638,6 +650,26 @@ pub const ALL: &[Preset] = &[
     Preset {
         name: "Perlin",
         code: PERLIN,
+    },
+    Preset {
+        name: "Sunset",
+        code: SUNSET,
+    },
+    Preset {
+        name: "Fire2",
+        code: FIRE2,
+    },
+    Preset {
+        name: "Seascape",
+        code: SEASCAPE,
+    },
+    Preset {
+        name: "Protean Clouds",
+        code: PROTEAN_CLOUDS,
+    },
+    Preset {
+        name: "Soul",
+        code: SOUL,
     },
 ];
 
