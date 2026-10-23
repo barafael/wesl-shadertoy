@@ -208,19 +208,26 @@ pub struct FullscreenMaterialPipelineId<T: FullscreenMaterial>(
     PhantomData<T>,
 );
 
-fn prepare_fullscreen_material_pipelines<T: FullscreenMaterial>(
+/// View query data for [`prepare_fullscreen_material_pipelines`], extracted
+/// into an alias to keep the system signature readable (upstream Bevy has the
+/// same tuple inline; this is a deviation only to silence `type_complexity`).
+type PipelineViews<'w, 's, T> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static ExtractedView,
+        Option<&'static T>,
+        Option<&'static ShaderToyFragment>,
+    ),
+    With<ExtractedCamera>,
+>;
+
+fn prepare_fullscreen_material_pipelines<'w, 's, T: FullscreenMaterial>(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
     mut pipeline: ResMut<FullscreenMaterialPipeline<T>>,
-    views: Query<
-        (
-            Entity,
-            &ExtractedView,
-            Option<&T>,
-            Option<&ShaderToyFragment>,
-        ),
-        With<ExtractedCamera>,
-    >,
+    views: PipelineViews<'w, 's, T>,
 ) -> Result<(), BevyError> {
     for (entity, view, material, fragment) in &views {
         let (Some(_material), Some(fragment)) = (material, fragment) else {
@@ -270,15 +277,23 @@ pub struct FullscreenMaterialBindGroup<T: FullscreenMaterial> {
     _marker: PhantomData<T>,
 }
 
-/// Prepare the bind groups for both main textures for all views that have a [`FullscreenMaterial`]
-fn prepare_bind_groups<T: FullscreenMaterial>(
-    mut commands: Commands,
-    mut view: Query<(
+/// View query data for [`prepare_bind_groups`] (see [`PipelineViews`] for why
+/// these queries are aliased).
+type BindGroupViews<'w, 's, T> = Query<
+    'w,
+    's,
+    (
         Entity,
-        &ViewTarget,
-        Option<&mut FullscreenMaterialBindGroup<T>>,
-        Option<&T>,
-    )>,
+        &'static ViewTarget,
+        Option<&'static mut FullscreenMaterialBindGroup<T>>,
+        Option<&'static T>,
+    ),
+>;
+
+/// Prepare the bind groups for both main textures for all views that have a [`FullscreenMaterial`]
+fn prepare_bind_groups<'w, 's, T: FullscreenMaterial>(
+    mut commands: Commands,
+    mut view: BindGroupViews<'w, 's, T>,
     fullscreen_pipeline: Option<Res<FullscreenMaterialPipeline<T>>>,
     pipeline_cache: Res<PipelineCache>,
     data_uniforms: Res<ComponentUniforms<T>>,
@@ -327,13 +342,21 @@ fn prepare_bind_groups<T: FullscreenMaterial>(
     }
 }
 
-pub fn fullscreen_material_system<T: FullscreenMaterial>(
-    view: ViewQuery<(
-        &ViewTarget,
-        &DynamicUniformIndex<T>,
-        &FullscreenMaterialBindGroup<T>,
-        &FullscreenMaterialPipelineId<T>,
-    )>,
+/// View query data for [`fullscreen_material_system`] (see [`PipelineViews`]
+/// for why these queries are aliased).
+type MaterialView<'w, 's, T> = ViewQuery<
+    'w,
+    's,
+    (
+        &'static ViewTarget,
+        &'static DynamicUniformIndex<T>,
+        &'static FullscreenMaterialBindGroup<T>,
+        &'static FullscreenMaterialPipelineId<T>,
+    ),
+>;
+
+pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
+    view: MaterialView<'w, 's, T>,
     pipeline_cache: Res<PipelineCache>,
     mut ctx: RenderContext,
     mut pass_label: Local<String>,

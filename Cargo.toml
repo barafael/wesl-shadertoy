@@ -27,9 +27,6 @@ wesl = "0.6"
 # we validate here is accepted by the pipeline cache there.
 naga = { version = "30", features = ["wgsl-in"] }
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Fast native rebuilds (same trick as omdurman's app crate).
 bevy = { version = "0.20", features = ["dynamic_linking"] }

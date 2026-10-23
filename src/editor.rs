@@ -1,24 +1,26 @@
 //! A code editor for egui with syntax highlighting.
 //!
-//! egui has no built-in code editor, so this composes two widgets:
+//! egui has no built-in code editor, so this builds one from `TextEdit`:
 //!
-//! 1. a [`LayoutJob`] galley produced by [`crate::highlight`] is painted at
-//!    the exact position where the text edit will lay out its text, and
-//! 2. an [`egui::TextEdit`] renders on top with a fully transparent text
-//!    color, providing the cursor, selection, IME and editing behavior.
+//! * a custom `layouter` re-highlights the buffer into a [`LayoutJob`] on every
+//!   layout pass, so the `TextEdit` paints the colored text *itself* — the
+//!   cursor and selection rectangles are computed from the very same galley
+//!   whose glyphs are on screen and can never drift off them;
+//! * wrapping is disabled in the job: the editor scrolls horizontally instead,
+//!   which keeps the painted line-number gutter aligned with the code rows.
 //!
-//! Because both layers use the same `FontId`, the same wrap width
-//! (`f32::INFINITY`, i.e. no wrapping) and the same margin, the glyphs line up
-//! pixel-perfectly. A line-number gutter is painted as a second galley with
-//! the same row height.
+//! The read-only WGSL viewer uses the same tokenizer, painted as a selectable
+//! [`Label`] with [`TextWrapMode::Extend`] for the same reason.
+
+use std::sync::Arc;
 
 use bevy_egui::egui::text::CCursor;
 use bevy_egui::egui::text::LayoutJob;
 use bevy_egui::egui::text_selection::CCursorRange;
 use bevy_egui::egui::widgets::text_edit::TextEditState;
 use bevy_egui::egui::{
-    Align, Color32, Context, FontId, Frame, Id, Key, Label, Layout, Margin, Modifiers, ScrollArea,
-    Sense, TextEdit, Ui, Vec2, pos2,
+    Align, Context, FontId, Frame, Galley, Id, Key, Label, Layout, Margin, Modifiers, ScrollArea,
+    Sense, TextBuffer, TextEdit, TextWrapMode, Ui, Vec2, pos2,
 };
 
 use crate::highlight::highlight_job;
@@ -105,20 +107,23 @@ pub fn show_code_editor(ui: &mut Ui, text: &mut String) -> EditorOutput {
                     ui.visuals().weak_text_color(),
                 );
 
-                // --- highlighted text behind the text edit ---
-                let job = highlight_job(text, font_id.clone(), default_color);
-                let galley = ctx.fonts_mut(|f| f.layout_job(job));
-                let text_pos = ui.cursor().min + Vec2::new(margin.left as f32, margin.top as f32);
-                ui.painter().galley(text_pos, galley, default_color);
-
-                // --- the actual (transparent-text) editor on top ---
+                // --- the editor: TextEdit paints the highlighted job itself,
+                // so cursor and selection always sit on the visible glyphs ---
+                let mut layouter =
+                    |ui: &Ui, buf: &dyn TextBuffer, _wrap_width: f32| -> Arc<Galley> {
+                        let mut job = highlight_job(buf.as_str(), font_id.clone(), default_color);
+                        // No wrapping: horizontal scroll keeps gutter rows aligned.
+                        job.wrap.max_width = f32::INFINITY;
+                        job.keep_trailing_whitespace = true;
+                        ui.fonts_mut(|f| f.layout_job(job))
+                    };
                 let response = ui.add(
                     TextEdit::multiline(text)
                         .font(font_id.clone())
                         .margin(margin)
                         .desired_width(f32::INFINITY)
                         .frame(Frame::NONE)
-                        .text_color(Color32::TRANSPARENT),
+                        .layouter(&mut layouter),
                 );
                 changed = response.changed();
 
@@ -132,8 +137,10 @@ pub fn show_code_editor(ui: &mut Ui, text: &mut String) -> EditorOutput {
 /// Show a read-only, syntax-highlighted code view with a line-number gutter.
 ///
 /// This is the generated-WGSL viewer: same tokenizer and colors as the
-/// editor, but the text is painted as selectable [`Label`] galleys instead of
-/// a `TextEdit`, since there is nothing to edit.
+/// editor, but the text is painted as a selectable [`Label`] instead of a
+/// `TextEdit`, since there is nothing to edit. `TextWrapMode::Extend` is what
+/// keeps long composed-WGSL lines on one row (a plain Label would wrap them
+/// at the window width and break the gutter alignment).
 pub fn show_code_view(ui: &mut Ui, text: &str) {
     let ctx = ui.ctx().clone();
     let font_id = FontId::monospace(13.0);
@@ -176,7 +183,11 @@ pub fn show_code_view(ui: &mut Ui, text: &str) {
 
                 // --- highlighted code, selectable for copy-paste ---
                 let job = highlight_job(text, font_id.clone(), default_color);
-                ui.add(Label::new(job).selectable(true));
+                ui.add(
+                    Label::new(job)
+                        .selectable(true)
+                        .wrap_mode(TextWrapMode::Extend),
+                );
             });
         });
 }

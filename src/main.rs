@@ -8,14 +8,10 @@
 //! Bevy `fullscreen_material` plugin ([`render`]), which rebuilds its pipeline
 //! whenever the shader handle changes. Per-frame uniforms (iTime, iResolution,
 //! iMouse, iDate, iFrame) ride along as a dynamic uniform buffer component.
-//! The [`net`] module holds the multiplayer seams (document versioning, edit
-//! intents, transport trait) so a WebRTC session can be added without
-//! touching the editor or renderer.
 
 mod compile;
 mod editor;
 mod highlight;
-mod net;
 mod presets;
 mod render;
 
@@ -31,7 +27,6 @@ use bevy::prelude::*;
 use bevy::window::PresentMode;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
-use net::{NetTransport, SessionMessage, SessionState, diff_edit};
 use render::{ShaderToyFragment, ShaderToyRenderPlugin, ShaderToyUniform};
 
 fn main() {
@@ -42,6 +37,9 @@ fn main() {
                     primary_window: Some(Window {
                         title: "wesl-shadertoy".into(),
                         present_mode: PresentMode::AutoVsync,
+                        // On web the CSS owns the canvas box (see index.html);
+                        // let Bevy match the render buffer to it.
+                        fit_canvas_to_parent: true,
                         ..default()
                     }),
                     ..default()
@@ -60,19 +58,16 @@ fn main() {
         .init_resource::<UiWindows>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
-        .add_plugins(net::NetPlugin)
         .add_systems(Startup, setup)
         .add_systems(Update, (update_uniforms, compile_and_apply).chain())
         .add_systems(EguiPrimaryContextPass, ui)
         .run();
 }
 
-/// The shader source being edited. The single source of truth a future
-/// multiplayer session will sync (see [`net`]).
+/// The shader source being edited: the app's single source of truth.
 #[derive(Resource, Default)]
 struct ShaderDoc {
     text: String,
-    version: u64,
 }
 
 /// Playback + input state for the shadertoy clock and iMouse.
@@ -117,7 +112,6 @@ struct CurrentShader {
 struct CompileStatus {
     error: Option<String>,
     last_ms: Option<f32>,
-    ok_count: u32,
 }
 
 /// Set by the Run button / Ctrl+Enter, consumed by [`compile_and_apply`].
@@ -128,7 +122,6 @@ struct RunRequest(bool);
 struct UiWindows {
     editor: bool,
     wgsl: bool,
-    session: bool,
     errors_expanded: bool,
 }
 
@@ -137,7 +130,6 @@ impl Default for UiWindows {
         Self {
             editor: true,
             wgsl: false,
-            session: false,
             errors_expanded: true,
         }
     }
@@ -301,7 +293,6 @@ fn compile_and_apply(mut p: CompileParams) {
             let ms = started.elapsed().as_secs_f32() * 1000.0;
             p.status.error = None;
             p.status.last_ms = Some(ms);
-            p.status.ok_count += 1;
             info!("shader compiled and applied in {ms:.1} ms");
         }
         Err(e) => {
@@ -325,11 +316,9 @@ struct UiParams<'w, 's> {
     run: ResMut<'w, RunRequest>,
     wins: ResMut<'w, UiWindows>,
     current: Res<'w, CurrentShader>,
-    session: Res<'w, SessionState>,
-    transport: ResMut<'w, NetTransport>,
 }
 
-/// All egui UI: toolbar, editor window, error panel, WGSL viewer, session.
+/// All egui UI: toolbar, editor window, error panel, WGSL viewer.
 fn ui(mut p: UiParams) {
     let Ok(ctx) = p.contexts.ctx_mut() else {
         return;
@@ -354,7 +343,7 @@ fn ui(mut p: UiParams) {
     egui::Panel::top("toolbar").show(&mut root_ui, |ui| {
         ui.horizontal(|ui| {
             if ui
-                .button("▶ Run")
+                .button("Compile WESL Shader")
                 .on_hover_text("Compile & apply (Ctrl+Enter)")
                 .clicked()
             {
@@ -371,8 +360,9 @@ fn ui(mut p: UiParams) {
                     .text("speed")
                     .max_decimals(2),
             );
-            ui.label(format!("t = {:.1}s", p.state.time));
-            ui.label(format!("{:.0} fps", p.state.fps));
+            // Fixed-width slots: digit changes must not reflow the toolbar.
+            readout(ui, format!("t = {:.1}s", p.state.time), 84.0);
+            readout(ui, format!("{:.0} fps", p.state.fps), 48.0);
 
             ui.separator();
 
@@ -385,7 +375,6 @@ fn ui(mut p: UiParams) {
                             .clicked()
                         {
                             p.doc.text = preset.code.to_string();
-                            p.doc.version += 1;
                             p.state.last_preset = preset.name;
                             p.run.0 = true;
                         }
@@ -397,7 +386,6 @@ fn ui(mut p: UiParams) {
             ui.separator();
             ui.toggle_value(&mut p.wins.editor, "Code");
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
-            ui.toggle_value(&mut p.wins.session, "Session");
         });
         // Block canvas clicks through empty toolbar space.
         ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
@@ -455,24 +443,8 @@ fn ui(mut p: UiParams) {
             .default_size([640.0, 460.0])
             .open(&mut p.wins.editor)
             .show(ctx, |ui| {
-                let before = p.doc.text.clone();
                 let out = editor::show_code_editor(ui, &mut p.doc.text);
                 if out.changed {
-                    p.doc.version += 1;
-                    // Multiplayer seam: publish the edit (see net.rs).
-                    match diff_edit(p.doc.version - 1, &before, &p.doc.text) {
-                        Some(intent) => p.transport.send(SessionMessage::ShaderEdit {
-                            from: p.session.local_peer,
-                            base_version: intent.base_version,
-                            range: intent.range,
-                            insert: intent.insert,
-                        }),
-                        None => p.transport.send(SessionMessage::ShaderFull {
-                            from: p.session.local_peer,
-                            version: p.doc.version,
-                            text: p.doc.text.clone(),
-                        }),
-                    }
                     save_dirty(ctx, &p.doc.text);
                     if p.state.auto_run {
                         p.run.0 = true;
@@ -492,33 +464,14 @@ fn ui(mut p: UiParams) {
                 editor::show_code_view(ui, &p.current.wgsl);
             });
     }
+}
 
-    // --- session window --------------------------------------------------------
-    if p.wins.session {
-        egui::Window::new("Session")
-            .id(egui::Id::new("session_window"))
-            .default_pos([680.0, 120.0])
-            .default_size([340.0, 240.0])
-            .open(&mut p.wins.session)
-            .show(ctx, |ui| {
-                ui.label(format!("transport: {:?}", p.session.status));
-                ui.label(format!("you: peer #{}", p.session.local_peer));
-                if p.session.peers.is_empty() {
-                    ui.weak("No other peers yet.");
-                    ui.separator();
-                    ui.label(
-                        "Multiplayer is scaffolded, not wired: edits already \
-                         travel as versioned EditIntents over a SyncTransport \
-                         seam. The planned upgrade is matchbox WebRTC data \
-                         channels (see src/net.rs).",
-                    );
-                } else {
-                    for (id, name) in &p.session.peers {
-                        ui.label(format!("peer #{id} — {name}"));
-                    }
-                }
-            });
-    }
+/// A label in a fixed-width slot, so changing digits never reflows the toolbar.
+fn readout(ui: &mut egui::Ui, text: String, width: f32) {
+    ui.add_sized(
+        [width, ui.spacing().interact_size.y],
+        egui::Label::new(text).wrap_mode(egui::TextWrapMode::Truncate),
+    );
 }
 
 /// Howard Hinnant's `civil_from_days`, so iDate needs no chrono dependency.

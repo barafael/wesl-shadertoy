@@ -15,10 +15,15 @@
       -webkit-user-select: none;
       user-select: none;
     }
+    /* winit writes an inline `width/height` px style on the canvas that can
+       disagree with the real viewport; !important keeps the canvas exactly
+       viewport-sized and winit's ResizeObserver resizes the buffer to match. */
     canvas {
       display: block;
-      min-width: 100vw;
-      min-height: 100vh;
+      position: fixed;
+      inset: 0;
+      width: 100vw !important;
+      height: 100vh !important;
       touch-action: none;
     }
   </style>

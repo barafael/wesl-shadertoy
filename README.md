@@ -2,7 +2,7 @@
 
 A classic [shadertoy](https://www.shadertoy.com)-style live shader playground for
 [WESL](https://github.com/adanoside/wesl), built on **Bevy 0.20 + egui**.
-One animated fullscreen fragment shader, one code editor, `▶ Run`.
+One animated fullscreen fragment shader, one code editor, one compile button.
 Runs natively and in the browser as WASM.
 
 > **Live demo:** <https://barafael.github.io/wesl-shadertoy/>
@@ -11,10 +11,10 @@ Runs natively and in the browser as WASM.
 
 | What | How |
 | --- | --- |
-| Compile & apply | `▶ Run` button or **Ctrl/Cmd+Enter** |
+| Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Pause / resume the clock, reset, speed | toolbar |
 | Presets | `preset:` combobox — 11 shadertoy classics (Plasma, Star Nest, Menger, …) |
-| Windows | `Code`, `WGSL` (composed output), `Session` toggles |
+| Windows | `Code`, `WGSL` (composed output) toggles |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
 
@@ -82,10 +82,9 @@ src/
     fullscreen_material.rs    vendored from Bevy 0.20, modified to rebuild
                               its pipeline when the shader handle changes
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
-  editor.rs     the code editor: highlighted galley behind a transparent
-                TextEdit, line-number gutter, Tab/Shift-Tab
+  editor.rs     the code editor: TextEdit with a custom layouter that paints
+                the highlighted job, line-number gutter, Tab/Shift-Tab
   presets.rs    11 compile-checked shadertoy classic presets
-  net.rs        multiplayer seams (see below)
 ```
 
 Rendering is the vendored Bevy `fullscreen_material` plugin: the user shader
@@ -96,28 +95,11 @@ ride in a dynamic uniform buffer bound at `@group(0) @binding(2)`.
 The UI is egui (via `bevy_egui`, `EguiPrimaryContextPass`), following the
 integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 
-## Multiplayer roadmap (already wired in)
-
-`src/net.rs` ships the seams, not the network:
-
-* `SessionMessage` — serde wire format: `Join` / `Leave` / `ShaderEdit`
-  (small `EditIntent`s: base version + replace range + insertion) /
-  `ShaderFull` snapshots.
-* `SyncTransport` — transport seam with a `LoopbackTransport` for solo use.
-  The planned transport is **matchbox** WebRTC data channels + signaling,
-  exactly like omdurman ships.
-* Stale edits are rejected by version and fall back to a full snapshot; the
-  upgrade path for true concurrent editing is a CRDT (`yrs`/`automerge`)
-  behind the same `ShaderEdit` payload.
-
-The editor already emits `EditIntent`s on every change, so a session can be
-added without touching the editor or the renderer.
-
 ## Development
 
 ```sh
 cargo run              # native (dynamic Bevy, fast rebuilds)
-cargo test             # compile pipeline, presets, net, highlighter
+cargo test             # compile pipeline, presets, highlighter
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
 

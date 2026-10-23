@@ -6158,8 +6158,6 @@ dependencies = [
  "bevy_egui",
  "js-sys",
  "naga",
- "serde",
- "serde_json",
  "web-sys",
  "wesl",
 ]
