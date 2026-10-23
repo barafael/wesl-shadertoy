@@ -2,25 +2,15 @@
 //! [`LayoutJob`] with per-token colors.
 //!
 //! This is the "syntax highlighting" layer: the editor widget renders this
-//! job as a galley *behind* a transparent-text `TextEdit`, so highlighting and
-//! editing share the exact same glyph layout.
+//! job through `TextEdit`'s layouter, so highlighting and editing share the
+//! exact same glyph layout. Token colors come from the active
+//! [`crate::theme::Theme`]'s [`Syntax`] palette.
 
 use bevy_egui::egui::Color32;
 use bevy_egui::egui::FontId;
 use bevy_egui::egui::text::{LayoutJob, TextFormat};
 
-/// VS Code "Dark+" inspired palette.
-mod palette {
-    use bevy_egui::egui::Color32;
-    pub const COMMENT: Color32 = Color32::from_rgb(0x6a, 0x99, 0x55);
-    pub const STRING: Color32 = Color32::from_rgb(0xce, 0x91, 0x78);
-    pub const NUMBER: Color32 = Color32::from_rgb(0xb5, 0xce, 0xa8);
-    pub const KEYWORD: Color32 = Color32::from_rgb(0xc5, 0x86, 0xc0);
-    pub const TYPE: Color32 = Color32::from_rgb(0x4e, 0xc9, 0xb0);
-    pub const BUILTIN: Color32 = Color32::from_rgb(0xdc, 0xdc, 0xaa);
-    pub const ATTRIBUTE: Color32 = Color32::from_rgb(0xd7, 0xba, 0x7d);
-    pub const IMPORT: Color32 = Color32::from_rgb(0x56, 0x9c, 0xd6);
-}
+use crate::theme::Syntax;
 
 const KEYWORDS: &[&str] = &[
     // WGSL
@@ -222,17 +212,17 @@ enum Kind {
 }
 
 impl Kind {
-    fn color(self, default: Color32) -> Color32 {
+    fn color(self, default: Color32, pal: &Syntax) -> Color32 {
         match self {
             Kind::Default => default,
-            Kind::Comment => palette::COMMENT,
-            Kind::String => palette::STRING,
-            Kind::Number => palette::NUMBER,
-            Kind::Keyword => palette::KEYWORD,
-            Kind::Import => palette::IMPORT,
-            Kind::Type => palette::TYPE,
-            Kind::Builtin => palette::BUILTIN,
-            Kind::Attribute => palette::ATTRIBUTE,
+            Kind::Comment => pal.comment,
+            Kind::String => pal.string,
+            Kind::Number => pal.number,
+            Kind::Keyword => pal.keyword,
+            Kind::Import => pal.import,
+            Kind::Type => pal.ty,
+            Kind::Builtin => pal.builtin,
+            Kind::Attribute => pal.attribute,
         }
     }
 }
@@ -399,7 +389,12 @@ fn tokenize(src: &str) -> Vec<Token> {
 ///
 /// Wrapping is disabled (`max_width = INFINITY`): the editor scrolls
 /// horizontally instead, which keeps the line-number gutter aligned.
-pub fn highlight_job(src: &str, font_id: FontId, default_color: Color32) -> LayoutJob {
+pub fn highlight_job(
+    src: &str,
+    font_id: FontId,
+    default_color: Color32,
+    pal: &Syntax,
+) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     for token in tokenize(src) {
@@ -408,7 +403,7 @@ pub fn highlight_job(src: &str, font_id: FontId, default_color: Color32) -> Layo
             0.0,
             TextFormat {
                 font_id: font_id.clone(),
-                color: token.kind.color(default_color),
+                color: token.kind.color(default_color, pal),
                 ..Default::default()
             },
         );

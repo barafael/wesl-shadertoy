@@ -32,8 +32,22 @@ naga = { version = "30", features = ["wgsl-in"] }
 bevy = { version = "0.20", features = ["dynamic_linking"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { version = "0.3", features = ["Storage"] }
+web-sys = { version = "0.3", features = [
+    "Storage",
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "File",
+    "FileList",
+    "Blob",
+    "Event",
+    "MediaQueryList",
+] }
 js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 
 # Size-focused release profile for the wasm bundle built by trunk.
 [profile.release]

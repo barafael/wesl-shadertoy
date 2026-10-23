@@ -12,8 +12,10 @@
 mod compile;
 mod editor;
 mod highlight;
+mod persist;
 mod presets;
 mod render;
+mod theme;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +30,7 @@ use bevy::window::PresentMode;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use render::{ShaderToyFragment, ShaderToyRenderPlugin, ShaderToyUniform};
+use theme::Theme;
 
 fn main() {
     App::new()
@@ -112,6 +115,8 @@ struct CurrentShader {
 struct CompileStatus {
     error: Option<String>,
     last_ms: Option<f32>,
+    /// Transient "saved to …" / "opened …" message: `(text, ok)`.
+    note: Option<(String, bool)>,
 }
 
 /// Set by the Run button / Ctrl+Enter, consumed by [`compile_and_apply`].
@@ -122,6 +127,8 @@ struct RunRequest(bool);
 struct UiWindows {
     editor: bool,
     wgsl: bool,
+    settings: bool,
+    about: bool,
     errors_expanded: bool,
 }
 
@@ -130,8 +137,52 @@ impl Default for UiWindows {
         Self {
             editor: true,
             wgsl: false,
+            settings: false,
+            about: false,
             errors_expanded: true,
         }
+    }
+}
+
+/// User preferences, shown in the settings window. Persisted to
+/// `localStorage` on the web; in-memory only in native builds.
+#[derive(Resource)]
+struct Settings {
+    theme: Theme,
+    random_preset: bool,
+}
+
+impl Settings {
+    /// Used when nothing is saved yet: OS theme, random preset on.
+    fn fallback() -> Self {
+        Self {
+            theme: Theme::from_system(),
+            random_preset: true,
+        }
+    }
+
+    fn encode(&self) -> String {
+        format!(
+            "theme={};random={}",
+            self.theme.as_str(),
+            self.random_preset as u8
+        )
+    }
+
+    fn decode(s: &str) -> Self {
+        let mut out = Self::fallback();
+        for part in s.split(';') {
+            match part.split_once('=') {
+                Some(("theme", t)) => {
+                    if let Some(theme) = Theme::parse(t) {
+                        out.theme = theme;
+                    }
+                }
+                Some(("random", r)) => out.random_preset = r == "1",
+                _ => {}
+            }
+        }
+        out
     }
 }
 
@@ -145,15 +196,27 @@ struct StartupParams<'w> {
 }
 
 fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: StartupParams) {
-    // Restore a saved document (browser localStorage) or start from preset.
-    match load_saved() {
+    let settings = persist::load_settings()
+        .map(|s| Settings::decode(&s))
+        .unwrap_or_else(Settings::fallback);
+    let random = settings.random_preset;
+    commands.insert_resource(settings);
+
+    // Restore a saved document (browser localStorage) or start from a preset
+    // — a random one when the fresh-start setting is on.
+    match persist::load_doc() {
         Some(saved) => {
             app.doc.text = saved;
             app.state.last_preset = "saved";
         }
         None => {
-            app.doc.text = presets::DEFAULT.to_string();
-            app.state.last_preset = "Plasma";
+            let preset = if random {
+                random_preset()
+            } else {
+                presets::DEFAULT
+            };
+            app.doc.text = preset.code.to_string();
+            app.state.last_preset = preset.name;
         }
     }
 
@@ -281,6 +344,7 @@ fn compile_and_apply(mut p: CompileParams) {
         return;
     }
     p.run.0 = false;
+    p.status.note = None;
 
     let started = Instant::now();
     match compile::compile_user_shader(&p.doc.text) {
@@ -312,9 +376,10 @@ struct UiParams<'w, 's> {
     contexts: EguiContexts<'w, 's>,
     doc: ResMut<'w, ShaderDoc>,
     state: ResMut<'w, ShaderToyState>,
-    status: Res<'w, CompileStatus>,
+    status: ResMut<'w, CompileStatus>,
     run: ResMut<'w, RunRequest>,
     wins: ResMut<'w, UiWindows>,
+    settings: ResMut<'w, Settings>,
     current: Res<'w, CurrentShader>,
 }
 
@@ -323,10 +388,52 @@ fn ui(mut p: UiParams) {
     let Ok(ctx) = p.contexts.ctx_mut() else {
         return;
     };
+    theme::apply(ctx, p.settings.theme);
 
-    // Global Ctrl/Cmd+Enter runs the shader.
-    if ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
+    // Global shortcuts: Ctrl/Cmd+Enter compiles, Ctrl/Cmd+S saves,
+    // Ctrl/Cmd+O opens. (index.html suppresses the browser's own S/O dialogs.)
+    let (run, save, open) = ctx.input(|i| {
+        let cmd = i.modifiers.command && !i.modifiers.shift && !i.modifiers.alt;
+        (
+            i.modifiers.command && i.key_pressed(egui::Key::Enter),
+            cmd && i.key_pressed(egui::Key::S),
+            cmd && i.key_pressed(egui::Key::O),
+        )
+    });
+    if run {
         p.run.0 = true;
+    }
+    if save {
+        p.status.note = match persist::save_now(&p.doc.text) {
+            Ok(location) => Some((format!("saved to {location}"), true)),
+            Err(e) => Some((format!("save failed: {e}"), false)),
+        };
+    }
+    if open {
+        match persist::open_now() {
+            Ok(Some(text)) => open_into(
+                &mut p.doc,
+                &mut p.state,
+                &mut p.run,
+                &mut p.status,
+                text,
+                "shader.wesl",
+            ),
+            // Web: the file dialog is open; the text lands via the queue.
+            Ok(None) => {}
+            Err(e) => p.status.note = Some((e, false)),
+        }
+    }
+    // Files chosen through the web file dialog arrive here once read.
+    for (name, text) in persist::take_opened() {
+        open_into(
+            &mut p.doc,
+            &mut p.state,
+            &mut p.run,
+            &mut p.status,
+            text,
+            &name,
+        );
     }
 
     // egui 0.36 attaches panels to a `Ui`, not to the `Context`: build the
@@ -386,6 +493,10 @@ fn ui(mut p: UiParams) {
             ui.separator();
             ui.toggle_value(&mut p.wins.editor, "Code");
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
+            ui.toggle_value(&mut p.wins.settings, "⚙")
+                .on_hover_text("Settings");
+            ui.toggle_value(&mut p.wins.about, "?")
+                .on_hover_text("About");
         });
         // Block canvas clicks through empty toolbar space.
         ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
@@ -403,13 +514,18 @@ fn ui(mut p: UiParams) {
                 {
                     p.wins.errors_expanded = !p.wins.errors_expanded;
                 }
-                ui.label(
-                    egui::RichText::new(summary).color(egui::Color32::from_rgb(0xf4, 0x87, 0x7f)),
-                );
+                ui.label(egui::RichText::new(summary).color(p.settings.theme.err_color()));
+            } else if let Some((note, ok)) = &p.status.note {
+                let color = if *ok {
+                    p.settings.theme.ok_color()
+                } else {
+                    p.settings.theme.err_color()
+                };
+                ui.label(egui::RichText::new(note.clone()).color(color));
             } else if let Some(ms) = p.status.last_ms {
                 ui.label(
                     egui::RichText::new(format!("✓ compiled in {ms:.1} ms"))
-                        .color(egui::Color32::from_rgb(0x89, 0xd1, 0x8c)),
+                        .color(p.settings.theme.ok_color()),
                 );
             } else {
                 ui.label("not compiled yet");
@@ -443,9 +559,10 @@ fn ui(mut p: UiParams) {
             .default_size([640.0, 460.0])
             .open(&mut p.wins.editor)
             .show(ctx, |ui| {
-                let out = editor::show_code_editor(ui, &mut p.doc.text);
+                let syntax = p.settings.theme.syntax();
+                let out = editor::show_code_editor(ui, &mut p.doc.text, &syntax);
                 if out.changed {
-                    save_dirty(ctx, &p.doc.text);
+                    persist::save_dirty(ctx, &p.doc.text);
                     if p.state.auto_run {
                         p.run.0 = true;
                     }
@@ -461,9 +578,93 @@ fn ui(mut p: UiParams) {
             .default_size([520.0, 480.0])
             .open(&mut p.wins.wgsl)
             .show(ctx, |ui| {
-                editor::show_code_view(ui, &p.current.wgsl);
+                let syntax = p.settings.theme.syntax();
+                editor::show_code_view(ui, &p.current.wgsl, &syntax);
             });
     }
+
+    // --- settings window -----------------------------------------------------
+    if p.wins.settings {
+        egui::Window::new("Settings")
+            .id(egui::Id::new("settings_window"))
+            .default_pos([12.0, 60.0])
+            .default_size([300.0, 150.0])
+            .open(&mut p.wins.settings)
+            .show(ctx, |ui| {
+                let before = (p.settings.theme, p.settings.random_preset);
+                ui.horizontal(|ui| {
+                    ui.label("theme:");
+                    ui.radio_value(&mut p.settings.theme, Theme::Dark, "gruvbox dark");
+                    ui.radio_value(&mut p.settings.theme, Theme::Light, "gruvbox light");
+                });
+                ui.checkbox(
+                    &mut p.settings.random_preset,
+                    "random preset on fresh start",
+                );
+                ui.separator();
+                ui.weak("Ctrl+S saves · Ctrl+O opens a .wesl file");
+                if (p.settings.theme, p.settings.random_preset) != before {
+                    persist::save_settings(&p.settings.encode());
+                }
+            });
+    }
+
+    // --- about window ----------------------------------------------------------
+    if p.wins.about {
+        egui::Window::new("About wesl-shadertoy")
+            .id(egui::Id::new("about_window"))
+            .default_pos([12.0, 60.0])
+            .default_size([380.0, 330.0])
+            .open(&mut p.wins.about)
+            .show(ctx, |ui| {
+                ui.label(
+                    "A classic shadertoy-style live shader playground for WESL: one \
+                     animated fullscreen fragment shader, one code editor.",
+                );
+                ui.separator();
+                // Static version text — keep in sync with Cargo.toml (Bevy 0.20
+                // ships no BEVY_VERSION constant to read instead).
+                ui.label("Bevy 0.20 · bevy_egui 0.43 (egui 0.36) · WESL 0.6 · naga 30");
+                ui.separator();
+                ui.hyperlink_to("repository", "https://github.com/barafael/wesl-shadertoy");
+                ui.hyperlink_to("live demo", "https://barafael.github.io/wesl-shadertoy/");
+                ui.hyperlink_to("WESL language", "https://wesl-lang.dev");
+                ui.hyperlink_to("shadertoy.com", "https://www.shadertoy.com");
+                ui.separator();
+                ui.label("MIT OR Apache-2.0.");
+                ui.weak(
+                    "fullscreen_material.rs vendored from Bevy 0.20 (MIT OR Apache-2.0) \
+                     · Gruvbox colors by morhetz · presets ported from shadertoy \
+                     classics and public-domain snippets.",
+                );
+            });
+    }
+}
+
+/// Load an opened file into the editor and compile it. Takes the individual
+/// fields (not `&mut UiParams`) so it can run while `ctx` borrows `p.contexts`.
+fn open_into(
+    doc: &mut ShaderDoc,
+    state: &mut ShaderToyState,
+    run: &mut RunRequest,
+    status: &mut CompileStatus,
+    text: String,
+    name: &str,
+) {
+    doc.text = text;
+    state.last_preset = "file";
+    run.0 = true;
+    status.note = Some((format!("opened {name}"), true));
+}
+
+/// Time-seeded xorshift pick — no `rand` dependency for one roll per start.
+fn random_preset() -> &'static presets::Preset {
+    let mut x = (now_epoch_secs() * 1.0e6) as u64;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    let idx = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as usize % presets::ALL.len();
+    &presets::ALL[idx]
 }
 
 /// A label in a fixed-width slot, so changing digits never reflows the toolbar.
@@ -523,39 +724,3 @@ fn date_uniforms() -> Vec4 {
     let dow = (days.rem_euclid(7) + 4) as f32 % 7.0; // 1970-01-01 was a Thursday
     Vec4::new(seconds_of_day as f32, month as f32, dow, day_of_year as f32)
 }
-
-// --- document persistence ---------------------------------------------------
-
-#[cfg(target_arch = "wasm32")]
-fn load_saved() -> Option<String> {
-    let storage = web_sys::window()?.local_storage().ok()??;
-    storage.get_item("wesl-shadertoy.doc").ok().flatten()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn load_saved() -> Option<String> {
-    None
-}
-
-/// Debounced localStorage save (egui keeps a timer in its data store).
-#[cfg(target_arch = "wasm32")]
-fn save_dirty(ctx: &egui::Context, text: &str) {
-    use std::cell::RefCell;
-    thread_local! {
-        static LAST_SAVE: RefCell<f64> = const { RefCell::new(0.0) };
-    }
-    let now = ctx.input(|i| i.time);
-    let due = LAST_SAVE.with(|t| now - *t.borrow() > 0.5);
-    if due {
-        LAST_SAVE.with(|t| *t.borrow_mut() = now);
-        if let Some(ls) = web_sys::window()
-            .and_then(|w| w.local_storage().ok())
-            .flatten()
-        {
-            let _ = ls.set_item("wesl-shadertoy.doc", text);
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn save_dirty(_ctx: &egui::Context, _text: &str) {}

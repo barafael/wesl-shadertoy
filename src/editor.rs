@@ -24,6 +24,7 @@ use bevy_egui::egui::{
 };
 
 use crate::highlight::highlight_job;
+use crate::theme::Syntax;
 
 /// Stable id used to remember which `TextEdit` id the editor got last frame
 /// (so Tab handling can run *before* the widget is added).
@@ -38,8 +39,8 @@ pub struct EditorOutput {
     pub changed: bool,
 }
 
-/// Show the highlighted code editor inside `ui`.
-pub fn show_code_editor(ui: &mut Ui, text: &mut String) -> EditorOutput {
+/// Show the highlighted code editor inside `ui`, colored with `pal`.
+pub fn show_code_editor(ui: &mut Ui, text: &mut String, pal: &Syntax) -> EditorOutput {
     let ctx = ui.ctx().clone();
     let font_id = FontId::monospace(13.0);
     let default_color = ui.visuals().text_color();
@@ -111,7 +112,8 @@ pub fn show_code_editor(ui: &mut Ui, text: &mut String) -> EditorOutput {
                 // so cursor and selection always sit on the visible glyphs ---
                 let mut layouter =
                     |ui: &Ui, buf: &dyn TextBuffer, _wrap_width: f32| -> Arc<Galley> {
-                        let mut job = highlight_job(buf.as_str(), font_id.clone(), default_color);
+                        let mut job =
+                            highlight_job(buf.as_str(), font_id.clone(), default_color, pal);
                         // No wrapping: horizontal scroll keeps gutter rows aligned.
                         job.wrap.max_width = f32::INFINITY;
                         job.keep_trailing_whitespace = true;
@@ -141,7 +143,7 @@ pub fn show_code_editor(ui: &mut Ui, text: &mut String) -> EditorOutput {
 /// `TextEdit`, since there is nothing to edit. `TextWrapMode::Extend` is what
 /// keeps long composed-WGSL lines on one row (a plain Label would wrap them
 /// at the window width and break the gutter alignment).
-pub fn show_code_view(ui: &mut Ui, text: &str) {
+pub fn show_code_view(ui: &mut Ui, text: &str, pal: &Syntax) {
     let ctx = ui.ctx().clone();
     let font_id = FontId::monospace(13.0);
     let default_color = ui.visuals().text_color();
@@ -182,7 +184,7 @@ pub fn show_code_view(ui: &mut Ui, text: &str) {
                 );
 
                 // --- highlighted code, selectable for copy-paste ---
-                let job = highlight_job(text, font_id.clone(), default_color);
+                let job = highlight_job(text, font_id.clone(), default_color, pal);
                 ui.add(
                     Label::new(job)
                         .selectable(true)

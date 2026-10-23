@@ -555,7 +555,8 @@ pub const ALL: &[Preset] = &[
     },
 ];
 
-pub const DEFAULT: &str = PLASMA;
+/// The preset a fresh session starts from when "random preset" is off.
+pub const DEFAULT: &Preset = &ALL[0];
 
 #[cfg(test)]
 mod tests {
