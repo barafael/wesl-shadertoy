@@ -16,7 +16,9 @@
 //!   bottom-left `fragCoord` origin on the way in. For every `buffer_a`..
 //!   `buffer_d` function the user defines it also emits a
 //!   `fragment_buffer_a`..`fragment_buffer_d` entry point, which the renderer
-//!   draws into that channel's offscreen target before the main pass.
+//!   draws into that channel's offscreen target before the main pass; those
+//!   entries pass `@builtin(position)` through unflipped (texel space), so
+//!   `textureLoad` reads line up with the writes (see [`main_module_for`]).
 //!
 //! The composed WGSL is then parsed and validated with `naga` (same major
 //! version as the wgpu inside Bevy 0.20) so type errors in user code are
@@ -129,7 +131,17 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// Build the `package::main` module for a shader that defines the buffer
 /// passes selected by `buffers` (bit per [`BUFFER_NAMES`] entry). Each buffer
 /// gets its own fragment entry point, rendered into that channel's offscreen
-/// target with the same y-up `fragCoord` convention as the main pass.
+/// target.
+///
+/// Buffer entries pass `@builtin(position)` through unflipped, so a buffer's
+/// `frag_coord.y` equals its texture row. A fragment always writes the texel
+/// at its own position, so this is what keeps
+/// `textureLoad(i_channel_x, vec2<i32>(frag_coord), 0)` consistent with where
+/// the content was written — flipping on write would mirror every channel
+/// read. The y-up image pass samples channels at its own `frag_coord`, which
+/// displays the buffer space bottom-up just like the image space (and like
+/// shadertoy's `texture(iChannel0, fragCoord / resolution)`): `frag_coord.y`
+/// grows upward on screen and `i_mouse()` lines up with the cursor.
 fn main_module_for(buffers: u8) -> String {
     let mut wgsl = String::new();
     // Imports must come first
@@ -146,8 +158,8 @@ fn main_module_for(buffers: u8) -> String {
         wgsl.push_str(&format!(
             "\n@fragment\n\
              fn {}(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {{\n\
-             \x20   let p = in.position.xy;\n\
-             \x20   return {name}(vec2<f32>(p.x, i_resolution().y - p.y));\n\
+             \x20   // Buffer passes use texel coordinates (no y-flip).\n\
+             \x20   return {name}(in.position.xy);\n\
              }}\n",
             buffer_entry(name)
         ));
@@ -372,6 +384,18 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         assert!(compiled.wgsl.contains("fn fragment_buffer_a"));
         assert!(compiled.wgsl.contains("fn fragment_buffer_c"));
         assert!(!compiled.wgsl.contains("fn fragment_buffer_b"));
+        // Buffer entries feed raw texel coordinates (no y-flip), so channel
+        // reads line up with where the pass wrote; only the image pass flips.
+        let entry = compiled
+            .wgsl
+            .split("fn fragment_buffer_a")
+            .nth(1)
+            .expect("buffer entry")
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(entry.contains("in.position.xy"), "no texel passthrough:\n{entry}");
+        assert!(!entry.contains("i_resolution"), "unexpected y-flip:\n{entry}");
     }
 
     #[test]
