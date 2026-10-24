@@ -13,17 +13,19 @@ Runs natively and in the browser as WASM.
 | --- | --- |
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
-| Pause / resume the clock, reset, speed | toolbar |
-| Presets | `preset:` combobox — 12 shadertoy classics (Plasma, Star Nest, Menger, …); fresh sessions roll a random one |
+| Pause / resume the clock, reset, speed | toolbar (reset also restarts `i_frame` and clears the buffers) |
+| Presets | `preset:` combobox — 21 shadertoy classics (Plasma, Star Nest, Seascape, Fluid, …); fresh sessions roll a random one |
 | Windows | `Code`, `WGSL` (composed output) toggles; `⚙` settings (Gruvbox dark/light), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
 | Debugger overlay | toolbar bug icon (or `--debugger` natively): crosshair and click ring, RGBA probe boxes for the pixels under the cursor and the last click, mouse position, resolution, fps |
 
-The document auto-saves to `localStorage` (browser builds) and is restored on
-load, along with your theme. Compile errors appear in the bottom panel — the
-last good shader keeps running while you fix them.
+The document auto-saves to `localStorage` (browser builds) on every change —
+edits, preset picks, opened files — and is restored on load, along with your
+theme. Compile errors appear in the bottom panel — the last good shader keeps
+running while you fix them, also when the GPU driver rejects a shader that
+passed validation.
 
 ## The shader dialect
 
@@ -53,16 +55,47 @@ Available uniforms (import from `package::shadertoy`):
 
 | Function | Shadertoy equivalent | Meaning |
 | --- | --- | --- |
-| `i_time() -> f32` | `iTime` | seconds since (re)start |
-| `i_time_delta() -> f32` | `iTimeDelta` | seconds since previous frame |
-| `i_frame() -> u32` | `iFrame` | frame counter |
-| `i_resolution() -> vec3<f32>` | `iResolution` | viewport size in pixels |
+| `i_time() -> f32` | `iTime` | seconds since start or Reset (scaled by the speed slider, frozen while paused) |
+| `i_time_delta() -> f32` | `iTimeDelta` | `i_time` advance since the previous frame (0 while paused) |
+| `i_frame() -> u32` | `iFrame` | frames since this shader started: 0 on its first frame, restarts on compile and Reset, holds while paused |
+| `i_resolution() -> vec3<f32>` | `iResolution` | viewport size in pixels (z = 1) |
 | `i_mouse() -> vec4<f32>` | `iMouse` | xy: drag position, zw: click; negative z after release |
 | `i_frame_rate() -> f32` | `iFrameRate` | smoothed frames per second |
-| `i_date() -> vec4<f32>` | `iDate` | seconds since midnight, month, day of week, day of year |
+| `i_date() -> vec4<f32>` | `iDate` | year, month (1–12), day of month, seconds since midnight (UTC) |
+| `i_sample_rate() -> f32` | `iSampleRate` | 44100 (there is no audio input) |
+| `i_channel_time(i: u32) -> f32` | `iChannelTime[i]` | seconds since buffer channel `i` started (0 if the shader has no such buffer) |
+| `i_channel_resolution(i: u32) -> vec3<f32>` | `iChannelResolution[i]` | size of buffer channel `i` in pixels (0 if unused) |
 
-`frag_coord` is in pixels, origin **top-left** (WGSL framebuffer convention,
-like shadertoy's `gl_FragCoord`).
+`frag_coord` is in pixels with the origin **bottom-left**, like shadertoy's
+`fragCoord` (and `i_mouse()`); the wrapper flips WGSL's top-left
+`@builtin(position)` for you.
+
+### Buffers (multipass)
+
+Define any of `buffer_a` … `buffer_d` next to `main_image`, with the same
+signature, and each becomes a pass rendered before the image every frame, into
+an `Rgba32Float` target the size of the viewport. Read the results through the
+`i_channel_0` … `i_channel_3` globals (buffer A … D):
+
+```rust
+import package::shadertoy::{i_channel_0, i_frame};
+
+fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
+    let last = textureLoad(i_channel_0, vec2<i32>(frag_coord), 0); // previous frame
+    if (i_frame() == 0u) { return vec4<f32>(0.0); }                 // first frame: init
+    return last * 0.99;
+}
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    return textureLoad(i_channel_0, vec2<i32>(frag_coord), 0);
+}
+```
+
+A buffer reading itself sees its previous frame; reading an earlier buffer
+sees that buffer's current frame. Buffers are unfilterable float textures:
+read them with `textureLoad`, or nearest-sample them through the
+`i_sampler` global. They start out black and are cleared on every compile,
+on Reset and on resize.
 
 One dialect gotcha when porting snippets: `mod` is a reserved word in WESL (it
 declares a module), so write the builtin out as `x - y * floor(x / y)` instead
@@ -71,9 +104,9 @@ of calling `mod(x, y)`.
 The pipeline: the editor text is linked by the WESL compiler, the composed
 WGSL is parsed and validated with `naga` (same major version as the wgpu
 inside Bevy 0.20, so type errors surface in the UI instead of the browser
-console), then handed to Bevy as `Shader::from_wgsl`. A new shader handle per
-successful compile swaps into the render pass atomically — a broken edit never
-blanks the screen.
+console), then handed to Bevy as `Shader::from_wgsl`. The previous shader keeps
+drawing until the new one's pipelines are built, so a compile never blanks
+the screen, and a broken edit never replaces a working shader.
 
 ## Live diagnostics (wgsl-analyzer)
 
@@ -106,16 +139,23 @@ src/
   compile.rs    WESL link + naga validate (the shader contract above)
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
   theme.rs      Gruvbox egui Visuals + per-theme syntax palettes (dark/light)
+  headless.rs   `--render`: windowless wgpu renderer writing a PNG (native)
   render/
     mod.rs                    ShaderToyUniform/Fragment components + plugin
-    fullscreen_material.rs    vendored from Bevy 0.20, modified to rebuild
-                              its pipeline when the shader handle changes
+    active.rs                 which shader is on screen: switches once the
+                              new pipelines are built, restarts i_frame,
+                              channel clocks and buffers on the switch
+    buffers.rs                the buffer_a..buffer_d passes (ping-pong
+                              Rgba32Float targets behind i_channel_0..3)
+    fullscreen_material.rs    vendored from Bevy 0.20, modified to take its
+                              fragment shader per view at runtime
   debugger.rs   debugger overlay (ported from bevy_shadertoy_wgsl): blit pass,
                 overlay WGSL, font atlas rasterized from egui's Hack font
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
   editor.rs     the code editor: TextEdit with a custom layouter that paints
                 the highlighted job, line-number gutter, Tab/Shift-Tab
-  presets.rs    12 compile-checked shadertoy classic presets
+  presets.rs    21 compile-checked shadertoy classic presets (presets/*.wgsl
+                for the longer ones)
   analyzer/     wgsl-analyzer LSP client (live diagnostics)
     mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
     native.rs     the wgsl-analyzer executable over stdio
@@ -128,8 +168,14 @@ web/
 
 Rendering is the vendored Bevy `fullscreen_material` plugin: the user shader
 runs as a fullscreen pass in `Core3d`'s post-process stage with
-`Tonemapping::None`, so colors hit the screen untouched. Per-frame uniforms
-ride in a dynamic uniform buffer bound at `@group(0) @binding(2)`. While the
+`Tonemapping::None`, so colors hit the screen untouched, after the buffer
+passes. Per-frame uniforms ride in a dynamic uniform buffer bound at
+`@group(0) @binding(2)`, the buffer channels at bindings 3..6.
+
+Compiles alternate between two shader assets, replacing the one that is not
+on screen. Bevy then rebuilds that asset's pipelines in place, so the set of
+shaders and pipelines stays fixed however often you compile (Bevy's pipeline
+cache never frees a pipeline). While the
 debugger overlay is on, the user shader renders into an offscreen
 `Rgba16Float` target instead (`Rgba8UnormSrgb` where WebGL2 cannot render
 to half floats), and a second pass draws it plus the overlay to the view;
@@ -153,8 +199,9 @@ Release wasm is built with `trunk build --release` (trunk ≥ 0.21 for the
 `data-wasm-opt-params` flag — Rust emits bulk-memory ops that trunk's bundled
 wasm-opt needs told about).
 
-GitHub Pages deployment lives in `.github/workflows/deploy.yml` (trunk v0.22.0,
-`--public-url /<repo>/`).
+CI and the GitHub Pages deployment live in `.github/workflows/ci.yml`
+(fmt, clippy and tests on the native build; the Pages build uses trunk
+v0.22.0 with `--public-url /<repo>/`).
 
 ## License
 
