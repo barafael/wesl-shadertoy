@@ -25,12 +25,14 @@ use bevy::prelude::Resource;
 use bevy_egui::egui::text::CCursor;
 use bevy_egui::egui::text::LayoutJob;
 use bevy_egui::egui::text_selection::CCursorRange;
-use bevy_egui::egui::widgets::text_edit::TextEditState;
+use bevy_egui::egui::widgets::text_edit::{TextEditOutput, TextEditState};
 use bevy_egui::egui::{
     Align, Color32, Context, Event, FontId, Frame, Galley, Id, Key, Label, Layout, Margin,
-    Modifiers, ScrollArea, Sense, TextBuffer, TextEdit, TextWrapMode, Ui, Vec2, pos2,
+    Modifiers, Painter, Rect, ScrollArea, Sense, Shape, Stroke, TextBuffer, TextEdit, TextWrapMode,
+    Ui, Vec2, Visuals, pos2,
 };
 
+use crate::analyzer::{Diagnostic, Severity};
 use crate::highlight::highlight_job;
 use crate::theme::Theme;
 
@@ -115,11 +117,13 @@ pub struct EditorOutput {
 
 /// Show the highlighted code editor inside `ui`, colored with `theme`'s
 /// palette, reusing (and updating) the highlighted jobs held in `cache`.
+/// `diagnostics` (char ranges into `text`) are squiggled under the code.
 pub fn show_code_editor(
     ui: &mut Ui,
     text: &mut String,
     theme: Theme,
     cache: &mut HighlightCache,
+    diagnostics: &[Diagnostic],
 ) -> EditorOutput {
     let pal = theme.syntax();
     let ctx = ui.ctx().clone();
@@ -207,24 +211,110 @@ pub fn show_code_editor(
                         });
                         ui.fonts_mut(|f| f.layout_job(job))
                     };
-                let response = ui.add(
-                    TextEdit::multiline(text)
-                        .font(font_id.clone())
-                        .margin(margin)
-                        .desired_width(f32::INFINITY)
-                        .frame(Frame::NONE)
-                        // Without this, egui moves keyboard focus to the
-                        // next widget on Tab before `handle_tab` runs.
-                        .lock_focus(true)
-                        .layouter(&mut layouter),
-                );
-                changed |= response.changed();
+                let output = TextEdit::multiline(text)
+                    .font(font_id.clone())
+                    .margin(margin)
+                    .desired_width(f32::INFINITY)
+                    .frame(Frame::NONE)
+                    // Without this, egui moves keyboard focus to the
+                    // next widget on Tab before `handle_tab` runs.
+                    .lock_focus(true)
+                    .layouter(&mut layouter)
+                    .show(ui);
+                changed |= output.response.response.changed();
+                paint_diagnostics(ui, &output, gutter_rect, diagnostics);
 
-                ctx.data_mut(|d| d.insert_temp(editor_id_marker(), response.id));
+                ctx.data_mut(|d| d.insert_temp(editor_id_marker(), output.response.response.id));
             });
         });
 
     EditorOutput { changed }
+}
+
+/// Squiggle each diagnostic under its text, tick its first line in the
+/// gutter, and show the messages while the pointer rests on one.
+///
+/// Drawn from the galley the `TextEdit` just painted, so the marks sit on
+/// the glyphs they refer to (including while scrolled).
+fn paint_diagnostics(ui: &Ui, output: &TextEditOutput, gutter: Rect, diagnostics: &[Diagnostic]) {
+    let galley = &output.galley;
+    // Where TextEdit put the galley (it paints at this offset too).
+    let origin = output.galley_pos - Vec2::new(galley.rect.left(), 0.0);
+    let chars = galley.end().index.0;
+    let painter = ui.painter();
+    let mut spans: Vec<(Rect, &Diagnostic)> = Vec::new();
+    for diagnostic in diagnostics {
+        let color = severity_color(ui.visuals(), diagnostic.severity);
+        let at = |i: usize| galley.layout_from_cursor(CCursor::new(i.min(chars)));
+        let (start, end) = (at(diagnostic.range.start), at(diagnostic.range.end));
+        for row in start.row..=end.row {
+            let Some(placed) = galley.rows.get(row) else {
+                break;
+            };
+            let left = if row == start.row {
+                placed.row.x_offset(start.column)
+            } else {
+                0.0
+            };
+            let right = if row == end.row {
+                placed.row.x_offset(end.column)
+            } else {
+                placed.row.size.x
+            };
+            let line = placed.rect().translate(origin.to_vec2());
+            let x = origin.x + placed.pos.x;
+            let span = Rect::from_x_y_ranges(x + left..=x + right.max(left + 4.0), line.y_range());
+            squiggle(painter, span, color);
+            spans.push((span, diagnostic));
+            if row == start.row {
+                let tick = Rect::from_x_y_ranges(gutter.min.x..=gutter.min.x + 3.0, line.y_range());
+                painter.rect_filled(tick, 0.0, color);
+            }
+        }
+    }
+
+    let response = &output.response.response;
+    let Some(pointer) = response.hover_pos() else {
+        return;
+    };
+    let mut hits: Vec<&Diagnostic> = spans
+        .iter()
+        .filter(|(span, _)| span.contains(pointer))
+        .map(|(_, d)| *d)
+        .collect();
+    hits.dedup_by(|a, b| std::ptr::eq(*a, *b));
+    if !hits.is_empty() {
+        response.clone().on_hover_ui_at_pointer(|ui| {
+            for d in hits {
+                ui.colored_label(severity_color(ui.visuals(), d.severity), &d.message);
+            }
+        });
+    }
+}
+
+fn severity_color(visuals: &Visuals, severity: Severity) -> Color32 {
+    match severity {
+        Severity::Error => visuals.error_fg_color,
+        Severity::Warning => visuals.warn_fg_color,
+        Severity::Info => visuals.hyperlink_color,
+    }
+}
+
+/// A zigzag along the bottom of `span`.
+fn squiggle(painter: &Painter, span: Rect, color: Color32) {
+    const STEP: f32 = 2.0;
+    const HEIGHT: f32 = 1.5;
+    let y = span.bottom() - 1.0;
+    let mut points = Vec::new();
+    let mut x = span.left();
+    let mut up = false;
+    while x < span.right() {
+        points.push(pos2(x, if up { y - HEIGHT } else { y }));
+        x += STEP;
+        up = !up;
+    }
+    points.push(pos2(span.right(), if up { y - HEIGHT } else { y }));
+    painter.add(Shape::line(points, Stroke::new(1.0, color)));
 }
 
 /// Show a read-only, syntax-highlighted code view with a line-number gutter.
@@ -345,7 +435,7 @@ fn char_index_from_byte_index(s: &str, byte_index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_egui::egui::epaint::{ClippedShape, ImageData, Shape};
+    use bevy_egui::egui::epaint::{ClippedShape, ColorMode, ImageData};
     use bevy_egui::egui::{ColorImage, FullOutput, RawInput, TextureId};
 
     /// Stand-in for the renderer's copy of egui's font texture: applies each
@@ -500,7 +590,7 @@ mod tests {
     fn editor_text_survives_font_atlas_rebuilds() {
         let mut text = crate::presets::ALL[0].code.to_string();
         survives_atlas_rebuilds(|ui, theme, cache| {
-            show_code_editor(ui, &mut text, theme, cache);
+            show_code_editor(ui, &mut text, theme, cache, &[]);
         });
     }
 
@@ -546,7 +636,7 @@ mod tests {
         let mut frame = |input: RawInput, text: &mut String| {
             let mut changed = false;
             ctx.run_ui(input, |ui| {
-                changed = show_code_editor(ui, text, Theme::Dark, &mut cache).changed;
+                changed = show_code_editor(ui, text, Theme::Dark, &mut cache, &[]).changed;
             })
             .drop_without_applying_deltas();
             changed
@@ -591,7 +681,7 @@ mod tests {
         let mut text = crate::presets::ALL[0].code.to_string();
         for _ in 0..3 {
             ctx.run_ui(bevy_egui::egui::RawInput::default(), |ui| {
-                show_code_editor(ui, &mut text, Theme::Dark, &mut cache);
+                show_code_editor(ui, &mut text, Theme::Dark, &mut cache, &[]);
             })
             .drop_without_applying_deltas();
         }
@@ -600,6 +690,65 @@ mod tests {
         assert!(rows(&ctx, &cached.job) > 10);
         let gutter = cache.editor_gutter.as_ref().expect("editor gutter cached");
         assert_eq!(rows(&ctx, &gutter.job), text.matches('\n').count() + 1);
+    }
+
+    /// A diagnostic is squiggled exactly under its characters and ticked in
+    /// the gutter, in the theme's error color.
+    #[test]
+    fn diagnostics_are_squiggled_under_their_text() {
+        let ctx = Context::default();
+        let mut cache = HighlightCache::default();
+        let mut text = String::from("fn f() {\n    let t: u32 = 1.0;\n}\n");
+        let flagged = 9 + 17..9 + 20; // `1.0` on the second line
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars[flagged.clone()].iter().collect::<String>(), "1.0");
+        let diagnostics = [Diagnostic {
+            range: flagged,
+            severity: Severity::Error,
+            message: "expected u32, found f32".into(),
+        }];
+
+        let mut frame = || {
+            let mut out = ctx.run_ui(RawInput::default(), |ui| {
+                crate::theme::apply(ui.ctx(), Theme::Dark);
+                show_code_editor(ui, &mut text, Theme::Dark, &mut cache, &diagnostics);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        frame();
+        let output = frame();
+        let red = Theme::Dark.visuals().error_fg_color;
+
+        let mut paths = Vec::new();
+        let mut ticks = Vec::new();
+        for clipped in &output.shapes {
+            match &clipped.shape {
+                Shape::Path(p) if p.stroke.color == ColorMode::Solid(red) => {
+                    paths.push(p.points.clone())
+                }
+                Shape::Rect(r) if r.fill == red => ticks.push(r.rect),
+                _ => {}
+            }
+        }
+        assert_eq!(paths.len(), 1, "one squiggle");
+        assert_eq!(ticks.len(), 1, "one gutter tick");
+
+        // Same font as the editor: the squiggle spans three glyph advances,
+        // starting after `    let t: u32 = ` (17 columns of code).
+        let advance = ctx.fonts_mut(|f| f.glyph_width(&FontId::monospace(13.0), '0'));
+        let xs = paths[0].iter().map(|p| p.x);
+        let (left, right) = xs.fold((f32::MAX, f32::MIN), |(l, r), x| (l.min(x), r.max(x)));
+        assert!(
+            (right - left - 3.0 * advance).abs() < 1.0,
+            "width {}",
+            right - left
+        );
+        let code_left = ticks[0].min.x; // gutter's left edge
+        assert!(
+            left > code_left + 17.0 * advance,
+            "squiggle starts at {left}"
+        );
     }
 
     #[test]

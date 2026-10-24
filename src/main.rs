@@ -9,6 +9,7 @@
 //! whenever the shader handle changes. Per-frame uniforms (iTime, iResolution,
 //! iMouse, iDate, iFrame) ride along as a dynamic uniform buffer component.
 
+mod analyzer;
 mod compile;
 mod editor;
 #[cfg(not(target_arch = "wasm32"))]
@@ -79,12 +80,17 @@ fn main() {
         .init_resource::<RunRequest>()
         .init_resource::<UiWindows>()
         .init_resource::<editor::HighlightCache>()
+        .init_resource::<analyzer::Analyzer>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (install_fonts, (update_uniforms, compile_and_apply).chain()),
+            (
+                install_fonts,
+                (update_uniforms, compile_and_apply).chain(),
+                run_analyzer,
+            ),
         )
         .add_systems(EguiPrimaryContextPass, ui)
         .run();
@@ -187,22 +193,27 @@ impl Default for UiWindows {
 struct Settings {
     theme: Theme,
     random_preset: bool,
+    /// Live diagnostics from wgsl-analyzer while editing.
+    analyzer: bool,
 }
 
 impl Settings {
-    /// Used when nothing is saved yet: OS theme, random preset on.
+    /// Used when nothing is saved yet: OS theme, random preset and live
+    /// diagnostics on.
     fn fallback() -> Self {
         Self {
             theme: Theme::from_system(),
             random_preset: true,
+            analyzer: true,
         }
     }
 
     fn encode(&self) -> String {
         format!(
-            "theme={};random={}",
+            "theme={};random={};analyzer={}",
             self.theme.as_str(),
-            self.random_preset as u8
+            self.random_preset as u8,
+            self.analyzer as u8
         )
     }
 
@@ -216,6 +227,7 @@ impl Settings {
                     }
                 }
                 Some(("random", r)) => out.random_preset = r == "1",
+                Some(("analyzer", a)) => out.analyzer = a == "1",
                 _ => {}
             }
         }
@@ -462,6 +474,17 @@ struct UiParams<'w, 's> {
     settings: ResMut<'w, Settings>,
     current: Res<'w, CurrentShader>,
     highlight: ResMut<'w, editor::HighlightCache>,
+    analyzer: Res<'w, analyzer::Analyzer>,
+}
+
+/// Keep wgsl-analyzer (live diagnostics) in sync with the document and the
+/// settings toggle.
+fn run_analyzer(
+    mut analyzer: ResMut<analyzer::Analyzer>,
+    doc: Res<ShaderDoc>,
+    settings: Res<Settings>,
+) {
+    analyzer.update(settings.analyzer, &doc.text);
 }
 
 /// All egui UI: toolbar, editor window, error panel, WGSL viewer.
@@ -628,6 +651,9 @@ fn ui(mut p: UiParams) {
             } else {
                 ui.label("not compiled yet");
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                analyzer_readout(ui, &p.analyzer, p.settings.theme);
+            });
         });
         if p.wins.errors_expanded
             && let Some(err) = &p.status.error
@@ -661,7 +687,13 @@ fn ui(mut p: UiParams) {
             .open(&mut p.wins.editor)
             .show(ctx, |ui| {
                 let theme = p.settings.theme;
-                let out = editor::show_code_editor(ui, &mut p.doc.text, theme, &mut p.highlight);
+                let out = editor::show_code_editor(
+                    ui,
+                    &mut p.doc.text,
+                    theme,
+                    &mut p.highlight,
+                    p.analyzer.diagnostics(),
+                );
                 if out.changed {
                     persist::save_dirty(ctx, &p.doc.text);
                     if p.state.auto_run {
@@ -702,7 +734,11 @@ fn ui(mut p: UiParams) {
             .default_size([300.0, 150.0])
             .open(&mut p.wins.settings)
             .show(ctx, |ui| {
-                let before = (p.settings.theme, p.settings.random_preset);
+                let before = (
+                    p.settings.theme,
+                    p.settings.random_preset,
+                    p.settings.analyzer,
+                );
                 ui.horizontal(|ui| {
                     ui.label("theme:");
                     ui.radio_value(&mut p.settings.theme, Theme::Dark, "gruvbox dark");
@@ -712,9 +748,18 @@ fn ui(mut p: UiParams) {
                     &mut p.settings.random_preset,
                     "random preset on fresh start",
                 );
+                ui.checkbox(&mut p.settings.analyzer, "live diagnostics (wgsl-analyzer)");
+                if let analyzer::Status::Unavailable(why) = p.analyzer.status() {
+                    ui.label(egui::RichText::new(why).small().weak());
+                }
                 ui.separator();
                 ui.weak("Ctrl+S saves · Ctrl+O opens a .wesl file");
-                if (p.settings.theme, p.settings.random_preset) != before {
+                let after = (
+                    p.settings.theme,
+                    p.settings.random_preset,
+                    p.settings.analyzer,
+                );
+                if after != before {
                     persist::save_settings(&p.settings.encode());
                 }
             });
@@ -745,11 +790,46 @@ fn ui(mut p: UiParams) {
                 ui.label("MIT OR Apache-2.0.");
                 ui.weak(
                     "fullscreen_material.rs vendored from Bevy 0.20 (MIT OR Apache-2.0) \
+                     · live diagnostics by wgsl-analyzer (MIT OR Apache-2.0) \
+                     · coi-serviceworker by Guido Zuidhof (MIT) \
                      · Gruvbox colors by morhetz · presets ported from shadertoy \
                      classics and public-domain snippets.",
                 );
             });
     }
+}
+
+/// wgsl-analyzer's state at the right end of the status bar: problem counts
+/// while it runs, otherwise why not (the details are in the hover text).
+fn analyzer_readout(ui: &mut egui::Ui, analyzer: &analyzer::Analyzer, theme: Theme) {
+    use analyzer::{Severity, Status};
+    // Starting / unavailable is not the shader's fault: weak, not red.
+    let weak = ui.visuals().weak_text_color();
+    let (text, color, hover) = match analyzer.status() {
+        Status::Off => return,
+        Status::Starting => ("starting…".to_owned(), weak, "Loading the language server"),
+        Status::Unavailable(why) => ("unavailable".to_owned(), weak, why.as_str()),
+        Status::Ready => {
+            let diagnostics = analyzer.diagnostics();
+            let count = |s| {
+                let n = diagnostics.iter().filter(|d| d.severity == s).count();
+                (n > 0).then_some(n)
+            };
+            let hover = "Live diagnostics: hover the squiggles in the code";
+            let plural = |n: usize, what| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+            match (count(Severity::Error), count(Severity::Warning)) {
+                (Some(e), Some(w)) => {
+                    let text = format!("{}, {}", plural(e, "error"), plural(w, "warning"));
+                    (text, theme.err_color(), hover)
+                }
+                (Some(e), None) => (plural(e, "error"), theme.err_color(), hover),
+                (None, Some(w)) => (plural(w, "warning"), ui.visuals().warn_fg_color, hover),
+                (None, None) => (icon(lucide_icons::Icon::Check), theme.ok_color(), hover),
+            }
+        }
+    };
+    let label = egui::RichText::new(format!("wgsl-analyzer: {text}")).color(color);
+    ui.label(label).on_hover_text(hover);
 }
 
 /// Whether a pointer at `pos` (egui points) is over the bare shader canvas:

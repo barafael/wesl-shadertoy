@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#282828" />
   <title>wesl-shadertoy</title>
+  <!-- Makes the page cross-origin isolated where the host cannot send
+       COOP/COEP headers (GitHub Pages): wgsl-analyzer's worker needs
+       SharedArrayBuffer. Must run before anything else; reloads once on the
+       first visit to put its service worker in charge. -->
+  <script src="coi-serviceworker.js"></script>
   <style>
     html, body {
       margin: 0; padding: 0;
@@ -32,6 +37,9 @@
   <!-- Rust emits bulk-memory ops; trunk's bundled wasm-opt needs them enabled. -->
   <link data-trunk rel="rust" data-wasm-opt="z"
         data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int" />
+  <link data-trunk rel="copy-file" href="web/coi-serviceworker.js" />
+  <!-- The wgsl-analyzer language server (web/fetch-wgsl-analyzer.sh). -->
+  <link data-trunk rel="copy-dir" href="web/vendor/wgsl-analyzer" />
   <script>
     // Ctrl/Cmd+S and Ctrl/Cmd+O are app shortcuts (save / open); keep the
     // browser's own save/open dialogs from popping up. Capture phase, no

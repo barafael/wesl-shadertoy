@@ -6195,6 +6195,7 @@ dependencies = [
  "naga",
  "png 0.17.16",
  "pollster",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

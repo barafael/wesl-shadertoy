@@ -17,6 +17,7 @@ Runs natively and in the browser as WASM.
 | Presets | `preset:` combobox — 12 shadertoy classics (Plasma, Star Nest, Menger, …); fresh sessions roll a random one |
 | Windows | `Code`, `WGSL` (composed output) toggles; `⚙` settings (Gruvbox dark/light), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
+| Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
 
 The document auto-saves to `localStorage` (browser builds) and is restored on
@@ -72,6 +73,29 @@ console), then handed to Bevy as `Shader::from_wgsl`. A new shader handle per
 successful compile swaps into the render pass atomically — a broken edit never
 blanks the screen.
 
+## Live diagnostics (wgsl-analyzer)
+
+While you edit, the [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer)
+language server checks the code and the editor squiggles what it reports;
+the status bar shows the count. Its workspace mirrors the real compile:
+`shaders/shadertoy.wesl` is the hidden `package::shadertoy` module and the
+editor text is `shaders/user.wesl` (`package::user`), so imports and types
+resolve exactly as when compiling.
+
+* **Browser:** the server runs in a Web Worker from
+  [`wgsl-analyzer-web`](https://www.npmjs.com/package/wgsl-analyzer-web)
+  (the same server compiled to wasm). `web/fetch-wgsl-analyzer.sh` fetches
+  the pinned version (integrity-checked) as a trunk `pre_build` hook, and
+  `index.html` copies it to `dist/wgsl-analyzer/`. The worker needs
+  `SharedArrayBuffer`, i.e. a cross-origin isolated page: `trunk serve` sends
+  the COOP/COEP headers (`Trunk.toml`); on hosts that cannot (GitHub Pages)
+  the vendored [`coi-serviceworker`](https://github.com/gzuidhof/coi-serviceworker)
+  adds them, reloading once on the first visit.
+* **Native:** the app runs the `wgsl-analyzer` executable over stdio —
+  `$WGSL_ANALYZER` if set, else from `PATH`. Build it from a clone of the
+  repository with `cargo build --release -p wgsl-analyzer`. Without it the
+  status bar reads "wgsl-analyzer: unavailable" and everything else works.
+
 ## Architecture
 
 ```
@@ -88,6 +112,14 @@ src/
   editor.rs     the code editor: TextEdit with a custom layouter that paints
                 the highlighted job, line-number gutter, Tab/Shift-Tab
   presets.rs    12 compile-checked shadertoy classic presets
+  analyzer/     wgsl-analyzer LSP client (live diagnostics)
+    mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
+    native.rs     the wgsl-analyzer executable over stdio
+    web.rs        wgsl-analyzer-web in a Web Worker, via web/analyzer.js
+web/
+  analyzer.js               JS side of the web transport
+  fetch-wgsl-analyzer.sh    fetches the pinned wgsl-analyzer-web build
+  coi-serviceworker.js      COOP/COEP for hosts without header control (MIT)
 ```
 
 Rendering is the vendored Bevy `fullscreen_material` plugin: the user shader
@@ -102,7 +134,8 @@ integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 
 ```sh
 cargo run              # native (dynamic Bevy, fast rebuilds)
-cargo test             # compile pipeline, presets, highlighter
+cargo test             # compile pipeline, presets, highlighter, editor
+WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
 

@@ -2,6 +2,23 @@
 target = "index.html"
 dist = "dist"
 
+# Fetch the pinned wgsl-analyzer-web build that index.html copies into dist
+# (a no-op once present; see the script).
+[[hooks]]
+stage = "pre_build"
+command = "sh"
+command_arguments = ["web/fetch-wgsl-analyzer.sh"]
+
+[watch]
+ignore = ["web/vendor"]
+
 [serve]
 addresses = ["127.0.0.1"]
 port = 8080
+
+# The analyzer worker needs SharedArrayBuffer, i.e. a cross-origin isolated
+# page. GitHub Pages cannot send these, so index.html also loads
+# coi-serviceworker, which adds them from a service worker.
+[serve.headers]
+"Cross-Origin-Opener-Policy" = "same-origin"
+"Cross-Origin-Embedder-Policy" = "require-corp"
