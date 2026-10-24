@@ -31,6 +31,7 @@ use bevy::ecs::error::BevyError;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::{IntoScheduleConfigs, ScheduleConfigs, ScheduleLabel};
 use bevy::ecs::system::{BoxedSystem, Commands, Local, Res};
+use bevy::platform::collections::HashMap;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{
     ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
@@ -48,7 +49,6 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::ViewTarget;
-use bevy::platform::collections::HashMap;
 use bevy::render::{RenderApp, RenderStartup};
 use bevy::shader::Shader;
 
@@ -148,7 +148,8 @@ pub struct FullscreenMaterialPipeline<T: FullscreenMaterial> {
     pub(crate) sampler: Sampler,
     pub(crate) vertex: VertexState,
     /// One specialization cache per fragment shader handle.
-    variants: HashMap<AssetId<Shader>, Variants<RenderPipeline, FullscreenMaterialPipelineSpecializer>>,
+    variants:
+        HashMap<AssetId<Shader>, Variants<RenderPipeline, FullscreenMaterialPipelineSpecializer>>,
     _marker: PhantomData<T>,
 }
 
@@ -182,7 +183,10 @@ impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
             };
             Variants::new(FullscreenMaterialPipelineSpecializer, desc)
         });
-        variants.specialize(pipeline_cache, FullscreenMaterialPipelineKey { target_format })
+        variants.specialize(
+            pipeline_cache,
+            FullscreenMaterialPipelineKey { target_format },
+        )
     }
 }
 

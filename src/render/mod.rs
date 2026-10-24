@@ -111,10 +111,7 @@ impl Plugin for ShaderToyRenderPlugin {
             .init_resource::<buffers::BufferPipelines>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .add_systems(RenderStartup, crate::debugger::setup_debugger)
-            .add_systems(
-                Render,
-                active::activate_shader.in_set(RenderSystems::Queue),
-            )
+            .add_systems(Render, active::activate_shader.in_set(RenderSystems::Queue))
             .add_systems(
                 Core3d,
                 (

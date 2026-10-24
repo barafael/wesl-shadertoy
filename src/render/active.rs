@@ -22,11 +22,11 @@ use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Commands, Query, Res, ResMut};
 use bevy::math::Vec4;
+use bevy::render::RenderApp;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::{CachedPipelineState, CachedRenderPipelineId, PipelineCache};
 use bevy::render::view::ExtractedView;
-use bevy::render::RenderApp;
 
 use super::ShaderToyUniform;
 use super::buffers::BufferPipelines;
@@ -81,7 +81,9 @@ pub struct ShaderFeedback(pub Arc<Mutex<FeedbackState>>);
 
 impl ShaderFeedback {
     pub fn lock(&self) -> std::sync::MutexGuard<'_, FeedbackState> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -162,9 +164,13 @@ pub fn activate_shader(
     for (entity, view, requested, mut uniform, active) in &mut views {
         let format = target.format(view.target_format);
         let cache = &*pipeline_cache;
-        let Some(wanted) =
-            queue_pipelines(requested, format, cache, &mut fullscreen, &mut buffer_pipelines)
-        else {
+        let Some(wanted) = queue_pipelines(
+            requested,
+            format,
+            cache,
+            &mut fullscreen,
+            &mut buffer_pipelines,
+        ) else {
             continue;
         };
         let blocked = rejected.0 == Some(requested.generation);
@@ -179,9 +185,15 @@ pub fn activate_shader(
         let keep = active
             .filter(|a| a.fragment.generation != requested.generation)
             .and_then(|a| {
-                queue_pipelines(&a.fragment, format, cache, &mut fullscreen, &mut buffer_pipelines)
-                    .filter(|p| p.ready)
-                    .map(|p| (a.fragment.clone(), p.main))
+                queue_pipelines(
+                    &a.fragment,
+                    format,
+                    cache,
+                    &mut fullscreen,
+                    &mut buffer_pipelines,
+                )
+                .filter(|p| p.ready)
+                .map(|p| (a.fragment.clone(), p.main))
             });
         let (fragment, main) = match keep {
             Some(kept) if blocked || !wanted.ready => kept,
@@ -191,7 +203,9 @@ pub fn activate_shader(
 
         // Restart the per-shader state on activation and on Reset.
         let mut state = match active {
-            Some(a) if a.fragment.generation == fragment.generation && a.epoch == playback.epoch => {
+            Some(a)
+                if a.fragment.generation == fragment.generation && a.epoch == playback.epoch =>
+            {
                 a.clone()
             }
             _ => ActiveShader {

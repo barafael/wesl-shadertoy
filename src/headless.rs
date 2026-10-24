@@ -105,7 +105,10 @@ pub fn run_render_cli(args: &[String]) {
 
 /// Preset name (case-insensitive) or path to a `.wgsl` file.
 fn resolve_source(arg: &str) -> (String, String) {
-    if let Some(p) = presets::ALL.iter().find(|p| p.name.eq_ignore_ascii_case(arg)) {
+    if let Some(p) = presets::ALL
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(arg))
+    {
         return (p.name.to_string(), p.code.to_string());
     }
     match std::fs::read_to_string(arg) {
@@ -679,9 +682,7 @@ async fn render(
         .recv()
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    let mapped = slice
-        .get_mapped_range()
-        .map_err(|e| e.to_string())?;
+    let mapped = slice.get_mapped_range().map_err(|e| e.to_string())?;
     let stride = (width * 4).next_multiple_of(256) as usize;
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for row in 0..height as usize {
@@ -691,8 +692,7 @@ async fn render(
 }
 
 fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
-    let file =
-        std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);

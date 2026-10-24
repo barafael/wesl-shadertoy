@@ -18,11 +18,10 @@
 //! the passes hold still and the channels keep showing their last result.
 
 use bevy::asset::{AssetId, Handle};
-use bevy::platform::collections::HashMap;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Res, ResMut, SystemParam};
 use bevy::math::UVec2;
-use bevy::shader::Shader;
+use bevy::platform::collections::HashMap;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::{ComponentUniforms, DynamicUniformIndex};
 use bevy::render::render_resource::{
@@ -32,10 +31,11 @@ use bevy::render::render_resource::{
     TextureUsages, TextureView, TextureViewDescriptor,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
+use bevy::shader::Shader;
 
+use super::ShaderToyUniform;
 use super::active::{ActiveShader, Playback};
 use super::fullscreen_material::{ChannelViews, FullscreenMaterialPipeline};
-use super::ShaderToyUniform;
 
 /// The offscreen render target for one buffer channel slot.
 struct BufferSurface {
@@ -237,9 +237,12 @@ pub fn shadertoy_buffer_pass(
         pair.current ^= 1;
     }
 
-    let ids = p
-        .pipelines
-        .ids_for(&p.pipeline_cache, &p.fullscreen, &active.fragment.handle, mask);
+    let ids = p.pipelines.ids_for(
+        &p.pipeline_cache,
+        &p.fullscreen,
+        &active.fragment.handle,
+        mask,
+    );
 
     let Some(settings_binding) = p.data_uniforms.uniforms().binding() else {
         return;
@@ -281,19 +284,21 @@ pub fn shadertoy_buffer_pass(
             )),
         );
 
-        let mut pass = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
-            label: Some(&format!("shadertoy_buffer_pass_{name}")),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: &write,
-                depth_slice: None,
-                resolve_target: None,
-                ops: Operations::default(),
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        let mut pass = ctx
+            .command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some(&format!("shadertoy_buffer_pass_{name}")),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &write,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations::default(),
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[view.1.index()]);
         pass.draw(0..3, 0..1);

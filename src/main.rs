@@ -33,9 +33,7 @@ use bevy::prelude::*;
 use bevy::window::{PresentMode, PrimaryWindow};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
-use bevy::render::error_handler::{
-    ErrorType, RenderError, RenderErrorHandler, RenderErrorPolicy,
-};
+use bevy::render::error_handler::{ErrorType, RenderError, RenderErrorHandler, RenderErrorPolicy};
 use render::active::{ActiveShader, Playback, RejectedGeneration, ShaderFeedback};
 use render::{ShaderToyFragment, ShaderToyRenderPlugin, ShaderToyUniform};
 use theme::Theme;
@@ -375,7 +373,11 @@ struct UniformParams<'w, 's> {
 fn update_uniforms(mut p: UniformParams) {
     // Clamp so a backgrounded tab does not teleport the clock on resume.
     let dt = p.time.delta_secs().min(0.1);
-    let step = if p.state.paused { 0.0 } else { dt * p.state.speed };
+    let step = if p.state.paused {
+        0.0
+    } else {
+        dt * p.state.speed
+    };
     p.state.time += step;
     if p.playback.paused != p.state.paused {
         p.playback.paused = p.state.paused;
@@ -431,7 +433,8 @@ fn update_uniforms(mut p: UniformParams) {
     p.uniforms.date = date_uniforms();
     p.uniforms.sample_rate = SAMPLE_RATE_HZ;
     p.uniforms.frame_rate = p.state.fps;
-    p.debugger_on.set_if_neq(debugger::DebuggerOn(p.state.debugger));
+    p.debugger_on
+        .set_if_neq(debugger::DebuggerOn(p.state.debugger));
     // i_frame and the buffer channels' clocks and sizes belong to the shader
     // on screen, so the render world fills them in (`render::active`).
 }
@@ -547,7 +550,9 @@ fn on_render_error(
         return quit(main_world);
     };
     let active = active.map(|a| a.fragment.clone());
-    let placeholder = main_world.resource::<CurrentShader>().placeholder_fragment();
+    let placeholder = main_world
+        .resource::<CurrentShader>()
+        .placeholder_fragment();
     let (culprit, fallback) = match active {
         Some(a) if a.generation != requested.generation => (requested.generation, a),
         Some(a) if a.generation != 0 => (a.generation, placeholder),
@@ -1143,12 +1148,7 @@ fn date_uniforms() -> Vec4 {
     let days = (secs / 86400.0).floor() as i64;
     let seconds_of_day = secs - days as f64 * 86400.0;
     let (year, month, day) = civil_from_days(days);
-    Vec4::new(
-        year as f32,
-        month as f32,
-        day as f32,
-        seconds_of_day as f32,
-    )
+    Vec4::new(year as f32, month as f32, day as f32, seconds_of_day as f32)
 }
 
 #[cfg(test)]

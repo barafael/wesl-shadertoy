@@ -378,7 +378,10 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         );
         assert!(wgsl.contains("@group(0) @binding(2)"));
         // frag_coord must arrive with shadertoy's bottom-left origin.
-        assert!(wgsl.contains("i_resolution().y - p.y"), "no y-flip:\n{wgsl}");
+        assert!(
+            wgsl.contains("i_resolution().y - p.y"),
+            "no y-flip:\n{wgsl}"
+        );
     }
 
     #[test]
@@ -454,8 +457,8 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             ("i_channel_resolution", 25.0f32.to_bits()),
         ];
 
-        let module = naga::front::wgsl::parse_str(SHADERTOY_MODULE)
-            .expect("shadertoy module parses");
+        let module =
+            naga::front::wgsl::parse_str(SHADERTOY_MODULE).expect("shadertoy module parses");
         let (handle, ty) = module
             .types
             .iter()
@@ -468,7 +471,12 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         let expected_names: Vec<_> = expected.iter().map(|(n, _)| *n).collect();
         assert_eq!(names, expected_names);
         for (member, (name, first_word)) in members.iter().zip(expected) {
-            assert_eq!(word(member.offset), first_word, "{name} at offset {}", member.offset);
+            assert_eq!(
+                word(member.offset),
+                first_word,
+                "{name} at offset {}",
+                member.offset
+            );
         }
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).unwrap();
@@ -533,7 +541,12 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             .split("fn fragment_buffer_b")
             .nth(1)
             .expect("stub entry for buffer_b");
-        assert!(stub.split("@fragment").next().unwrap().contains("vec4<f32>(0.0)"));
+        assert!(
+            stub.split("@fragment")
+                .next()
+                .unwrap()
+                .contains("vec4<f32>(0.0)")
+        );
         // Buffer entries feed raw texel coordinates (no y-flip), so channel
         // reads line up with where the pass wrote; only the image pass flips.
         let entry = compiled
@@ -544,8 +557,14 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             .split('}')
             .next()
             .unwrap();
-        assert!(entry.contains("in.position.xy"), "no texel passthrough:\n{entry}");
-        assert!(!entry.contains("i_resolution"), "unexpected y-flip:\n{entry}");
+        assert!(
+            entry.contains("in.position.xy"),
+            "no texel passthrough:\n{entry}"
+        );
+        assert!(
+            !entry.contains("i_resolution"),
+            "unexpected y-flip:\n{entry}"
+        );
     }
 
     #[test]
