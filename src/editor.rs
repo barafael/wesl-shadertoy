@@ -27,8 +27,8 @@ use bevy_egui::egui::text::LayoutJob;
 use bevy_egui::egui::text_selection::CCursorRange;
 use bevy_egui::egui::widgets::text_edit::TextEditState;
 use bevy_egui::egui::{
-    Align, Color32, Context, FontId, Frame, Galley, Id, Key, Label, Layout, Margin, Modifiers,
-    ScrollArea, Sense, TextBuffer, TextEdit, TextWrapMode, Ui, Vec2, pos2,
+    Align, Color32, Context, Event, FontId, Frame, Galley, Id, Key, Label, Layout, Margin,
+    Modifiers, ScrollArea, Sense, TextBuffer, TextEdit, TextWrapMode, Ui, Vec2, pos2,
 };
 
 use crate::highlight::highlight_job;
@@ -132,15 +132,28 @@ pub fn show_code_editor(
         bottom: 2,
     };
 
-    // --- Tab / Shift-Tab handling (must run before TextEdit sees the key) ---
+    // --- Tab / Shift-Tab handling (must run before TextEdit sees the key;
+    // the TextEdit's `lock_focus` keeps egui from moving focus on Tab) ---
+    let mut changed = false;
     let prev_id: Option<Id> = ctx.data(|d| d.get_temp(editor_id_marker()));
     let focused = prev_id.is_some_and(|id| ctx.memory(|m| m.focused() == Some(id)));
     if focused {
-        let tab = ctx.input(|i| i.key_pressed(Key::Tab));
-        let shift = ctx.input(|i| i.modifiers.shift);
-        if tab {
+        // Shift comes from the key event itself: the frame's modifier state
+        // may already have moved on by the end of the input batch.
+        let tab = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                Event::Key {
+                    key: Key::Tab,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(modifiers.shift),
+                _ => None,
+            })
+        });
+        if let Some(shift) = tab {
             if let Some(id) = prev_id {
-                handle_tab(&ctx, id, text, shift);
+                changed = handle_tab(&ctx, id, text, shift);
             }
             ctx.input_mut(|i| {
                 i.consume_key(Modifiers::NONE, Key::Tab);
@@ -154,7 +167,6 @@ pub fn show_code_editor(
         * ctx.fonts_mut(|f| f.glyph_width(&font_id, '0'))
         + 12.0;
 
-    let mut changed = false;
     ScrollArea::both()
         .id_salt("code_scroll")
         .auto_shrink([false, false])
@@ -201,9 +213,12 @@ pub fn show_code_editor(
                         .margin(margin)
                         .desired_width(f32::INFINITY)
                         .frame(Frame::NONE)
+                        // Without this, egui moves keyboard focus to the
+                        // next widget on Tab before `handle_tab` runs.
+                        .lock_focus(true)
                         .layouter(&mut layouter),
                 );
-                changed = response.changed();
+                changed |= response.changed();
 
                 ctx.data_mut(|d| d.insert_temp(editor_id_marker(), response.id));
             });
@@ -269,13 +284,16 @@ pub fn show_code_view(ui: &mut Ui, text: &str, theme: Theme, cache: &mut Highlig
         });
 }
 
-fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {
+/// Indent (or with `shift`, dedent) at the cursor. Returns whether `text`
+/// changed.
+fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) -> bool {
     let Some(mut state) = TextEditState::load(ctx, id) else {
-        return;
+        return false;
     };
     let Some(range) = state.cursor.char_range() else {
-        return;
+        return false;
     };
+    let edited;
     let ccursor = range.primary;
     let byte = byte_index_from_char_index(text, ccursor.index.0);
 
@@ -289,6 +307,7 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {
         if removed > 0 {
             text.replace_range(line_start..line_start + removed, "");
         }
+        edited = removed > 0;
         let new_byte = byte.saturating_sub(removed);
         let new_cc = char_index_from_byte_index(text, new_byte);
         state
@@ -296,6 +315,7 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {
             .set_char_range(Some(CCursorRange::one(CCursor::new(new_cc))));
     } else {
         text.insert_str(byte, INDENT);
+        edited = true;
         state
             .cursor
             .set_char_range(Some(CCursorRange::one(CCursor::new(
@@ -303,6 +323,7 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {
             ))));
     }
     state.store(ctx, id);
+    edited
 }
 
 /// egui keeps these functions private to `text_cursor_cache`; ours are tiny.
@@ -487,6 +508,72 @@ mod tests {
     fn viewer_text_survives_font_atlas_rebuilds() {
         let text = crate::presets::ALL[0].code;
         survives_atlas_rebuilds(|ui, theme, cache| show_code_view(ui, text, theme, cache));
+    }
+
+    /// Tab indents at the cursor and keeps focus in the editor (egui moves
+    /// focus on Tab unless the TextEdit locks it), Shift-Tab dedents, and
+    /// both count as edits so autosave and auto-run see them.
+    #[test]
+    fn tab_indents_and_keeps_focus() {
+        let ctx = Context::default();
+        let mut cache = HighlightCache::default();
+        let mut text = String::from("fn f() {}\n");
+        // What a backend sends for one (Shift-)Tab stroke within a frame:
+        // modifier down, key press + release, modifier up.
+        let tab = |shift: bool| {
+            let modifiers = if shift {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::NONE
+            };
+            let key = |pressed| Event::Key {
+                key: Key::Tab,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            };
+            RawInput {
+                events: vec![
+                    Event::ModifiersChanged(modifiers),
+                    key(true),
+                    key(false),
+                    Event::ModifiersChanged(Modifiers::NONE),
+                ],
+                ..Default::default()
+            }
+        };
+        let mut frame = |input: RawInput, text: &mut String| {
+            let mut changed = false;
+            ctx.run_ui(input, |ui| {
+                changed = show_code_editor(ui, text, Theme::Dark, &mut cache).changed;
+            })
+            .drop_without_applying_deltas();
+            changed
+        };
+
+        frame(RawInput::default(), &mut text);
+        let id: Id = ctx
+            .data(|d| d.get_temp(editor_id_marker()))
+            .expect("editor id recorded");
+        ctx.memory_mut(|m| m.request_focus(id));
+        let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(0))));
+        state.store(&ctx, id);
+        // The TextEdit registers its focus-lock filter while it is drawn
+        // focused (in the app: the frame of the click that focused it).
+        frame(RawInput::default(), &mut text);
+
+        for (shift, expected) in [(false, 4), (false, 8), (true, 4)] {
+            assert!(
+                frame(tab(shift), &mut text),
+                "tab (shift: {shift}) not reported"
+            );
+            assert_eq!(text, format!("{}fn f() {{}}\n", " ".repeat(expected)));
+            assert_eq!(ctx.memory(|m| m.focused()), Some(id), "tab moved focus");
+        }
     }
 
     /// Lay out a cached job the way the widgets do.
