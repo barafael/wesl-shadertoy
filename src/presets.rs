@@ -603,6 +603,7 @@ const PROTEAN_CLOUDS: &str = include_str!("../presets/protean_clouds.wgsl");
 const SOUL: &str = include_str!("../presets/soul.wgsl");
 const FLUID: &str = include_str!("../presets/fluid.wgsl");
 const LIQUID_TOY: &str = include_str!("../presets/liquid_toy.wgsl");
+const PAINT_STREAMS: &str = include_str!("../presets/paint_streams.wgsl");
 
 pub const ALL: &[Preset] = &[
     Preset {
@@ -680,6 +681,10 @@ pub const ALL: &[Preset] = &[
     Preset {
         name: "Liquid Toy",
         code: LIQUID_TOY,
+    },
+    Preset {
+        name: "Paint Streams",
+        code: PAINT_STREAMS,
     },
 ];
 
