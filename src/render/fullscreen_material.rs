@@ -291,6 +291,7 @@ fn prepare_fullscreen_material_pipelines<'w, 's, T: FullscreenMaterial>(
     pipeline_cache: Res<PipelineCache>,
     mut pipeline: ResMut<FullscreenMaterialPipeline<T>>,
     views: PipelineViews<'w, 's, T>,
+    target: crate::debugger::MainPassTarget,
 ) -> Result<(), BevyError> {
     for (entity, view, material, fragment) in &views {
         let (Some(_material), Some(fragment)) = (material, fragment) else {
@@ -316,8 +317,10 @@ fn prepare_fullscreen_material_pipelines<'w, 's, T: FullscreenMaterial>(
             continue;
         };
 
+        // While the debugger is on, the main pass renders into its offscreen
+        // image target (see `crate::debugger`) instead of the view target.
         let pipeline_key = FullscreenMaterialPipelineKey {
-            target_format: view.target_format,
+            target_format: target.format(view.target_format),
         };
         let pipeline_id = variants.specialize(&pipeline_cache, pipeline_key)?;
 
@@ -352,6 +355,7 @@ pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
     render_device: Res<RenderDevice>,
     data_uniforms: Res<ComponentUniforms<T>>,
     channels: Res<ChannelViews>,
+    target: crate::debugger::MainPassTarget,
     mut ctx: RenderContext,
     mut pass_label: Local<String>,
 ) {
@@ -366,7 +370,9 @@ pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
 
     let post_process = view_target.post_process_write();
     let source = post_process.source;
-    let destination = post_process.destination;
+    // While the debugger is on, render into its offscreen image target;
+    // `debugger_blit_pass` then draws it plus the overlay to the view.
+    let destination = target.view(post_process.destination);
 
     let bind_group = render_device.create_bind_group(
         "fullscreen_material_bind_group",

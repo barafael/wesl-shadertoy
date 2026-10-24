@@ -11,7 +11,7 @@ use bevy::math::Vec4;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::extract_resource::ExtractResourcePlugin;
 use bevy::render::render_resource::ShaderType;
-use bevy::render::RenderApp;
+use bevy::render::{RenderApp, RenderStartup};
 
 pub use fullscreen_material::ShaderToyFragment;
 use fullscreen_material::{
@@ -42,19 +42,32 @@ pub struct ShaderToyUniform {
     pub date: Vec4,
     /// Audio sample rate in Hz (44100; there is no audio input).
     pub sample_rate: f32,
-    /// Padding so `channel_time` starts on a 16-byte boundary (the WGSL side
-    /// spells this gap as three scalar pads, not a `vec3`, whose align-16
-    /// rule would insert a different implicit gap).
-    pub _pad2: f32,
-    /// More padding.
-    pub _pad3: f32,
-    /// More padding.
-    pub _pad4: f32,
+    /// Smoothed frames per second (`i_frame_rate()`, also shown by the
+    /// debugger overlay).
+    pub frame_rate: f32,
+    /// Debugger overlay only: physical-pixel rows at the top and bottom of
+    /// the viewport hidden under the toolbar and the status bar, so the
+    /// overlay's readouts stay visible. Not exposed to user shaders.
+    pub overlay_top: f32,
+    /// See [`Self::overlay_top`].
+    pub overlay_bottom: f32,
     /// Playback time of buffer channels A..D (0.0 while a channel is unused).
     pub channel_time: Vec4,
     /// Size of buffer channels A..D in pixels (zero while a channel is unused).
     /// The WGSL side reads these as `vec3` (z = 0 for 2D buffers).
     pub channel_resolution: [Vec4; 4],
+}
+
+/// `uniform`'s bytes as the GPU sees them (std140 / WGSL uniform layout).
+/// The headless renderer uploads these, so its layout always follows the
+/// struct instead of hand-written offsets.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub fn uniform_bytes(uniform: &ShaderToyUniform) -> Vec<u8> {
+    let mut buffer = bevy::render::render_resource::encase::UniformBuffer::new(Vec::new());
+    buffer
+        .write(uniform)
+        .expect("writing into a Vec cannot fail");
+    buffer.into_inner()
 }
 
 impl FullscreenMaterial for ShaderToyUniform {
@@ -76,8 +89,12 @@ impl Plugin for ShaderToyRenderPlugin {
         app.add_plugins((
             FullscreenMaterialPlugin::<ShaderToyUniform>::default(),
             ExtractResourcePlugin::<buffers::BufferMask>::default(),
+            ExtractResourcePlugin::<crate::debugger::DebuggerShader>::default(),
+            ExtractResourcePlugin::<crate::debugger::DebuggerOn>::default(),
         ));
-        app.init_resource::<buffers::BufferMask>();
+        app.init_resource::<buffers::BufferMask>()
+            .init_resource::<crate::debugger::DebuggerOn>();
+        app.add_systems(bevy::app::Startup, crate::debugger::setup_debugger_shader);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -86,6 +103,19 @@ impl Plugin for ShaderToyRenderPlugin {
             .init_resource::<buffers::BufferMask>()
             .init_resource::<buffers::BufferTargets>()
             .init_resource::<buffers::BufferPipelines>()
+            .init_resource::<crate::debugger::DebuggerOn>()
+            .add_systems(RenderStartup, crate::debugger::setup_debugger)
+            .add_systems(
+                Core3d,
+                (
+                    crate::debugger::resize_image_target
+                        .in_set(Core3dSystems::PostProcess)
+                        .before(fullscreen_material_system::<ShaderToyUniform>),
+                    crate::debugger::debugger_blit_pass
+                        .in_set(Core3dSystems::PostProcess)
+                        .after(fullscreen_material_system::<ShaderToyUniform>),
+                ),
+            )
             .add_systems(
                 Core3d,
                 buffers::shadertoy_buffer_pass

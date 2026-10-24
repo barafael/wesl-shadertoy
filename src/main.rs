@@ -11,6 +11,7 @@
 
 mod analyzer;
 mod compile;
+mod debugger;
 mod editor;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
@@ -112,6 +113,8 @@ struct ShaderToyState {
     mouse: Vec4,
     mouse_held: bool,
     fps: f32,
+    /// In-shader debugger overlay on/off (toolbar bug icon).
+    debugger: bool,
     auto_run: bool,
     /// egui time of the last edit while auto-run is on; the `ui` system
     /// raises a run request once [`AUTO_RUN_DELAY`] seconds go by without a
@@ -137,6 +140,7 @@ impl Default for ShaderToyState {
             mouse: Vec4::ZERO,
             mouse_held: false,
             fps: 0.0,
+            debugger: false,
             auto_run: false,
             pending_run: None,
             last_preset: "Plasma",
@@ -255,6 +259,7 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     // live tests inject a document. Otherwise restore a saved document
     // (browser localStorage) or start from a preset — a random one when
     // the fresh-start setting is on.
+    app.state.debugger = cli_debugger();
     if let Some(text) = cli_shader() {
         app.doc.text = text;
         app.state.last_preset = "file";
@@ -338,6 +343,7 @@ struct UniformParams<'w, 's> {
     windows: Single<'w, 's, &'static Window, With<PrimaryWindow>>,
     uniforms: Single<'w, 's, &'static mut ShaderToyUniform>,
     buffers: Res<'w, crate::render::buffers::BufferMask>,
+    debugger_on: ResMut<'w, debugger::DebuggerOn>,
 }
 
 /// Advance the shadertoy clock, count frames, track iMouse and viewport size.
@@ -382,6 +388,13 @@ fn update_uniforms(mut p: UniformParams) {
             Vec2::new(px.x, resolution.y - px.y)
         });
         track_mouse(&mut p.state, pos, pressed && on_canvas, held);
+
+        // Canvas rows under the toolbar and status bar, for the debugger
+        // overlay's layout.
+        if p.state.canvas.is_positive() {
+            p.uniforms.overlay_top = p.state.canvas.min.y * ppp;
+            p.uniforms.overlay_bottom = (resolution.y - p.state.canvas.max.y * ppp).max(0.0);
+        }
     }
 
     p.uniforms.time = p.state.time;
@@ -391,6 +404,8 @@ fn update_uniforms(mut p: UniformParams) {
     p.uniforms.mouse = p.state.mouse;
     p.uniforms.date = date_uniforms();
     p.uniforms.sample_rate = SAMPLE_RATE_HZ;
+    p.uniforms.frame_rate = p.state.fps;
+    p.debugger_on.set_if_neq(debugger::DebuggerOn(p.state.debugger));
     // Buffer channels: a defined channel reports the time since the last
     // recompile and the viewport size (buffers render at viewport
     // resolution); an unused channel reports 0, like shadertoy does.
@@ -608,6 +623,8 @@ fn ui(mut p: UiParams) {
             ui.separator();
             ui.toggle_value(&mut p.wins.editor, "Code");
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
+            ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
+                .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
                 .on_hover_text("Settings");
             ui.toggle_value(&mut p.wins.about, "?")
@@ -791,6 +808,8 @@ fn ui(mut p: UiParams) {
                 ui.weak(
                     "fullscreen_material.rs vendored from Bevy 0.20 (MIT OR Apache-2.0) \
                      · live diagnostics by wgsl-analyzer (MIT OR Apache-2.0) \
+                     · debugger overlay ported from eliotbo/bevy_shadertoy_wgsl \
+                     (MIT OR Apache-2.0) \
                      · coi-serviceworker by Guido Zuidhof (MIT) \
                      · Gruvbox colors by morhetz · presets ported from shadertoy \
                      classics and public-domain snippets.",
@@ -938,6 +957,19 @@ fn cli_preset() -> Option<&'static presets::Preset> {
     }
 }
 
+/// Native-only: `--debugger` starts with the in-shader debugger overlay on
+/// (same as the toolbar bug icon), so scripted live tests can show it.
+fn cli_debugger() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::args().any(|a| a == "--debugger")
+    }
+}
+
 /// Time-seeded xorshift pick — no `rand` dependency for one roll per start.
 fn random_preset() -> &'static presets::Preset {
     let mut x = (now_epoch_secs() * 1.0e6) as u64;
@@ -1082,6 +1114,7 @@ mod tests {
             lucide_icons::Icon::Play,
             lucide_icons::Icon::Pause,
             lucide_icons::Icon::RotateCcw,
+            lucide_icons::Icon::Bug,
             lucide_icons::Icon::Settings,
             lucide_icons::Icon::CircleX,
             lucide_icons::Icon::Check,

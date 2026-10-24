@@ -31,17 +31,13 @@ use wesl::resolver::VirtualResolver;
 use wesl::syntax::ModulePath;
 use wesl::{CompileOptions, Compiler};
 
-/// The hidden `package::shadertoy` module: uniforms + accessors.
-pub(crate) const SHADERTOY_MODULE: &str = r#"// The shadertoy environment, provided by wesl-shadertoy.
-// Uniforms live in the dynamic uniform buffer the fullscreen-material
-// pipeline binds at @group(0) @binding(2).
-
-struct FullscreenVertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-struct ShaderToyUniforms {
+/// The WGSL uniform block, shared by [`SHADERTOY_MODULE`] and the debugger
+/// overlay ([`crate::debugger::DEBUGGER_WGSL`]) so the two cannot drift.
+/// Field order must match [`crate::render::ShaderToyUniform`]; the
+/// `uniform_layout_matches_rust` test checks every member's offset.
+macro_rules! shadertoy_uniforms_wgsl {
+    () => {
+        r#"struct ShaderToyUniforms {
     i_time: f32,
     i_time_delta: f32,
     i_frame: u32,
@@ -50,13 +46,33 @@ struct ShaderToyUniforms {
     i_mouse: vec4<f32>,
     i_date: vec4<f32>,
     i_sample_rate: f32,
-    _pad2: f32,
-    _pad3: f32,
-    _pad4: f32,
+    i_frame_rate: f32,
+    // Debugger overlay only (canvas rows hidden under the toolbar / status
+    // bar, physical px); not part of the shader API.
+    _overlay_top: f32,
+    _overlay_bottom: f32,
     i_channel_time: vec4<f32>,
     i_channel_resolution: array<vec4<f32>, 4>,
 }
+"#
+    };
+}
+pub(crate) use shadertoy_uniforms_wgsl;
 
+/// The hidden `package::shadertoy` module: uniforms + accessors.
+pub(crate) const SHADERTOY_MODULE: &str = concat!(
+    r#"// The shadertoy environment, provided by wesl-shadertoy.
+// Uniforms live in the dynamic uniform buffer the fullscreen-material
+// pipeline binds at @group(0) @binding(2).
+
+struct FullscreenVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+"#,
+    shadertoy_uniforms_wgsl!(),
+    r#"
 @group(0) @binding(2) var<uniform> st_uniforms: ShaderToyUniforms;
 /// The shared nearest, clamp-to-edge sampler. Buffer channels are
 /// `Rgba32Float` (like shadertoy's buffers) and therefore unfilterable, so
@@ -92,12 +108,15 @@ fn i_mouse() -> vec4<f32> { return st_uniforms.i_mouse; }
 fn i_date() -> vec4<f32> { return st_uniforms.i_date; }
 /// Audio sample rate in Hz. Fixed at 44100 — there is no audio input.
 fn i_sample_rate() -> f32 { return st_uniforms.i_sample_rate; }
+/// Smoothed frames per second.
+fn i_frame_rate() -> f32 { return st_uniforms.i_frame_rate; }
 /// Playback time of buffer channel i (0..3); 0.0 while the channel is unused.
 fn i_channel_time(i: u32) -> f32 { return st_uniforms.i_channel_time[i]; }
 /// Size of buffer channel i (0..3) in pixels (z = 0 for 2D buffers);
 /// (0, 0, 0) while the channel is unused.
 fn i_channel_resolution(i: u32) -> vec3<f32> { return st_uniforms.i_channel_resolution[i].xyz; }
-"#;
+"#
+);
 
 /// Names of the optional per-frame buffer passes, in shadertoy's A→D
 /// evaluation order. Bit *i* of a buffer mask means `BUFFER_NAMES[i]` is
@@ -359,12 +378,13 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     fn compiles_channel_and_clock_accessors() {
         let src = r#"
 import package::shadertoy::i_sample_rate;
+import package::shadertoy::i_frame_rate;
 import package::shadertoy::i_channel_time;
 import package::shadertoy::i_channel_resolution;
 import package::shadertoy::i_date;
 
 fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
-    var acc = i_sample_rate() + i_date().w * 1e-5;
+    var acc = i_sample_rate() + i_frame_rate() + i_date().w * 1e-5;
     for (var i: u32 = 0u; i < 4u; i = i + 1u) {
         acc = acc + i_channel_time(i) + i_channel_resolution(i).x;
     }
@@ -375,25 +395,77 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     }
 
     /// The Rust uniform struct and the WGSL `ShaderToyUniforms` struct are
-    /// maintained on both sides of FFI-bytes; guard that their sizes agree.
+    /// maintained on both sides of FFI-bytes: every WGSL member must sit at
+    /// the offset where the Rust field of the same name is encoded, and the
+    /// sizes must agree. (The debugger overlay shares the WGSL struct through
+    /// `shadertoy_uniforms_wgsl!`, so this covers it too.)
     #[test]
-    fn rust_uniform_struct_matches_wgsl_layout() {
+    fn uniform_layout_matches_rust() {
+        use bevy::math::Vec4;
         use bevy::render::render_resource::ShaderType;
 
         use crate::render::ShaderToyUniform;
 
+        // Every 4-byte slot gets a distinct value, so the encoded bytes tell
+        // which Rust field landed where.
+        let v = |a: f32| Vec4::new(a, a + 1.0, a + 2.0, a + 3.0);
+        let rust = ShaderToyUniform {
+            time: 1.0,
+            time_delta: 2.0,
+            frame: 3,
+            _pad: 4.0,
+            resolution: v(5.0),
+            mouse: v(9.0),
+            date: v(13.0),
+            sample_rate: 17.0,
+            frame_rate: 18.0,
+            overlay_top: 19.0,
+            overlay_bottom: 20.0,
+            channel_time: v(21.0),
+            channel_resolution: [v(25.0), v(29.0), v(33.0), v(37.0)],
+        };
+        let bytes = crate::render::uniform_bytes(&rust);
+        assert_eq!(bytes.len() as u64, ShaderToyUniform::min_size().get());
+        let word = |offset: u32| {
+            let o = offset as usize;
+            u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
+        };
+        // WGSL member name -> the first word its Rust namesake encodes.
+        let expected = [
+            ("i_time", 1.0f32.to_bits()),
+            ("i_time_delta", 2.0f32.to_bits()),
+            ("i_frame", 3),
+            ("_pad", 4.0f32.to_bits()),
+            ("i_resolution", 5.0f32.to_bits()),
+            ("i_mouse", 9.0f32.to_bits()),
+            ("i_date", 13.0f32.to_bits()),
+            ("i_sample_rate", 17.0f32.to_bits()),
+            ("i_frame_rate", 18.0f32.to_bits()),
+            ("_overlay_top", 19.0f32.to_bits()),
+            ("_overlay_bottom", 20.0f32.to_bits()),
+            ("i_channel_time", 21.0f32.to_bits()),
+            ("i_channel_resolution", 25.0f32.to_bits()),
+        ];
+
         let module = naga::front::wgsl::parse_str(SHADERTOY_MODULE)
             .expect("shadertoy module parses");
-        let handle = module
+        let (handle, ty) = module
             .types
             .iter()
             .find(|(_, t)| t.name.as_deref() == Some("ShaderToyUniforms"))
-            .map(|(h, _)| h)
             .expect("ShaderToyUniforms present");
+        let naga::TypeInner::Struct { members, .. } = &ty.inner else {
+            panic!("ShaderToyUniforms is a struct");
+        };
+        let names: Vec<_> = members.iter().filter_map(|m| m.name.as_deref()).collect();
+        let expected_names: Vec<_> = expected.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, expected_names);
+        for (member, (name, first_word)) in members.iter().zip(expected) {
+            assert_eq!(word(member.offset), first_word, "{name} at offset {}", member.offset);
+        }
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).unwrap();
-        let wgsl_size = u64::from(layouter[handle].size);
-        assert_eq!(wgsl_size, ShaderToyUniform::min_size().get());
+        assert_eq!(u64::from(layouter[handle].size), bytes.len() as u64);
     }
 
     /// Resources the pipeline does not provide are a compile error, not a

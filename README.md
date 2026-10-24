@@ -19,6 +19,7 @@ Runs natively and in the browser as WASM.
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
+| Debugger overlay | toolbar bug icon (or `--debugger` natively): crosshair and click ring, RGBA probe boxes for the pixels under the cursor and the last click, mouse position, resolution, fps |
 
 The document auto-saves to `localStorage` (browser builds) and is restored on
 load, along with your theme. Compile errors appear in the bottom panel — the
@@ -57,6 +58,7 @@ Available uniforms (import from `package::shadertoy`):
 | `i_frame() -> u32` | `iFrame` | frame counter |
 | `i_resolution() -> vec3<f32>` | `iResolution` | viewport size in pixels |
 | `i_mouse() -> vec4<f32>` | `iMouse` | xy: drag position, zw: click; negative z after release |
+| `i_frame_rate() -> f32` | `iFrameRate` | smoothed frames per second |
 | `i_date() -> vec4<f32>` | `iDate` | seconds since midnight, month, day of week, day of year |
 
 `frag_coord` is in pixels, origin **top-left** (WGSL framebuffer convention,
@@ -108,6 +110,8 @@ src/
     mod.rs                    ShaderToyUniform/Fragment components + plugin
     fullscreen_material.rs    vendored from Bevy 0.20, modified to rebuild
                               its pipeline when the shader handle changes
+  debugger.rs   debugger overlay (ported from bevy_shadertoy_wgsl): blit pass,
+                overlay WGSL, font atlas rasterized from egui's Hack font
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
   editor.rs     the code editor: TextEdit with a custom layouter that paints
                 the highlighted job, line-number gutter, Tab/Shift-Tab
@@ -125,7 +129,11 @@ web/
 Rendering is the vendored Bevy `fullscreen_material` plugin: the user shader
 runs as a fullscreen pass in `Core3d`'s post-process stage with
 `Tonemapping::None`, so colors hit the screen untouched. Per-frame uniforms
-ride in a dynamic uniform buffer bound at `@group(0) @binding(2)`.
+ride in a dynamic uniform buffer bound at `@group(0) @binding(2)`. While the
+debugger overlay is on, the user shader renders into an offscreen
+`Rgba16Float` target instead (`Rgba8UnormSrgb` where WebGL2 cannot render
+to half floats), and a second pass draws it plus the overlay to the view;
+while it is off, that pass and the target cost nothing.
 
 The UI is egui (via `bevy_egui`, `EguiPrimaryContextPass`), following the
 integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
@@ -135,6 +143,7 @@ integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 ```sh
 cargo run              # native (dynamic Bevy, fast rebuilds)
 cargo test             # compile pipeline, presets, highlighter, editor
+cargo run -- --render Plasma out.png [--debugger]  # headless PNG, no window
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
@@ -150,4 +159,7 @@ GitHub Pages deployment lives in `.github/workflows/deploy.yml` (trunk v0.22.0,
 ## License
 
 MIT OR Apache-2.0. `src/render/fullscreen_material.rs` is vendored (and
-modified) from Bevy 0.20 under the same dual license — see its header.
+modified) from Bevy 0.20 under the same dual license — see its header. The
+debugger overlay in `src/debugger.rs` is ported from
+[eliotbo/bevy_shadertoy_wgsl](https://github.com/eliotbo/bevy_shadertoy_wgsl)
+(MIT OR Apache-2.0).

@@ -10,6 +10,9 @@
 
 use crate::compile::{self, compile_user_shader};
 use crate::presets;
+use crate::render::{ShaderToyUniform, uniform_bytes};
+use bevy::math::Vec4;
+use bevy::render::render_resource::ShaderType;
 
 /// Fullscreen triangle feeding the composed `package::main` module. The uv
 /// attribute mirrors Bevy's fullscreen vertex shader (v = 0 at the top).
@@ -34,17 +37,16 @@ fn vs(@builtin(vertex_index) index: u32) -> VOut {
 }
 "#;
 
-/// Uniform block size; mirrors `ShaderToyUniform` (see render/mod.rs).
-const UNIFORM_BYTES: usize = 160;
-
 pub fn run_render_cli(args: &[String]) {
     let mut iter = args.iter().skip(1);
     let mut time = 3.0f32;
     let mut frames = 1u32;
+    let mut debugger = false;
     let mut positional: Vec<String> = Vec::new();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--render" => {}
+            "--debugger" => debugger = true,
             "--time" => {
                 if let Some(t) = iter.next() {
                     time = t.parse().unwrap_or(3.0);
@@ -59,7 +61,10 @@ pub fn run_render_cli(args: &[String]) {
         }
     }
     if positional.len() < 2 {
-        eprintln!("usage: wesl-shadertoy --render <preset-name|file.wgsl> <out.png> [--time SECS] [--frames N]");
+        eprintln!(
+            "usage: wesl-shadertoy --render <preset-name|file.wgsl> <out.png> \
+             [--time SECS] [--frames N] [--debugger]"
+        );
         std::process::exit(2);
     }
     let (name, source) = resolve_source(&positional[0]);
@@ -81,6 +86,7 @@ pub fn run_render_cli(args: &[String]) {
         height,
         time,
         frames,
+        debugger,
     ));
     match result {
         Ok(rgba) => {
@@ -116,8 +122,11 @@ struct Surface {
     view: wgpu::TextureView,
 }
 
-/// Render `frames` frames (buffer passes then the main pass) and read back
-/// the final main-pass image.
+/// Render `frames` frames (buffer passes, the main pass into the offscreen
+/// image target, then the debugger blit pass; with `debugger` off the main
+/// pass renders straight to the output) and read back the final image.
+/// With `debugger` on, the overlay is composited and `iMouse` is parked at
+/// the centre so the crosshair and probe boxes are visible in the PNG.
 async fn render(
     wgsl: &str,
     buffers: u8,
@@ -125,6 +134,7 @@ async fn render(
     height: u32,
     time: f32,
     frames: u32,
+    debugger: bool,
 ) -> Result<Vec<u8>, String> {
     let instance = wgpu::Instance::default();
     let adapter = instance
@@ -143,6 +153,10 @@ async fn render(
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("fullscreen-vs"),
         source: wgpu::ShaderSource::Wgsl(VERTEX_WGSL.into()),
+    });
+    let debugger_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("debugger"),
+        source: wgpu::ShaderSource::Wgsl(crate::debugger::DEBUGGER_WGSL.into()),
     });
 
     // The composed module references bindings 1..6 (sampler, uniform, four
@@ -179,7 +193,7 @@ async fn render(
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES as u64),
+                    min_binding_size: Some(ShaderToyUniform::min_size()),
                 },
                 count: None,
             },
@@ -222,7 +236,14 @@ async fn render(
         })
     };
 
-    let main_pipeline = make_pipeline(compile::MAIN_ENTRY, wgpu::TextureFormat::Rgba8UnormSrgb, "main-rp");
+    // Like the app, the main pass renders into the offscreen image target
+    // only while the debugger is on, and straight to the output otherwise.
+    let main_format = if debugger {
+        crate::debugger::IMAGE_FORMAT
+    } else {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    };
+    let main_pipeline = make_pipeline(compile::MAIN_ENTRY, main_format, "main-rp");
     let buffer_pipelines: Vec<_> = compile::BUFFER_NAMES
         .iter()
         .enumerate()
@@ -241,7 +262,7 @@ async fn render(
 
     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("shadertoy-uniform"),
-        size: UNIFORM_BYTES as u64,
+        size: ShaderToyUniform::min_size().get(),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -320,6 +341,141 @@ async fn render(
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
+    // --- debugger plumbing: font atlas, offscreen image target, blit pass ---
+    let atlas = crate::debugger::font_atlas_pixels();
+    let font = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("debugger-font-atlas"),
+        size: wgpu::Extent3d {
+            width: crate::debugger::ATLAS_SIZE,
+            height: crate::debugger::ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        font.as_image_copy(),
+        &atlas,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(crate::debugger::ATLAS_SIZE), // R8, multiple of 256
+            rows_per_image: Some(crate::debugger::ATLAS_SIZE),
+        },
+        wgpu::Extent3d {
+            width: crate::debugger::ATLAS_SIZE,
+            height: crate::debugger::ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    let font_view = font.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let image = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("image-target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: crate::debugger::IMAGE_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("debugger-blit-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(ShaderToyUniform::min_size()),
+                },
+                count: None,
+            },
+        ],
+    });
+    let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("debugger-blit-pl"),
+        bind_group_layouts: &[Some(&blit_bgl)],
+        immediate_size: 0,
+    });
+    let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("debugger-blit-rp"),
+        layout: Some(&blit_layout),
+        vertex: wgpu::VertexState {
+            module: &vs_module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &debugger_module,
+            entry_point: Some(crate::debugger::BLIT_ENTRY),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("debugger-blit-bg"),
+        layout: &blit_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&image_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&font_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    });
+
     let make_bind_group = |label: &str, channels: [&wgpu::TextureView; 4]| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
@@ -356,25 +512,29 @@ async fn render(
     // Replay `frames` frames, ending at the requested `time`.
     for frame in 0..frames {
         let t = time * (frame + 1) as f32 / frames as f32;
-        let mut bytes = [0u8; UNIFORM_BYTES];
-        // Field order mirrors ShaderToyUniform (see render/mod.rs).
-        bytes[0..4].copy_from_slice(&t.to_le_bytes());
-        bytes[4..8].copy_from_slice(&(time / frames as f32).to_le_bytes());
-        bytes[8..12].copy_from_slice(&(frame + 1).to_le_bytes());
-        bytes[16..20].copy_from_slice(&(width as f32).to_le_bytes());
-        bytes[20..24].copy_from_slice(&(height as f32).to_le_bytes());
-        bytes[24..28].copy_from_slice(&1.0f32.to_le_bytes());
-        bytes[64..68].copy_from_slice(&44100.0f32.to_le_bytes());
+        let mut uniforms = ShaderToyUniform {
+            time: t,
+            time_delta: time / frames as f32,
+            frame: frame + 1,
+            resolution: Vec4::new(width as f32, height as f32, 1.0, 0.0),
+            sample_rate: 44100.0,
+            frame_rate: 60.0,
+            ..Default::default()
+        };
+        if debugger {
+            // Park iMouse at the centre (y-up, like the app) with a held
+            // click there too, so the crosshair, ring and probe boxes show.
+            let (mx, my) = (width as f32 / 2.0, height as f32 / 2.0);
+            uniforms.mouse = Vec4::new(mx, my, mx, my);
+        }
         for i in 0..4 {
             if buffers & (1 << i) != 0 {
                 // iChannelTime counts from (re)compile, which is t = 0 here.
-                // i_channel_time is one packed vec4 (stride 4), while
-                // i_channel_resolution is an array<vec4, 4> (stride 16).
-                bytes[80 + i * 4..84 + i * 4].copy_from_slice(&t.to_le_bytes());
-                bytes[96 + i * 16..100 + i * 16].copy_from_slice(&(width as f32).to_le_bytes());
-                bytes[100 + i * 16..104 + i * 16].copy_from_slice(&(height as f32).to_le_bytes());
+                uniforms.channel_time[i] = t;
+                uniforms.channel_resolution[i] = Vec4::new(width as f32, height as f32, 0.0, 0.0);
             }
         }
+        let bytes = uniform_bytes(&uniforms);
         queue.write_buffer(&uniform, 0, &bytes);
 
         let write_slot = (frame % 2) as usize;
@@ -431,7 +591,7 @@ async fn render(
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("smoke-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: if debugger { &image_view } else { &view },
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -446,6 +606,29 @@ async fn render(
             });
             pass.set_pipeline(&main_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Blit pass: image target plus the debugger overlay -> final target.
+        if debugger {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("debugger-blit-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&blit_pipeline);
+            pass.set_bind_group(0, &blit_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 

@@ -6188,6 +6188,7 @@ dependencies = [
 name = "wesl-shadertoy"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "bevy",
  "bevy_egui",
  "js-sys",
