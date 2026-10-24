@@ -112,6 +112,10 @@ struct ShaderToyState {
     /// new edit (debounce, so typing does not compile per keystroke).
     pending_run: Option<f64>,
     last_preset: &'static str,
+    /// `time` at the last successful compile; buffer channels report
+    /// `time - channel_start` as their iChannelTime (a recompile resets the
+    /// buffers, like editing them on shadertoy does).
+    channel_start: f32,
 }
 
 impl Default for ShaderToyState {
@@ -127,6 +131,7 @@ impl Default for ShaderToyState {
             auto_run: false,
             pending_run: None,
             last_preset: "Plasma",
+            channel_start: 0.0,
         }
     }
 }
@@ -230,19 +235,26 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     let random = settings.random_preset;
     commands.insert_resource(settings);
 
-    // Restore a saved document (browser localStorage) or start from a preset
-    // — a random one when the fresh-start setting is on.
-    match persist::load_doc() {
-        Some(saved) => {
-            app.doc.text = saved;
-            app.state.last_preset = "saved";
-        }
-        None => {
-            let preset = cli_preset()
-                .or(random.then(random_preset))
-                .unwrap_or(presets::DEFAULT);
-            app.doc.text = preset.code.to_string();
-            app.state.last_preset = preset.name;
+    // `--shader <file>` (native) wins over everything: it is how scripted
+    // live tests inject a document. Otherwise restore a saved document
+    // (browser localStorage) or start from a preset — a random one when
+    // the fresh-start setting is on.
+    if let Some(text) = cli_shader() {
+        app.doc.text = text;
+        app.state.last_preset = "file";
+    } else {
+        match persist::load_doc() {
+            Some(saved) => {
+                app.doc.text = saved;
+                app.state.last_preset = "saved";
+            }
+            None => {
+                let preset = cli_preset()
+                    .or(random.then(random_preset))
+                    .unwrap_or(presets::DEFAULT);
+                app.doc.text = preset.code.to_string();
+                app.state.last_preset = preset.name;
+            }
         }
     }
 
@@ -309,6 +321,7 @@ struct UniformParams<'w, 's> {
     time: Res<'w, Time>,
     windows: Single<'w, 's, &'static Window, With<PrimaryWindow>>,
     uniforms: Single<'w, 's, &'static mut ShaderToyUniform>,
+    buffers: Res<'w, crate::render::buffers::BufferMask>,
 }
 
 /// Advance the shadertoy clock, count frames, track iMouse and viewport size.
@@ -376,10 +389,19 @@ fn update_uniforms(mut p: UniformParams) {
     p.uniforms.mouse = p.state.mouse;
     p.uniforms.date = date_uniforms();
     p.uniforms.sample_rate = SAMPLE_RATE_HZ;
-    // Buffer channels arrive with the multi-pass renderer; until then every
-    // channel is unused, which shadertoy reports as time 0 / resolution 0.
-    p.uniforms.channel_time = Vec4::ZERO;
-    p.uniforms.channel_resolution = [Vec4::ZERO; 4];
+    // Buffer channels: a defined channel reports the time since the last
+    // recompile and the viewport size (buffers render at viewport
+    // resolution); an unused channel reports 0, like shadertoy does.
+    let mut channel_time = [0.0f32; 4];
+    let mut channel_resolution = [Vec4::ZERO; 4];
+    for i in 0..4 {
+        if p.buffers.0 & (1 << i) != 0 {
+            channel_time[i] = p.state.time - p.state.channel_start;
+            channel_resolution[i] = Vec4::new(resolution.x, resolution.y, 0.0, 0.0);
+        }
+    }
+    p.uniforms.channel_time = Vec4::from(channel_time);
+    p.uniforms.channel_resolution = channel_resolution;
 }
 
 /// Everything [`compile_and_apply`] reads or writes, bundled into one parameter.
@@ -391,6 +413,8 @@ struct CompileParams<'w, 's> {
     shaders: ResMut<'w, Assets<Shader>>,
     current: ResMut<'w, CurrentShader>,
     fragment: Single<'w, 's, &'static mut ShaderToyFragment>,
+    buffers: ResMut<'w, crate::render::buffers::BufferMask>,
+    state: ResMut<'w, ShaderToyState>,
 }
 
 /// Compile the editor text and, on success, hot-swap the running shader.
@@ -405,7 +429,8 @@ fn compile_and_apply(mut p: CompileParams) {
 
     let started = Instant::now();
     match compile::compile_user_shader(&p.doc.text) {
-        Ok(wgsl) => {
+        Ok(compiled) => {
+            let wgsl = compiled.wgsl;
             let shader = Shader::from_wgsl(wgsl.clone(), "shadertoy://user");
             let handle = p.shaders.add(shader);
             let replaced = std::mem::replace(&mut p.current.handle, handle.clone());
@@ -415,6 +440,10 @@ fn compile_and_apply(mut p: CompileParams) {
             // without this each compile (auto-run!) leaks a Shader plus its
             // extracted copy and pipeline-cache entry.
             p.shaders.remove(&replaced);
+            // Tell the renderer which buffer passes exist and restart the
+            // channel clocks, like editing a buffer on shadertoy does.
+            *p.buffers = crate::render::buffers::BufferMask(compiled.buffers);
+            p.state.channel_start = p.state.time;
             let ms = started.elapsed().as_secs_f32() * 1000.0;
             p.status.error = None;
             p.status.last_ms = Some(ms);
@@ -745,6 +774,35 @@ fn open_into(
     state.pending_run = None;
     run.0 = true;
     status.note = Some((format!("opened {name}"), true));
+}
+
+/// Native-only: `--shader <file>` seeds the editor with the contents of a
+/// WGSL file, so scripted live tests can inject a document without GUI
+/// input. Takes precedence over saved documents and presets. Web builds
+/// have no argv and always return `None`.
+fn cli_shader() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut args = std::env::args();
+        while let Some(arg) = args.next() {
+            if arg == "--shader"
+                && let Some(path) = args.next()
+            {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => return Some(text),
+                    Err(e) => {
+                        warn!("--shader {path}: {e}; starting with the default preset");
+                        return None;
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Native-only: `--preset <name>` picks the startup preset (case-insensitive

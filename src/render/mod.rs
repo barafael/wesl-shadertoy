@@ -1,15 +1,22 @@
 //! Rendering wiring: the shadertoy fullscreen-material plugin.
 
+pub mod buffers;
 pub mod fullscreen_material;
 
+use bevy::app::Plugin;
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::ecs::component::Component;
+use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::math::Vec4;
-use bevy::render::RenderApp;
 use bevy::render::extract_component::ExtractComponent;
+use bevy::render::extract_resource::ExtractResourcePlugin;
 use bevy::render::render_resource::ShaderType;
+use bevy::render::RenderApp;
 
 pub use fullscreen_material::ShaderToyFragment;
-use fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin};
+use fullscreen_material::{
+    FullscreenMaterial, FullscreenMaterialPlugin, fullscreen_material_system,
+};
 
 /// Per-frame shadertoy uniforms, extracted to the render world as a dynamic
 /// uniform buffer bound at `@group(0) @binding(2)`.
@@ -53,14 +60,38 @@ pub struct ShaderToyUniform {
 impl FullscreenMaterial for ShaderToyUniform {
     // Runs in Core3d post-process; with an empty scene the fullscreen triangle
     // simply shades the cleared view target.
+
+    /// The user's `main_image` entry; the `fragment_buffer_*` siblings are
+    /// rendered by [`super::buffers::shadertoy_buffer_pass`] instead.
+    fn fragment_entry_point() -> Option<&'static str> {
+        Some(crate::compile::MAIN_ENTRY)
+    }
 }
 
 /// Plugin that renders the user's compiled shader full-screen.
 pub struct ShaderToyRenderPlugin;
 
-impl bevy::app::Plugin for ShaderToyRenderPlugin {
+impl Plugin for ShaderToyRenderPlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        app.add_plugins(FullscreenMaterialPlugin::<ShaderToyUniform>::default());
+        app.add_plugins((
+            FullscreenMaterialPlugin::<ShaderToyUniform>::default(),
+            ExtractResourcePlugin::<buffers::BufferMask>::default(),
+        ));
+        app.init_resource::<buffers::BufferMask>();
+
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        render_app
+            .init_resource::<buffers::BufferMask>()
+            .init_resource::<buffers::BufferTargets>()
+            .init_resource::<buffers::BufferPipelines>()
+            .add_systems(
+                Core3d,
+                buffers::shadertoy_buffer_pass
+                    .in_set(Core3dSystems::PostProcess)
+                    .before(fullscreen_material_system::<ShaderToyUniform>),
+            );
     }
 }
 

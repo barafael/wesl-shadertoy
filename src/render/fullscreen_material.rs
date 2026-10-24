@@ -13,6 +13,10 @@
 //!   their caches without the shader handle, so they cannot do this).
 //! * `FullscreenMaterialPipeline::variants` is built lazily: the first compiled
 //!   shader may arrive after `RenderStartup`.
+//! * The bind group layout carries four extra `texture_2d` entries (bindings
+//!   3..6) for shadertoy's buffer channels, and the bind group is rebuilt
+//!   every frame instead of cached, because those channel views ping-pong
+//!   per frame (see [`super::buffers`]).
 
 use core::any::type_name;
 use core::marker::PhantomData;
@@ -37,15 +41,14 @@ use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_
 use bevy::render::render_resource::encase::internal::WriteInto;
 use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId,
-    Canonical, ColorTargetState, ColorWrites, FragmentState, Operations, PipelineCache,
+    Canonical, ColorTargetState, ColorWrites, Extent3d, FragmentState, Operations, PipelineCache,
     RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
     Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType, Specializer,
-    SpecializerKey, TextureFormat, TextureSampleType, TextureView, Variants, VertexState,
+    SpecializerKey, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+    TextureUsages, TextureView, TextureViewDescriptor, Variants, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
-use bevy::render::view::{
-    ExtractedView, PostProcessBindGroupCache, PostProcessBindGroupCacheBuilder, ViewTarget,
-};
+use bevy::render::view::{ExtractedView, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 
@@ -77,10 +80,7 @@ impl<T: FullscreenMaterial> Plugin for FullscreenMaterialPlugin<T> {
             .add_systems(RenderStartup, init_pipeline::<T>)
             .add_systems(
                 Render,
-                (
-                    prepare_fullscreen_material_pipelines::<T>.in_set(RenderSystems::Prepare),
-                    prepare_bind_groups::<T>.in_set(RenderSystems::PrepareBindGroups),
-                ),
+                prepare_fullscreen_material_pipelines::<T>.in_set(RenderSystems::Prepare),
             );
 
         let system = T::schedule_configs(fullscreen_material_system::<T>.into_configs());
@@ -112,13 +112,40 @@ pub trait FullscreenMaterial:
             .in_set(Core3dSystems::PostProcess)
             .before(tonemapping)
     }
+
+    /// The fragment entry point to select when the shader module defines
+    /// several (wesl-shadertoy addition: shadertoy shaders compile with the
+    /// `fragment` entry plus one `fragment_buffer_*` per buffer pass).
+    /// `None` lets wgpu pick the module's only entry point.
+    fn fragment_entry_point() -> Option<&'static str> {
+        None
+    }
+}
+
+/// The texture views bound at `@group(0) @binding(3..6)` as the shadertoy
+/// buffer channels, plus the black 1×1 dummy used for channels the current
+/// shader does not define (and as binding-0 filler for buffer passes).
+///
+/// (wesl-shadertoy addition: [`super::buffers::shadertoy_buffer_pass`]
+/// republishes `views` every frame as the buffer passes produce results.)
+#[derive(Resource)]
+pub struct ChannelViews {
+    pub views: [TextureView; 4],
+    pub dummy: TextureView,
+}
+
+impl ChannelViews {
+    /// Point every channel at the black dummy (no buffers defined).
+    pub fn reset(&mut self) {
+        self.views = std::array::from_fn(|_| self.dummy.clone());
+    }
 }
 
 #[derive(Resource)]
 pub struct FullscreenMaterialPipeline<T: FullscreenMaterial> {
-    layout: BindGroupLayoutDescriptor,
-    sampler: Sampler,
-    vertex: VertexState,
+    pub(crate) layout: BindGroupLayoutDescriptor,
+    pub(crate) sampler: Sampler,
+    pub(crate) vertex: VertexState,
     /// The fragment shader the `variants` cache was built around.
     shader: Option<Handle<Shader>>,
     /// Built lazily once a [`ShaderToyFragment`] has been extracted.
@@ -134,6 +161,7 @@ impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
             vertex: self.vertex.clone(),
             fragment: Some(FragmentState {
                 shader: shader.clone(),
+                entry_point: T::fragment_entry_point().map(std::borrow::Cow::from),
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba8UnormSrgb,
                     blend: None,
@@ -187,10 +215,38 @@ fn init_pipeline<T: FullscreenMaterial>(
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 uniform_buffer::<T>(true),
+                // shadertoy buffer channels A–D (i_channel_0()..i_channel_3()).
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
             ),
         ),
     );
     let sampler = render_device.create_sampler(&SamplerDescriptor::default());
+
+    // Black 1×1 stand-in for channels the shader does not define. Textures
+    // read as zero before anything is written, so a plain TEXTURE_BINDING
+    // usage is enough; Rgba16Float keeps it format-compatible with buffers.
+    let dummy = render_device.create_texture(&TextureDescriptor {
+        label: Some("shadertoy_channel_dummy"),
+        size: Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let dummy_view = dummy.create_view(&TextureViewDescriptor::default());
+    commands.insert_resource(ChannelViews {
+        views: std::array::from_fn(|_| dummy_view.clone()),
+        dummy: dummy_view,
+    });
 
     commands.insert_resource(FullscreenMaterialPipeline::<T> {
         layout,
@@ -266,82 +322,6 @@ fn prepare_fullscreen_material_pipelines<'w, 's, T: FullscreenMaterial>(
     Ok(())
 }
 
-/// Holds the bind groups for both main textures
-///
-/// We can't know ahead of time which one is the source or destination so we create a bind group
-/// for both
-#[derive(Component)]
-pub struct FullscreenMaterialBindGroup<T: FullscreenMaterial> {
-    cache: PostProcessBindGroupCache,
-    // This is in case someone wants multiple `FullscreenMaterial` per camera
-    _marker: PhantomData<T>,
-}
-
-/// View query data for [`prepare_bind_groups`] (see [`PipelineViews`] for why
-/// these queries are aliased).
-type BindGroupViews<'w, 's, T> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static ViewTarget,
-        Option<&'static mut FullscreenMaterialBindGroup<T>>,
-        Option<&'static T>,
-    ),
->;
-
-/// Prepare the bind groups for both main textures for all views that have a [`FullscreenMaterial`]
-fn prepare_bind_groups<'w, 's, T: FullscreenMaterial>(
-    mut commands: Commands,
-    mut view: BindGroupViews<'w, 's, T>,
-    fullscreen_pipeline: Option<Res<FullscreenMaterialPipeline<T>>>,
-    pipeline_cache: Res<PipelineCache>,
-    data_uniforms: Res<ComponentUniforms<T>>,
-    render_device: Res<RenderDevice>,
-) {
-    let Some(fullscreen_pipeline) = fullscreen_pipeline else {
-        return;
-    };
-    let Some(settings_binding) = data_uniforms.uniforms().binding() else {
-        return;
-    };
-
-    for (entity, view_target, mut maybe_bind_groups, material) in &mut view {
-        if material.is_none() {
-            commands
-                .entity(entity)
-                .remove::<FullscreenMaterialBindGroup<T>>();
-            continue;
-        }
-
-        let builder = PostProcessBindGroupCacheBuilder::new(|texture: &TextureView| {
-            (
-                texture.id(),
-                render_device.create_bind_group(
-                    "fullscreen_material_bind_group",
-                    &pipeline_cache.get_bind_group_layout(&fullscreen_pipeline.layout),
-                    &BindGroupEntries::sequential((
-                        texture,
-                        &fullscreen_pipeline.sampler,
-                        settings_binding.clone(),
-                    )),
-                ),
-            )
-        });
-
-        if let Some(bind_groups) = &mut maybe_bind_groups {
-            if bind_groups.cache.should_update(view_target) {
-                bind_groups.cache.update(view_target, builder);
-            }
-        } else {
-            commands.entity(entity).insert(FullscreenMaterialBindGroup {
-                cache: builder.generate_bind_groups(view_target),
-                _marker: PhantomData::<T>,
-            });
-        }
-    }
-}
-
 /// View query data for [`fullscreen_material_system`] (see [`PipelineViews`]
 /// for why these queries are aliased).
 type MaterialView<'w, 's, T> = ViewQuery<
@@ -350,20 +330,30 @@ type MaterialView<'w, 's, T> = ViewQuery<
     (
         &'static ViewTarget,
         &'static DynamicUniformIndex<T>,
-        &'static FullscreenMaterialBindGroup<T>,
         &'static FullscreenMaterialPipelineId<T>,
     ),
 >;
 
+/// (Modified from Bevy: instead of a cached [`FullscreenMaterialBindGroup`],
+/// the bind group is created every frame so it always carries the current
+/// [`ChannelViews`] — the buffer channels ping-pong each frame.)
+#[allow(clippy::too_many_arguments)] // Bevy system: params are the natural shape
 pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
     view: MaterialView<'w, 's, T>,
     pipeline_cache: Res<PipelineCache>,
+    fullscreen_pipeline: Res<FullscreenMaterialPipeline<T>>,
+    render_device: Res<RenderDevice>,
+    data_uniforms: Res<ComponentUniforms<T>>,
+    channels: Res<ChannelViews>,
     mut ctx: RenderContext,
     mut pass_label: Local<String>,
 ) {
-    let (view_target, settings_index, bind_groups, pipeline_id) = view.into_inner();
+    let (view_target, settings_index, pipeline_id) = view.into_inner();
 
     let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_id.0) else {
+        return;
+    };
+    let Some(settings_binding) = data_uniforms.uniforms().binding() else {
         return;
     };
 
@@ -371,7 +361,19 @@ pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
     let source = post_process.source;
     let destination = post_process.destination;
 
-    let bind_group = bind_groups.cache.get_current_bind_group(source);
+    let bind_group = render_device.create_bind_group(
+        "fullscreen_material_bind_group",
+        &pipeline_cache.get_bind_group_layout(&fullscreen_pipeline.layout),
+        &BindGroupEntries::sequential((
+            source,
+            &fullscreen_pipeline.sampler,
+            settings_binding,
+            &channels.views[0],
+            &channels.views[1],
+            &channels.views[2],
+            &channels.views[3],
+        )),
+    );
 
     if pass_label.is_empty() {
         *pass_label = format!("fullscreen_material_pass<{}>", type_name::<T>());
@@ -398,7 +400,7 @@ pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
         let pass_span = diagnostics.pass_span(&mut render_pass, pass_label.clone());
 
         render_pass.set_pipeline(pipeline);
-        render_pass.set_bind_group(0, bind_group, &[settings_index.index()]);
+        render_pass.set_bind_group(0, &bind_group, &[settings_index.index()]);
         render_pass.draw(0..3, 0..1);
         pass_span.end(&mut render_pass);
     }
