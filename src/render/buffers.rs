@@ -119,8 +119,9 @@ impl BufferTargets {
 /// Buffers are float targets so feedback loops can accumulate HDR energy and
 /// carry exact 32-bit payloads (some shaders pack `u32` into `f32` channels).
 /// This matches shadertoy's default buffer format and the reference engine.
-/// `Rgba32Float` is renderable in core WebGPU but unfilterable, so channels
-/// must be read with `textureLoad` (see the template docs in [`crate::compile`]).
+/// `Rgba32Float` is renderable but unfilterable, so channels are read with
+/// `textureLoad` or sampled nearest through the non-filtering `i_sampler`
+/// (see the template docs in [`crate::compile`]).
 const BUFFER_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
 
 /// The four `fragment_buffer_*` pipelines, rebuilt when the shader handle or

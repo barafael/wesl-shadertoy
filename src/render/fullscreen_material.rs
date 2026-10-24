@@ -213,7 +213,11 @@ fn init_pipeline<T: FullscreenMaterial>(
             ShaderStages::FRAGMENT,
             (
                 texture_2d(TextureSampleType::Float { filterable: false }),
-                sampler(SamplerBindingType::Filtering),
+                // `i_sampler`. Non-filtering, so shaders may pair it with the
+                // unfilterable channels below: a filtering binding passes naga
+                // but makes wgpu reject the pipeline. The sampler itself is
+                // `SamplerDescriptor::default()`, i.e. nearest.
+                sampler(SamplerBindingType::NonFiltering),
                 uniform_buffer::<T>(true),
                 // shadertoy buffer channels A–D (i_channel_0()..i_channel_3()).
                 // `Rgba32Float` views are unfilterable without the

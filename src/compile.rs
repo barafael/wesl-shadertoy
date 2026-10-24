@@ -26,6 +26,7 @@
 
 use std::str::FromStr;
 
+use wesl::mangler::{EscapeMangler, Mangler};
 use wesl::resolver::VirtualResolver;
 use wesl::syntax::ModulePath;
 use wesl::{CompileOptions, Compiler};
@@ -57,15 +58,16 @@ struct ShaderToyUniforms {
 }
 
 @group(0) @binding(2) var<uniform> st_uniforms: ShaderToyUniforms;
-/// The shared linear-clamp sampler. Buffer channels are `Rgba32Float` (like
-/// shadertoy's buffers) and therefore unfilterable, so `i_sampler` cannot be
-/// paired with `i_channel_*` — read channels with `textureLoad` or hand-rolled
-/// bilinear filtering instead.
+/// The shared nearest, clamp-to-edge sampler. Buffer channels are
+/// `Rgba32Float` (like shadertoy's buffers) and therefore unfilterable, so
+/// sampling them through `i_sampler` is nearest-neighbour; for smooth reads
+/// use `textureLoad` with hand-rolled bilinear filtering.
 @group(0) @binding(1) var i_sampler: sampler;
 /// Buffer channel A: the `buffer_a` pass result, or a black 1x1 texture when
 /// the shader defines no `buffer_a`. Import it directly — WGSL handle types
-/// cannot be returned from functions. Channels are `Rgba32Float`: sample with
-/// `textureLoad(i_channel_0, coords, 0)`, not `textureSample`.
+/// cannot be returned from functions. Read texels with
+/// `textureLoad(i_channel_0, coords, 0)`, or sample nearest with
+/// `textureSampleLevel(i_channel_0, i_sampler, uv, 0.0)`.
 @group(0) @binding(3) var i_channel_0: texture_2d<f32>;
 /// Buffer channel B (`buffer_b`).
 @group(0) @binding(4) var i_channel_1: texture_2d<f32>;
@@ -184,6 +186,8 @@ pub enum CompileError {
     WgslParse(String),
     /// The composed WGSL failed naga validation (type errors etc.).
     WgslValidate(String),
+    /// The shader binds a resource the pipeline does not provide.
+    Binding(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -192,6 +196,7 @@ impl std::fmt::Display for CompileError {
             CompileError::Wesl(s) => write!(f, "WESL error:\n{s}"),
             CompileError::WgslParse(s) => write!(f, "WGSL parse error:\n{s}"),
             CompileError::WgslValidate(s) => write!(f, "Shader validation error:\n{s}"),
+            CompileError::Binding(s) => write!(f, "Binding error:\n{s}"),
         }
     }
 }
@@ -234,8 +239,46 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
     validator
         .validate(&module)
         .map_err(|e| CompileError::WgslValidate(e.emit_to_string(&wgsl)))?;
+    check_bindings(&module)?;
 
     Ok(CompiledShader { wgsl, buffers })
+}
+
+/// Reject resource bindings that `package::shadertoy` does not declare.
+///
+/// The pipeline layout provides exactly the hidden module's resources. naga
+/// accepts any binding, but wgpu rejects a pipeline whose shader uses a slot
+/// the layout lacks or types differently, and Bevy's default render error
+/// handler quits the app on that error, taking unsaved edits with it.
+fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
+    let env = ModulePath::from_str("package::shadertoy").expect("valid module path");
+    let foreign: Vec<String> = module
+        .global_variables
+        .iter()
+        .filter_map(|(_, var)| {
+            let binding = var.binding.as_ref()?;
+            let mangled = var.name.as_deref().unwrap_or("?");
+            let (from_env, item) = match EscapeMangler.unmangle(mangled) {
+                Some((path, item)) => (path == env, item),
+                None => (false, mangled.to_string()),
+            };
+            (!from_env).then(|| {
+                format!(
+                    "`{item}` at @group({}) @binding({})",
+                    binding.group, binding.binding
+                )
+            })
+        })
+        .collect();
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    Err(CompileError::Binding(format!(
+        "{} binds resources wesl-shadertoy does not provide. Import them from \
+         package::shadertoy instead (i_sampler, i_channel_0..i_channel_3; the \
+         uniforms through i_time() and friends).",
+        foreign.join(", ")
+    )))
 }
 
 /// Compile `package::user` on its own and report which buffer passes it
@@ -351,6 +394,28 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         layouter.update(module.to_ctx()).unwrap();
         let wgsl_size = u64::from(layouter[handle].size);
         assert_eq!(wgsl_size, ShaderToyUniform::min_size().get());
+    }
+
+    /// Resources the pipeline does not provide are a compile error, not a
+    /// pipeline-creation failure (which quits the app).
+    #[test]
+    fn rejects_foreign_bindings() {
+        let src = r#"
+import package::shadertoy::{i_channel_0, i_sampler};
+@group(0) @binding(7) var extra: texture_2d<f32>;
+@group(1) @binding(0) var<uniform> mine: vec4<f32>;
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    let uv = frag_coord * 0.001;
+    return textureSampleLevel(i_channel_0, i_sampler, uv, 0.0)
+        + textureLoad(extra, vec2<i32>(0), 0) + mine;
+}
+"#;
+        let msg = compile_user_shader(src).unwrap_err().to_string();
+        assert!(msg.starts_with("Binding error"), "unexpected error: {msg}");
+        assert!(msg.contains("`extra` at @group(0) @binding(7)"), "{msg}");
+        assert!(msg.contains("`mine` at @group(1) @binding(0)"), "{msg}");
+        assert!(!msg.contains("i_sampler`"), "environment flagged: {msg}");
     }
 
     #[test]
