@@ -116,6 +116,9 @@ struct ShaderToyState {
     /// `time - channel_start` as their iChannelTime (a recompile resets the
     /// buffers, like editing them on shadertoy does).
     channel_start: f32,
+    /// The viewport area the panels leave free (egui points), recorded by
+    /// [`ui`] each frame; iMouse only counts presses there.
+    canvas: egui::Rect,
 }
 
 impl Default for ShaderToyState {
@@ -132,6 +135,7 @@ impl Default for ShaderToyState {
             pending_run: None,
             last_preset: "Plasma",
             channel_start: 0.0,
+            canvas: egui::Rect::NOTHING,
         }
     }
 }
@@ -350,36 +354,22 @@ fn update_uniforms(mut p: UniformParams) {
     // --- iMouse, via egui's pointer (logical points -> physical pixels).
     // egui's pointer origin is top-left; shadertoy's iMouse is bottom-left,
     // so y is flipped to match (the `package::main` wrapper flips
-    // frag_coord the same way). Clicks on an egui widget are ignored.
+    // frag_coord the same way). Only presses on the bare canvas count.
     if let Ok(ctx) = p.contexts.ctx_mut() {
         let ppp = ctx.pixels_per_point();
-        // A pointer over an egui window/panel "interacts" with that area's
-        // background widget, so `interact_pos` is Some; over the raw canvas
-        // (which is not an egui widget) it is None.
-        let (hover, pressed, released, held, over_ui) = ctx.input(|i| {
+        let (hover, pressed, held) = ctx.input(|i| {
             (
                 i.pointer.hover_pos(),
                 i.pointer.button_pressed(egui::PointerButton::Primary),
-                i.pointer.button_released(egui::PointerButton::Primary),
                 i.pointer.button_down(egui::PointerButton::Primary),
-                i.pointer.interact_pos().is_some(),
             )
         });
-
-        if let Some(pos) = hover {
+        let on_canvas = hover.is_some_and(|pos| pointer_on_canvas(ctx, p.state.canvas, pos));
+        let pos = hover.map(|pos| {
             let px = pos * ppp;
-            let py = resolution.y - px.y;
-            if pressed && !over_ui {
-                p.state.mouse = Vec4::new(px.x, py, px.x, py);
-                p.state.mouse_held = true;
-            } else if held && p.state.mouse_held {
-                p.state.mouse = Vec4::new(px.x, py, p.state.mouse.z, p.state.mouse.w);
-            }
-            if released && p.state.mouse_held {
-                p.state.mouse_held = false;
-                p.state.mouse = Vec4::new(px.x, py, -p.state.mouse.z, -p.state.mouse.w);
-            }
-        }
+            Vec2::new(px.x, resolution.y - px.y)
+        });
+        track_mouse(&mut p.state, pos, pressed && on_canvas, held);
     }
 
     p.uniforms.time = p.state.time;
@@ -659,6 +649,9 @@ fn ui(mut p: UiParams) {
         ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
     });
 
+    // --- canvas: what the panels leave free shows the shader ----------------
+    p.state.canvas = root_ui.available_rect_before_wrap();
+
     // --- editor window -------------------------------------------------------
     if p.wins.editor {
         egui::Window::new("Code — package::user")
@@ -756,6 +749,42 @@ fn ui(mut p: UiParams) {
                      classics and public-domain snippets.",
                 );
             });
+    }
+}
+
+/// Whether a pointer at `pos` (egui points) is over the bare shader canvas:
+/// inside the area the panels leave free and not under any window or popup.
+/// Uses last frame's layers, like egui's own hit testing. (The previous test,
+/// `interact_pos().is_some()`, is true wherever the pointer is, so iMouse
+/// never saw a click.)
+fn pointer_on_canvas(ctx: &egui::Context, canvas: egui::Rect, pos: egui::Pos2) -> bool {
+    canvas.contains(pos)
+        && ctx
+            .layer_id_at(pos)
+            .is_none_or(|layer| layer.order == egui::Order::Background)
+}
+
+/// shadertoy's iMouse state machine. `pos`: the pointer in physical pixels,
+/// bottom-left origin (`None` while it is outside the window); `press`: a
+/// primary press on the canvas this frame; `held`: the primary button is
+/// down. xy follows the pointer while held, zw is the press position,
+/// negated once released.
+fn track_mouse(state: &mut ShaderToyState, pos: Option<Vec2>, press: bool, held: bool) {
+    if press && let Some(at) = pos {
+        state.mouse = Vec4::new(at.x, at.y, at.x, at.y);
+        state.mouse_held = true;
+    } else if state.mouse_held {
+        if let Some(at) = pos {
+            state.mouse.x = at.x;
+            state.mouse.y = at.y;
+        }
+        // `!held` rather than a release event, so a press and release
+        // within one frame still ends the drag on the next.
+        if !held {
+            state.mouse_held = false;
+            state.mouse.z = -state.mouse.z;
+            state.mouse.w = -state.mouse.w;
+        }
     }
 }
 
@@ -909,6 +938,58 @@ mod tests {
     /// The toolbar and status bar render Lucide icons as private-use-area
     /// codepoints; guard that the font setup behind [`install_fonts`] can
     /// actually resolve every icon we use, or they would show as tofu.
+    /// A press over a window is UI, a press on the free viewport is canvas.
+    #[test]
+    fn pointer_on_canvas_excludes_windows() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let canvas = screen.shrink2(egui::vec2(0.0, 30.0)); // minus toolbar/status
+        let input = |events| egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let empty_spot = egui::pos2(700.0, 500.0);
+        // Windows only become hit-testable once laid out, so run a few frames.
+        for _ in 0..3 {
+            ctx.run_ui(input(vec![egui::Event::PointerMoved(empty_spot)]), |ui| {
+                egui::Window::new("w")
+                    .fixed_pos([100.0, 100.0])
+                    .fixed_size([200.0, 150.0])
+                    .show(ui.ctx(), |ui| ui.label("x"));
+            })
+            .drop_without_applying_deltas();
+        }
+
+        assert!(pointer_on_canvas(&ctx, canvas, empty_spot));
+        let (on_window, on_toolbar) = (egui::pos2(150.0, 150.0), egui::pos2(700.0, 10.0));
+        assert!(!pointer_on_canvas(&ctx, canvas, on_window), "window");
+        assert!(!pointer_on_canvas(&ctx, canvas, on_toolbar), "toolbar");
+        // The old test called this empty spot UI.
+        assert!(ctx.input(|i| i.pointer.interact_pos().is_some()));
+    }
+
+    #[test]
+    fn imouse_press_drag_release() {
+        let mut s = ShaderToyState::default();
+        let at = |x, y| Some(Vec2::new(x, y));
+
+        track_mouse(&mut s, at(10.0, 20.0), false, true);
+        assert_eq!(s.mouse, Vec4::ZERO, "drag begun on the UI is not ours");
+
+        track_mouse(&mut s, at(10.0, 20.0), true, true);
+        assert_eq!(s.mouse, Vec4::new(10.0, 20.0, 10.0, 20.0));
+        track_mouse(&mut s, at(30.0, 40.0), false, true);
+        assert_eq!(s.mouse, Vec4::new(30.0, 40.0, 10.0, 20.0));
+        track_mouse(&mut s, None, false, true); // pointer left the window
+        assert_eq!(s.mouse, Vec4::new(30.0, 40.0, 10.0, 20.0));
+        track_mouse(&mut s, at(35.0, 45.0), false, false);
+        assert_eq!(s.mouse, Vec4::new(35.0, 45.0, -10.0, -20.0));
+        assert!(!s.mouse_held);
+        track_mouse(&mut s, at(50.0, 50.0), false, false);
+        assert_eq!(s.mouse.x, 35.0, "hover alone moves nothing");
+    }
+
     #[test]
     fn lucide_icons_resolve_in_proportional_fonts() {
         let ctx = egui::Context::default();
