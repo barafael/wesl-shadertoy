@@ -55,12 +55,15 @@ struct ShaderToyUniforms {
 }
 
 @group(0) @binding(2) var<uniform> st_uniforms: ShaderToyUniforms;
-/// The shared linear-clamp sampler for sampling buffer channels, e.g.
-/// `textureSample(i_channel_0, i_sampler, uv)`.
+/// The shared linear-clamp sampler. Buffer channels are `Rgba32Float` (like
+/// shadertoy's buffers) and therefore unfilterable, so `i_sampler` cannot be
+/// paired with `i_channel_*` — read channels with `textureLoad` or hand-rolled
+/// bilinear filtering instead.
 @group(0) @binding(1) var i_sampler: sampler;
 /// Buffer channel A: the `buffer_a` pass result, or a black 1x1 texture when
-/// the shader defines no `buffer_a`. Import and sample it directly — WGSL
-/// handle types cannot be returned from functions.
+/// the shader defines no `buffer_a`. Import it directly — WGSL handle types
+/// cannot be returned from functions. Channels are `Rgba32Float`: sample with
+/// `textureLoad(i_channel_0, coords, 0)`, not `textureSample`.
 @group(0) @binding(3) var i_channel_0: texture_2d<f32>;
 /// Buffer channel B (`buffer_b`).
 @group(0) @binding(4) var i_channel_1: texture_2d<f32>;

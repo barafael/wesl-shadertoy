@@ -7,7 +7,6 @@
 // the emitter; click near the left edge for the buffer/normal/tint debug view.
 
 import package::shadertoy::i_channel_0;
-import package::shadertoy::i_sampler;
 import package::shadertoy::i_mouse;
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_time;
@@ -71,10 +70,20 @@ fn fbm(p: vec3<f32>) -> vec3<f32> {
     return result;
 }
 
-// The paint field, sampled with hardware bilinear filtering (the reference
-// engine hand-rolled it with textureLoad).
+// The paint field, sampled with hand-rolled bilinear filtering: the channels
+// are Rgba32Float, which core WebGPU cannot filter with a hardware sampler.
 fn field(uv: vec2<f32>) -> vec4<f32> {
-    return textureSampleLevel(i_channel_0, i_sampler, uv, 0.);
+    let R = i_resolution().xy;
+    let s = clamp(uv, vec2<f32>(0.), vec2<f32>(1.)) * R;
+    let i = floor(s - 0.5);
+    let w = s - 0.5 - i;
+    let a = clamp(i, vec2<f32>(0.), R - 1.);
+    let b = clamp(i + 1., vec2<f32>(0.), R - 1.);
+    let t00 = textureLoad(i_channel_0, vec2<i32>(a), 0);
+    let t10 = textureLoad(i_channel_0, vec2<i32>(i32(b.x), i32(a.y)), 0);
+    let t01 = textureLoad(i_channel_0, vec2<i32>(i32(a.x), i32(b.y)), 0);
+    let t11 = textureLoad(i_channel_0, vec2<i32>(b), 0);
+    return mix(mix(t00, t10, w.x), mix(t01, t11, w.x), w.y);
 }
 
 fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {

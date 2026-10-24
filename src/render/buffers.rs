@@ -3,7 +3,7 @@
 //! When the editor shader defines `buffer_a`..`buffer_d` functions, the
 //! compiler emits a `fragment_buffer_*` entry point for each (see
 //! [`crate::compile`]) and this module renders them, in A→D order, into
-//! offscreen `Rgba16Float` targets *before* the main fullscreen pass samples
+//! offscreen `Rgba32Float` targets *before* the main fullscreen pass samples
 //! them through the `i_channel_0..i_channel_3` globals.
 //!
 //! Each channel owns a ping-pong pair: a buffer reading its own channel sees
@@ -116,9 +116,12 @@ impl BufferTargets {
     }
 }
 
-/// Buffers are float targets so feedback loops can accumulate HDR energy,
-/// like shadertoy's. `Rgba16Float` is filterable in core WebGPU.
-const BUFFER_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Buffers are float targets so feedback loops can accumulate HDR energy and
+/// carry exact 32-bit payloads (some shaders pack `u32` into `f32` channels).
+/// This matches shadertoy's default buffer format and the reference engine.
+/// `Rgba32Float` is renderable in core WebGPU but unfilterable, so channels
+/// must be read with `textureLoad` (see the template docs in [`crate::compile`]).
+const BUFFER_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
 
 /// The four `fragment_buffer_*` pipelines, rebuilt when the shader handle or
 /// buffer mask changes.

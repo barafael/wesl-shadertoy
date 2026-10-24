@@ -152,7 +152,8 @@ async fn render(
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            // Channels are Rgba32Float (unfilterable in core WebGPU).
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
@@ -230,7 +231,7 @@ async fn render(
                 i,
                 make_pipeline(
                     &compile::buffer_entry(name),
-                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::TextureFormat::Rgba32Float,
                     "buffer-rp",
                 ),
             )
@@ -257,7 +258,7 @@ async fn render(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
+        format: wgpu::TextureFormat::Rgba32Float,
         usage: wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
@@ -275,7 +276,7 @@ async fn render(
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });

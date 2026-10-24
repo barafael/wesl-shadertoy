@@ -212,14 +212,17 @@ fn init_pipeline<T: FullscreenMaterial>(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::FRAGMENT,
             (
-                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: false }),
                 sampler(SamplerBindingType::Filtering),
                 uniform_buffer::<T>(true),
                 // shadertoy buffer channels A–D (i_channel_0()..i_channel_3()).
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                texture_2d(TextureSampleType::Float { filterable: true }),
+                // `Rgba32Float` views are unfilterable without the
+                // `float32-filterable` feature, so the layout must not claim
+                // otherwise; `textureLoad` works regardless.
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         ),
     );
@@ -227,7 +230,7 @@ fn init_pipeline<T: FullscreenMaterial>(
 
     // Black 1×1 stand-in for channels the shader does not define. Textures
     // read as zero before anything is written, so a plain TEXTURE_BINDING
-    // usage is enough; Rgba16Float keeps it format-compatible with buffers.
+    // usage is enough; Rgba32Float keeps it format-compatible with buffers.
     let dummy = render_device.create_texture(&TextureDescriptor {
         label: Some("shadertoy_channel_dummy"),
         size: Extent3d {
@@ -238,7 +241,7 @@ fn init_pipeline<T: FullscreenMaterial>(
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba16Float,
+        format: TextureFormat::Rgba32Float,
         usage: TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
