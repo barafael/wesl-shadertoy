@@ -8,8 +8,6 @@
 //! Native: Ctrl+S writes `shader.wesl` next to the executable and Ctrl+O
 //! reads it back; settings are in-memory only.
 
-use bevy_egui::egui::Context;
-
 #[cfg(target_arch = "wasm32")]
 const DOC_KEY: &str = "wesl-shadertoy.doc";
 #[cfg(target_arch = "wasm32")]
@@ -33,24 +31,16 @@ pub fn load_doc() -> Option<String> {
     None
 }
 
-/// Debounced localStorage save while typing (egui's clock is the timer).
+/// Autosave: write the document to localStorage (see `autosave` in main).
 #[cfg(target_arch = "wasm32")]
-pub fn save_dirty(ctx: &Context, text: &str) {
-    use std::cell::RefCell;
-    thread_local! {
-        static LAST_SAVE: RefCell<f64> = const { RefCell::new(0.0) };
-    }
-    let now = ctx.input(|i| i.time);
-    if now - LAST_SAVE.with(|t| *t.borrow()) > 0.5 {
-        LAST_SAVE.with(|t| *t.borrow_mut() = now);
-        if let Some(ls) = local_storage() {
-            let _ = ls.set_item(DOC_KEY, text);
-        }
+pub fn save_doc(text: &str) {
+    if let Some(ls) = local_storage() {
+        let _ = ls.set_item(DOC_KEY, text);
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn save_dirty(_ctx: &Context, _text: &str) {}
+pub fn save_doc(_text: &str) {}
 
 /// Ctrl+S: save right now. `Ok` carries a human-readable location.
 #[cfg(target_arch = "wasm32")]

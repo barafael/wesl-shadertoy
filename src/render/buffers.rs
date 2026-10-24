@@ -11,15 +11,20 @@
 //! buffer reading an earlier channel sees that channel's result from the
 //! current frame. Channels whose buffer pass does not exist stay bound to a
 //! black 1×1 dummy, matching shadertoy reporting them as unused.
+//!
+//! The passes follow the shader [`super::active`] draws, not the one last
+//! requested. The targets are cleared when that shader is activated, when
+//! the Reset button bumps [`Playback::epoch`] and on resize; while paused
+//! the passes hold still and the channels keep showing their last result.
 
-use bevy::asset::AssetId;
+use bevy::asset::{AssetId, Handle};
+use bevy::platform::collections::HashMap;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Res, ResMut, SystemParam};
 use bevy::math::UVec2;
 use bevy::shader::Shader;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::{ComponentUniforms, DynamicUniformIndex};
-use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::{
     BindGroupEntries, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d,
     FragmentState, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
@@ -27,20 +32,10 @@ use bevy::render::render_resource::{
     TextureUsages, TextureView, TextureViewDescriptor,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
-use bevy::render::RenderApp;
 
-use super::fullscreen_material::{
-    ChannelViews, FullscreenMaterialPipeline, ShaderToyFragment,
-};
+use super::active::{ActiveShader, Playback};
+use super::fullscreen_material::{ChannelViews, FullscreenMaterialPipeline};
 use super::ShaderToyUniform;
-
-/// Which of `buffer_a`..`buffer_d` the current shader defines (bit per
-/// [`crate::compile::BUFFER_NAMES`] entry). Lives in both worlds: the main
-/// world writes it on every successful compile, the render world reads it in
-/// [`shadertoy_buffer_pass`].
-#[derive(Resource, ExtractResource, Clone, Copy, Debug, Default)]
-#[extract_app(RenderApp)]
-pub struct BufferMask(pub u8);
 
 /// The offscreen render target for one buffer channel slot.
 struct BufferSurface {
@@ -61,20 +56,27 @@ struct BufferPair {
 #[derive(Default, Resource)]
 pub(crate) struct BufferTargets {
     size: UVec2,
+    /// `(generation, epoch)` of the activation the contents belong to.
+    owner: Option<(u32, u32)>,
     pairs: [BufferPair; 4],
 }
 
 impl BufferTargets {
-    /// Drop contents when the viewport changed size; buffers always match it.
-    fn resize(&mut self, size: UVec2) {
-        let size = UVec2::new(size.x.max(1), size.y.max(1));
-        if self.size != size {
-            self.size = size;
-            for pair in self.pairs.iter_mut() {
-                pair.surfaces = [None, None];
-                pair.current = 0;
-            }
+    /// Drop contents when the viewport changed size (buffers always match
+    /// it) or a different activation took over. Returns whether it did;
+    /// fresh textures read as zero.
+    fn reset_if_stale(&mut self, size: UVec2, owner: (u32, u32)) -> bool {
+        let size = size.max(UVec2::ONE);
+        if self.size == size && self.owner == Some(owner) {
+            return false;
         }
+        self.size = size;
+        self.owner = Some(owner);
+        for pair in self.pairs.iter_mut() {
+            pair.surfaces = [None, None];
+            pair.current = 0;
+        }
+        true
     }
 
     /// The surface for channel `i`, slot `slot`, creating it on first use.
@@ -124,12 +126,49 @@ impl BufferTargets {
 /// (see the template docs in [`crate::compile`]).
 const BUFFER_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
 
-/// The four `fragment_buffer_*` pipelines, rebuilt when the shader handle or
-/// buffer mask changes.
+/// The `fragment_buffer_*` pipelines, one per shader handle and channel.
+/// The app reuses a fixed set of shader handles, so this stays small, and a
+/// replaced shader asset rebuilds its pipelines in place.
 #[derive(Default, Resource)]
 pub(crate) struct BufferPipelines {
-    key: Option<(AssetId<Shader>, u8)>,
-    ids: [Option<CachedRenderPipelineId>; 4],
+    ids: HashMap<(AssetId<Shader>, usize), CachedRenderPipelineId>,
+}
+
+impl BufferPipelines {
+    /// The pipelines for the channels in `mask`, queued on first request.
+    pub fn ids_for(
+        &mut self,
+        pipeline_cache: &PipelineCache,
+        fullscreen: &FullscreenMaterialPipeline<ShaderToyUniform>,
+        shader: &Handle<Shader>,
+        mask: u8,
+    ) -> [Option<CachedRenderPipelineId>; 4] {
+        std::array::from_fn(|i| {
+            if mask & (1 << i) == 0 {
+                return None;
+            }
+            let id = *self.ids.entry((shader.id(), i)).or_insert_with(|| {
+                let name = crate::compile::BUFFER_NAMES[i];
+                pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+                    label: Some(format!("shadertoy_buffer_pipeline_{name}").into()),
+                    layout: vec![fullscreen.layout.clone()],
+                    vertex: fullscreen.vertex.clone(),
+                    fragment: Some(FragmentState {
+                        shader: shader.clone(),
+                        entry_point: Some(crate::compile::buffer_entry(name).into()),
+                        targets: vec![Some(ColorTargetState {
+                            format: BUFFER_FORMAT,
+                            blend: None,
+                            write_mask: ColorWrites::ALL,
+                        })],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+            });
+            Some(id)
+        })
+    }
 }
 
 type BufferPassView<'w, 's> = ViewQuery<
@@ -138,7 +177,7 @@ type BufferPassView<'w, 's> = ViewQuery<
     (
         &'static ExtractedCamera,
         &'static DynamicUniformIndex<ShaderToyUniform>,
-        Option<&'static ShaderToyFragment>,
+        Option<&'static ActiveShader>,
     ),
 >;
 
@@ -148,7 +187,7 @@ pub struct BufferPassParams<'w> {
     fullscreen: Res<'w, FullscreenMaterialPipeline<ShaderToyUniform>>,
     data_uniforms: Res<'w, ComponentUniforms<ShaderToyUniform>>,
     render_device: Res<'w, RenderDevice>,
-    mask: Res<'w, BufferMask>,
+    playback: Res<'w, Playback>,
     channels: ResMut<'w, ChannelViews>,
     targets: ResMut<'w, BufferTargets>,
     pipelines: ResMut<'w, BufferPipelines>,
@@ -165,33 +204,42 @@ pub fn shadertoy_buffer_pass(
     mut p: BufferPassParams<'_>,
     mut ctx: RenderContext,
 ) {
-    if p.mask.0 == 0 {
+    let view = views.into_inner();
+    let Some(active) = view.2 else {
+        return;
+    };
+    let mask = active.fragment.buffers;
+    if mask == 0 {
         p.channels.reset();
         return;
     }
-    let view = views.into_inner();
-    let Some(fragment) = view.2 else {
-        return;
-    };
     let Some(size) = view.0.physical_viewport_size else {
         return;
     };
 
-    p.targets.resize(size);
+    let fresh = p
+        .targets
+        .reset_if_stale(size, (active.fragment.generation, active.epoch()));
+    // Channels without a pass read the black dummy.
+    let dummy = p.channels.dummy.clone();
+    for (i, slot) in p.channels.views.iter_mut().enumerate() {
+        if mask & (1 << i) == 0 {
+            *slot = dummy.clone();
+        }
+    }
+    // Paused: keep the last results on show (a fresh reset still renders
+    // once, so the channels never show freed textures).
+    if p.playback.paused && !fresh {
+        return;
+    }
     // Advance the clock: every pair swaps write/read slots once per frame.
     for pair in p.targets.pairs.iter_mut() {
         pair.current ^= 1;
     }
 
-    // Channels without a pass read the black dummy.
-    let dummy = p.channels.dummy.clone();
-    for (i, slot) in p.channels.views.iter_mut().enumerate() {
-        if p.mask.0 & (1 << i) == 0 {
-            *slot = dummy.clone();
-        }
-    }
-
-    rebuild_pipelines(&mut p.pipelines, &p.pipeline_cache, &p.fullscreen, fragment, p.mask.0);
+    let ids = p
+        .pipelines
+        .ids_for(&p.pipeline_cache, &p.fullscreen, &active.fragment.handle, mask);
 
     let Some(settings_binding) = p.data_uniforms.uniforms().binding() else {
         return;
@@ -199,14 +247,14 @@ pub fn shadertoy_buffer_pass(
     let bgl = p.pipeline_cache.get_bind_group_layout(&p.fullscreen.layout);
 
     for (i, name) in crate::compile::BUFFER_NAMES.iter().enumerate() {
-        if p.mask.0 & (1 << i) == 0 {
+        if mask & (1 << i) == 0 {
             continue;
         }
         let write = p.targets.write_view(i, &p.render_device);
         // Earlier buffers already wrote their current-frame slot; later and
         // self reads see the previous frame's slot.
         let reads: [TextureView; 4] = std::array::from_fn(|j| {
-            if p.mask.0 & (1 << j) == 0 {
+            if mask & (1 << j) == 0 {
                 dummy.clone()
             } else if j < i {
                 p.targets.write_view(j, &p.render_device)
@@ -215,8 +263,7 @@ pub fn shadertoy_buffer_pass(
             }
         });
 
-        let Some(Some(pipeline)) = p.pipelines.ids[i].map(|id| p.pipeline_cache.get_render_pipeline(id))
-        else {
+        let Some(Some(pipeline)) = ids[i].map(|id| p.pipeline_cache.get_render_pipeline(id)) else {
             continue; // pipeline still compiling; channel keeps its stale view
         };
 
@@ -253,44 +300,5 @@ pub fn shadertoy_buffer_pass(
         drop(pass);
 
         p.channels.views[i] = write;
-    }
-}
-
-/// Queue the `fragment_buffer_*` pipelines for `mask`, unless the current
-/// shader + mask combination already has them.
-fn rebuild_pipelines(
-    pipelines: &mut ResMut<'_, BufferPipelines>,
-    pipeline_cache: &PipelineCache,
-    fullscreen: &FullscreenMaterialPipeline<ShaderToyUniform>,
-    fragment: &ShaderToyFragment,
-    mask: u8,
-) {
-    let key = (fragment.0.id(), mask);
-    if pipelines.key == Some(key) {
-        return;
-    }
-    pipelines.key = Some(key);
-    for (i, name) in crate::compile::BUFFER_NAMES.iter().enumerate() {
-        pipelines.ids[i] = None;
-        if mask & (1 << i) == 0 {
-            continue;
-        }
-        let descriptor = RenderPipelineDescriptor {
-            label: Some(format!("shadertoy_buffer_pipeline_{name}").into()),
-            layout: vec![fullscreen.layout.clone()],
-            vertex: fullscreen.vertex.clone(),
-            fragment: Some(FragmentState {
-                shader: fragment.0.clone(),
-                entry_point: Some(crate::compile::buffer_entry(name).into()),
-                targets: vec![Some(ColorTargetState {
-                    format: BUFFER_FORMAT,
-                    blend: None,
-                    write_mask: ColorWrites::ALL,
-                })],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        pipelines.ids[i] = Some(pipeline_cache.queue_render_pipeline(descriptor));
     }
 }

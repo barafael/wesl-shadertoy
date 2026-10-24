@@ -515,7 +515,7 @@ async fn render(
         let mut uniforms = ShaderToyUniform {
             time: t,
             time_delta: time / frames as f32,
-            frame: frame + 1,
+            frame, // 0 on the first frame, like the app
             resolution: Vec4::new(width as f32, height as f32, 1.0, 0.0),
             sample_rate: 44100.0,
             frame_rate: 60.0,

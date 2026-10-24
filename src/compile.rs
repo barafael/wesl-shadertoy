@@ -152,7 +152,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// Build the `package::main` module for a shader that defines the buffer
 /// passes selected by `buffers` (bit per [`BUFFER_NAMES`] entry). Each buffer
 /// gets its own fragment entry point, rendered into that channel's offscreen
-/// target.
+/// target; undefined buffers get a stub entry (see the comment inside).
 ///
 /// Buffer entries pass `@builtin(position)` through unflipped, so a buffer's
 /// `frag_coord.y` equals its texture row. A fragment always writes the texel
@@ -173,15 +173,22 @@ fn main_module_for(buffers: u8) -> String {
     }
     wgsl.push_str(MAIN_MODULE_HEAD);
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
-        if buffers & (1 << i) == 0 {
-            continue;
-        }
+        let body = if buffers & (1 << i) != 0 {
+            format!(
+                "\x20   // Buffer passes use texel coordinates (no y-flip).\n\
+                 \x20   return {name}(in.position.xy);\n"
+            )
+        } else {
+            // Never rendered, but the renderer reuses shader slots: a
+            // pipeline queued for this entry under an earlier shader is
+            // rebuilt against this one, and must still find its entry point.
+            "\x20   // No buffer pass: stub entry, never rendered.\n\
+             \x20   return vec4<f32>(0.0);\n"
+                .to_string()
+        };
         wgsl.push_str(&format!(
             "\n@fragment\n\
-             fn {}(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {{\n\
-             \x20   // Buffer passes use texel coordinates (no y-flip).\n\
-             \x20   return {name}(in.position.xy);\n\
-             }}\n",
+             fn {}(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {{\n{body}}}\n",
             buffer_entry(name)
         ));
     }
@@ -520,7 +527,13 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         assert_eq!(compiled.buffers, 0b0101, "expected buffer_a and buffer_c");
         assert!(compiled.wgsl.contains("fn fragment_buffer_a"));
         assert!(compiled.wgsl.contains("fn fragment_buffer_c"));
-        assert!(!compiled.wgsl.contains("fn fragment_buffer_b"));
+        // Undefined buffers still get a (stub) entry, for slot reuse.
+        let stub = compiled
+            .wgsl
+            .split("fn fragment_buffer_b")
+            .nth(1)
+            .expect("stub entry for buffer_b");
+        assert!(stub.split("@fragment").next().unwrap().contains("vec4<f32>(0.0)"));
         // Buffer entries feed raw texel coordinates (no y-flip), so channel
         // reads line up with where the pass wrote; only the image pass flips.
         let entry = compiled

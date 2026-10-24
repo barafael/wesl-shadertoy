@@ -7,12 +7,14 @@
 //!
 //! * The fragment shader is no longer fixed by `FullscreenMaterial::fragment_shader()`
 //!   at plugin build time. Instead each extracted view may carry a
-//!   [`ShaderToyFragment`] component holding the current `Handle<Shader>`, and
-//!   the pipeline is rebuilt whenever that handle changes. This is what makes
-//!   runtime shader hot-swapping possible (Bevy's stock material pipelines key
-//!   their caches without the shader handle, so they cannot do this).
-//! * `FullscreenMaterialPipeline::variants` is built lazily: the first compiled
-//!   shader may arrive after `RenderStartup`.
+//!   [`ShaderToyFragment`] component naming the requested shader, and
+//!   [`super::active`] decides per frame which shader is drawn and stores its
+//!   pipeline in [`FullscreenMaterialPipelineId`]. This is what makes runtime
+//!   shader hot-swapping possible (Bevy's stock material pipelines key their
+//!   caches without the shader handle, so they cannot do this).
+//! * `FullscreenMaterialPipeline` keeps one `Variants` cache per shader handle
+//!   ([`FullscreenMaterialPipeline::main_pipeline`]); the app reuses a fixed
+//!   set of handles, so pipelines are rebuilt in place, never accumulated.
 //! * The bind group layout carries four extra `texture_2d` entries (bindings
 //!   3..6) for shadertoy's buffer channels, and the bind group is rebuilt
 //!   every frame instead of cached, because those channel views ping-pong
@@ -22,16 +24,13 @@ use core::any::type_name;
 use core::marker::PhantomData;
 
 use bevy::app::{App, Plugin};
-use bevy::asset::Handle;
+use bevy::asset::{AssetId, Handle};
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader, tonemapping::tonemapping};
 use bevy::ecs::component::Component;
-use bevy::ecs::entity::Entity;
 use bevy::ecs::error::BevyError;
-use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::{IntoScheduleConfigs, ScheduleConfigs, ScheduleLabel};
-use bevy::ecs::system::{BoxedSystem, Commands, Local, Query, Res, ResMut};
-use bevy::render::camera::ExtractedCamera;
+use bevy::ecs::system::{BoxedSystem, Commands, Local, Res};
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{
     ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
@@ -48,16 +47,23 @@ use bevy::render::render_resource::{
     TextureUsages, TextureView, TextureViewDescriptor, Variants, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
-use bevy::render::view::{ExtractedView, ViewTarget};
-use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::render::view::ViewTarget;
+use bevy::platform::collections::HashMap;
+use bevy::render::{RenderApp, RenderStartup};
 use bevy::shader::Shader;
 
-/// The currently compiled fragment shader, extracted from the main world onto
-/// the camera entity. When this handle changes, the fullscreen pipeline is
-/// rebuilt around the new shader.
-#[derive(Component, ExtractComponent, Clone, Debug)]
+/// The shader the main world wants on screen, extracted onto the camera
+/// entity. [`super::active`] switches to it once its pipelines are ready.
+#[derive(Component, ExtractComponent, Clone, Debug, Default)]
 #[extract_app(RenderApp)]
-pub struct ShaderToyFragment(pub Handle<Shader>);
+pub struct ShaderToyFragment {
+    pub handle: Handle<Shader>,
+    /// Bit per [`crate::compile::BUFFER_NAMES`] entry the shader defines.
+    pub buffers: u8,
+    /// Bumped by every successful compile (0 is the placeholder). Tells two
+    /// compiles into the same handle apart, and keys resets on activation.
+    pub generation: u32,
+}
 
 #[derive(Default)]
 pub struct FullscreenMaterialPlugin<T: FullscreenMaterial> {
@@ -76,12 +82,7 @@ impl<T: FullscreenMaterial> Plugin for FullscreenMaterialPlugin<T> {
             return;
         };
 
-        render_app
-            .add_systems(RenderStartup, init_pipeline::<T>)
-            .add_systems(
-                Render,
-                prepare_fullscreen_material_pipelines::<T>.in_set(RenderSystems::Prepare),
-            );
+        render_app.add_systems(RenderStartup, init_pipeline::<T>);
 
         let system = T::schedule_configs(fullscreen_material_system::<T>.into_configs());
         render_app.add_systems(T::schedule(), system);
@@ -146,33 +147,42 @@ pub struct FullscreenMaterialPipeline<T: FullscreenMaterial> {
     pub(crate) layout: BindGroupLayoutDescriptor,
     pub(crate) sampler: Sampler,
     pub(crate) vertex: VertexState,
-    /// The fragment shader the `variants` cache was built around.
-    shader: Option<Handle<Shader>>,
-    /// Built lazily once a [`ShaderToyFragment`] has been extracted.
-    variants: Option<Variants<RenderPipeline, FullscreenMaterialPipelineSpecializer>>,
+    /// One specialization cache per fragment shader handle.
+    variants: HashMap<AssetId<Shader>, Variants<RenderPipeline, FullscreenMaterialPipelineSpecializer>>,
     _marker: PhantomData<T>,
 }
 
 impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
-    fn rebuild_variants(&mut self, shader: Handle<Shader>, label: Option<String>) {
-        let desc = RenderPipelineDescriptor {
-            label: label.map(std::borrow::Cow::Owned),
-            layout: vec![self.layout.clone()],
-            vertex: self.vertex.clone(),
-            fragment: Some(FragmentState {
-                shader: shader.clone(),
-                entry_point: T::fragment_entry_point().map(std::borrow::Cow::from),
-                targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::Rgba8UnormSrgb,
-                    blend: None,
-                    write_mask: ColorWrites::ALL,
-                })],
+    /// The main-pass pipeline for `shader` rendering into `target_format`,
+    /// queued on first request. Queuing again for the same handle and format
+    /// returns the same id: when the handle's shader asset is replaced, Bevy
+    /// rebuilds that pipeline in place.
+    pub fn main_pipeline(
+        &mut self,
+        pipeline_cache: &PipelineCache,
+        shader: &Handle<Shader>,
+        target_format: TextureFormat,
+    ) -> Result<CachedRenderPipelineId, BevyError> {
+        let variants = self.variants.entry(shader.id()).or_insert_with(|| {
+            let desc = RenderPipelineDescriptor {
+                label: Some(format!("fullscreen_material_pipeline<{}>", type_name::<T>()).into()),
+                layout: vec![self.layout.clone()],
+                vertex: self.vertex.clone(),
+                fragment: Some(FragmentState {
+                    shader: shader.clone(),
+                    entry_point: T::fragment_entry_point().map(std::borrow::Cow::from),
+                    targets: vec![Some(ColorTargetState {
+                        format: TextureFormat::Rgba8UnormSrgb,
+                        blend: None,
+                        write_mask: ColorWrites::ALL,
+                    })],
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        self.shader = Some(shader);
-        self.variants = Some(Variants::new(FullscreenMaterialPipelineSpecializer, desc));
+            };
+            Variants::new(FullscreenMaterialPipelineSpecializer, desc)
+        });
+        variants.specialize(pipeline_cache, FullscreenMaterialPipelineKey { target_format })
     }
 }
 
@@ -259,77 +269,23 @@ fn init_pipeline<T: FullscreenMaterial>(
         layout,
         sampler,
         vertex: fullscreen_shader.to_vertex_state(),
-        shader: None,
-        variants: None,
+        variants: HashMap::default(),
         _marker: PhantomData,
     });
 }
 
+/// The main-pass pipeline of the shader currently drawn for a view, chosen
+/// by [`super::active::activate_shader`].
 #[derive(Component)]
 pub struct FullscreenMaterialPipelineId<T: FullscreenMaterial>(
     pub CachedRenderPipelineId,
     PhantomData<T>,
 );
 
-/// View query data for [`prepare_fullscreen_material_pipelines`], extracted
-/// into an alias to keep the system signature readable (upstream Bevy has the
-/// same tuple inline; this is a deviation only to silence `type_complexity`).
-type PipelineViews<'w, 's, T> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static ExtractedView,
-        Option<&'static T>,
-        Option<&'static ShaderToyFragment>,
-    ),
-    With<ExtractedCamera>,
->;
-
-fn prepare_fullscreen_material_pipelines<'w, 's, T: FullscreenMaterial>(
-    mut commands: Commands,
-    pipeline_cache: Res<PipelineCache>,
-    mut pipeline: ResMut<FullscreenMaterialPipeline<T>>,
-    views: PipelineViews<'w, 's, T>,
-    target: crate::debugger::MainPassTarget,
-) -> Result<(), BevyError> {
-    for (entity, view, material, fragment) in &views {
-        let (Some(_material), Some(fragment)) = (material, fragment) else {
-            commands
-                .entity(entity)
-                .remove::<FullscreenMaterialPipelineId<T>>();
-            continue;
-        };
-
-        // Rebuild the variant cache whenever the current shader handle
-        // changes. A fresh `Variants` has an empty cache, so `specialize`
-        // below queues a brand-new pipeline for the new shader.
-        let stale = match &pipeline.shader {
-            Some(current) => current.id() != fragment.0.id(),
-            None => true,
-        };
-        if stale || pipeline.variants.is_none() {
-            let label = format!("fullscreen_material_pipeline<{}>", type_name::<T>());
-            pipeline.rebuild_variants(fragment.0.clone(), Some(label));
-        }
-
-        let Some(variants) = pipeline.variants.as_mut() else {
-            continue;
-        };
-
-        // While the debugger is on, the main pass renders into its offscreen
-        // image target (see `crate::debugger`) instead of the view target.
-        let pipeline_key = FullscreenMaterialPipelineKey {
-            target_format: target.format(view.target_format),
-        };
-        let pipeline_id = variants.specialize(&pipeline_cache, pipeline_key)?;
-
-        commands
-            .entity(entity)
-            .insert(FullscreenMaterialPipelineId::<T>(pipeline_id, PhantomData));
+impl<T: FullscreenMaterial> FullscreenMaterialPipelineId<T> {
+    pub fn new(id: CachedRenderPipelineId) -> Self {
+        Self(id, PhantomData)
     }
-
-    Ok(())
 }
 
 /// View query data for [`fullscreen_material_system`] (see [`PipelineViews`]

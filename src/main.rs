@@ -33,6 +33,10 @@ use bevy::prelude::*;
 use bevy::window::{PresentMode, PrimaryWindow};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use bevy::render::error_handler::{
+    ErrorType, RenderError, RenderErrorHandler, RenderErrorPolicy,
+};
+use render::active::{ActiveShader, Playback, RejectedGeneration, ShaderFeedback};
 use render::{ShaderToyFragment, ShaderToyRenderPlugin, ShaderToyUniform};
 use theme::Theme;
 
@@ -84,13 +88,15 @@ fn main() {
         .init_resource::<analyzer::Analyzer>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
+        .insert_resource(RenderErrorHandler(on_render_error))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 install_fonts,
-                (update_uniforms, compile_and_apply).chain(),
+                (update_uniforms, compile_and_apply, poll_render_feedback).chain(),
                 run_analyzer,
+                autosave,
             ),
         )
         .add_systems(EguiPrimaryContextPass, ui)
@@ -109,7 +115,6 @@ struct ShaderToyState {
     time: f32,
     paused: bool,
     speed: f32,
-    frame: u32,
     mouse: Vec4,
     mouse_held: bool,
     fps: f32,
@@ -121,10 +126,6 @@ struct ShaderToyState {
     /// new edit (debounce, so typing does not compile per keystroke).
     pending_run: Option<f64>,
     last_preset: &'static str,
-    /// `time` at the last successful compile; buffer channels report
-    /// `time - channel_start` as their iChannelTime (a recompile resets the
-    /// buffers, like editing them on shadertoy does).
-    channel_start: f32,
     /// The viewport area the panels leave free (egui points), recorded by
     /// [`ui`] each frame; iMouse only counts presses there.
     canvas: egui::Rect,
@@ -136,7 +137,6 @@ impl Default for ShaderToyState {
             time: 0.0,
             paused: false,
             speed: 1.0,
-            frame: 0,
             mouse: Vec4::ZERO,
             mouse_held: false,
             fps: 0.0,
@@ -144,17 +144,38 @@ impl Default for ShaderToyState {
             auto_run: false,
             pending_run: None,
             last_preset: "Plasma",
-            channel_start: 0.0,
             canvas: egui::Rect::NOTHING,
         }
     }
 }
 
-/// The shader currently running on screen.
+/// The shader handles the app renders with, and the latest compile.
+///
+/// Compiles alternate between two slots, replacing the asset of whichever
+/// slot is not on screen: Bevy then rebuilds that slot's pipelines in place
+/// while the other keeps drawing, and the number of shaders and pipelines
+/// stays fixed however often the user compiles (Bevy's pipeline cache never
+/// frees a pipeline, and a removed shader leaves its pipelines retrying
+/// every frame).
 #[derive(Resource, Default)]
 struct CurrentShader {
-    handle: Handle<Shader>,
+    /// Black stand-in until the first compile, and the fallback after a GPU
+    /// rejection with nothing better to show.
+    placeholder: Handle<Shader>,
+    slots: [Handle<Shader>; 2],
+    /// Generation of the latest successful compile (0: none yet).
+    generation: u32,
+    /// Its composed WGSL, for the WGSL window.
     wgsl: String,
+}
+
+impl CurrentShader {
+    fn placeholder_fragment(&self) -> ShaderToyFragment {
+        ShaderToyFragment {
+            handle: self.placeholder.clone(),
+            ..default()
+        }
+    }
 }
 
 /// Result of the most recent compile attempt.
@@ -280,10 +301,14 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     }
 
     // A black placeholder so the pipeline has *something* until the first
-    // successful compile lands later this frame.
-    let placeholder = Shader::from_wgsl(render::placeholder_wgsl(), "shadertoy://placeholder");
-    let handle = shaders.add(placeholder);
-    app.current.handle = handle.clone();
+    // successful compile lands, and the two compile slots (see
+    // `CurrentShader`), seeded with the same placeholder source.
+    let placeholder = |path: &str| Shader::from_wgsl(render::placeholder_wgsl(), path.to_string());
+    app.current.placeholder = shaders.add(placeholder("shadertoy://placeholder"));
+    app.current.slots = [
+        shaders.add(placeholder("shadertoy://user/0")),
+        shaders.add(placeholder("shadertoy://user/1")),
+    ];
 
     commands.spawn((
         Camera3d::default(),
@@ -296,7 +321,7 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
         bevy::core_pipeline::tonemapping::DebandDither::Disabled,
         Msaa::Off,
         ShaderToyUniform::default(),
-        ShaderToyFragment(handle),
+        app.current.placeholder_fragment(),
     ));
 
     // Compile whatever is in the editor on the first frame.
@@ -342,7 +367,7 @@ struct UniformParams<'w, 's> {
     time: Res<'w, Time>,
     windows: Single<'w, 's, &'static Window, With<PrimaryWindow>>,
     uniforms: Single<'w, 's, &'static mut ShaderToyUniform>,
-    buffers: Res<'w, crate::render::buffers::BufferMask>,
+    playback: ResMut<'w, Playback>,
     debugger_on: ResMut<'w, debugger::DebuggerOn>,
 }
 
@@ -350,10 +375,11 @@ struct UniformParams<'w, 's> {
 fn update_uniforms(mut p: UniformParams) {
     // Clamp so a backgrounded tab does not teleport the clock on resume.
     let dt = p.time.delta_secs().min(0.1);
-    if !p.state.paused {
-        p.state.time += dt * p.state.speed;
+    let step = if p.state.paused { 0.0 } else { dt * p.state.speed };
+    p.state.time += step;
+    if p.playback.paused != p.state.paused {
+        p.playback.paused = p.state.paused;
     }
-    p.state.frame += 1;
     if dt > 0.0 {
         p.state.fps = if p.state.fps == 0.0 {
             1.0 / dt
@@ -398,27 +424,16 @@ fn update_uniforms(mut p: UniformParams) {
     }
 
     p.uniforms.time = p.state.time;
-    p.uniforms.time_delta = if p.state.paused { 0.0 } else { dt };
-    p.uniforms.frame = p.state.frame;
+    // Shadertoy time: frozen while paused, scaled by the speed slider.
+    p.uniforms.time_delta = step;
     p.uniforms.resolution = resolution;
     p.uniforms.mouse = p.state.mouse;
     p.uniforms.date = date_uniforms();
     p.uniforms.sample_rate = SAMPLE_RATE_HZ;
     p.uniforms.frame_rate = p.state.fps;
     p.debugger_on.set_if_neq(debugger::DebuggerOn(p.state.debugger));
-    // Buffer channels: a defined channel reports the time since the last
-    // recompile and the viewport size (buffers render at viewport
-    // resolution); an unused channel reports 0, like shadertoy does.
-    let mut channel_time = [0.0f32; 4];
-    let mut channel_resolution = [Vec4::ZERO; 4];
-    for i in 0..4 {
-        if p.buffers.0 & (1 << i) != 0 {
-            channel_time[i] = p.state.time - p.state.channel_start;
-            channel_resolution[i] = Vec4::new(resolution.x, resolution.y, 0.0, 0.0);
-        }
-    }
-    p.uniforms.channel_time = Vec4::from(channel_time);
-    p.uniforms.channel_resolution = channel_resolution;
+    // i_frame and the buffer channels' clocks and sizes belong to the shader
+    // on screen, so the render world fills them in (`render::active`).
 }
 
 /// Everything [`compile_and_apply`] reads or writes, bundled into one parameter.
@@ -430,8 +445,7 @@ struct CompileParams<'w, 's> {
     shaders: ResMut<'w, Assets<Shader>>,
     current: ResMut<'w, CurrentShader>,
     fragment: Single<'w, 's, &'static mut ShaderToyFragment>,
-    buffers: ResMut<'w, crate::render::buffers::BufferMask>,
-    state: ResMut<'w, ShaderToyState>,
+    feedback: Res<'w, ShaderFeedback>,
 }
 
 /// Compile the editor text and, on success, hot-swap the running shader.
@@ -447,20 +461,29 @@ fn compile_and_apply(mut p: CompileParams) {
     let started = Instant::now();
     match compile::compile_user_shader(&p.doc.text) {
         Ok(compiled) => {
-            let wgsl = compiled.wgsl;
-            let shader = Shader::from_wgsl(wgsl.clone(), "shadertoy://user");
-            let handle = p.shaders.add(shader);
-            let replaced = std::mem::replace(&mut p.current.handle, handle.clone());
-            p.fragment.0 = handle;
-            p.current.wgsl = wgsl;
-            // `Assets` keeps every added asset alive until it is removed, so
-            // without this each compile (auto-run!) leaks a Shader plus its
-            // extracted copy and pipeline-cache entry.
-            p.shaders.remove(&replaced);
-            // Tell the renderer which buffer passes exist and restart the
-            // channel clocks, like editing a buffer on shadertoy does.
-            *p.buffers = crate::render::buffers::BufferMask(compiled.buffers);
-            p.state.channel_start = p.state.time;
+            // Replace the slot that is not on screen. Repeated compiles
+            // before the first lands keep overwriting the same pending slot.
+            let active = p.feedback.lock().active.as_ref().map(|f| f.handle.id());
+            let slot = p
+                .current
+                .slots
+                .iter()
+                .position(|h| Some(h.id()) != active && *h == p.fragment.handle)
+                .unwrap_or_else(|| usize::from(Some(p.current.slots[0].id()) == active));
+            let handle = p.current.slots[slot].clone();
+            let path = format!("shadertoy://user/{slot}");
+            p.shaders
+                .insert(&handle, Shader::from_wgsl(compiled.wgsl.clone(), path))
+                .expect("slot handles stay valid");
+            p.current.generation += 1;
+            p.current.wgsl = compiled.wgsl;
+            // The render world switches to it (and restarts i_frame, the
+            // channel clocks and the buffers) once its pipelines are built.
+            **p.fragment = ShaderToyFragment {
+                handle,
+                buffers: compiled.buffers,
+                generation: p.current.generation,
+            };
             let ms = started.elapsed().as_secs_f32() * 1000.0;
             p.status.error = None;
             p.status.last_ms = Some(ms);
@@ -473,6 +496,92 @@ fn compile_and_apply(mut p: CompileParams) {
                 msg.lines().next().unwrap_or("error")
             );
             p.status.error = Some(msg);
+        }
+    }
+}
+
+/// Report a requested shader whose pipelines failed to build (the render
+/// world never activates it) and go back to requesting what is on screen.
+fn poll_render_feedback(
+    feedback: Res<ShaderFeedback>,
+    mut fragment: Single<&mut ShaderToyFragment>,
+    mut status: ResMut<CompileStatus>,
+) {
+    let mut fb = feedback.lock();
+    let Some((generation, error)) = fb.rejected.take() else {
+        return;
+    };
+    if generation != fragment.generation {
+        return; // stale: something newer was requested since
+    }
+    warn!("GPU rejected the shader: {error}");
+    status.error = Some(format!("The GPU rejected the shader:\n{error}"));
+    if let Some(active) = fb.active.clone() {
+        **fragment = active;
+    }
+}
+
+/// Bevy's default answer to a GPU (wgpu) error is to quit, which natively
+/// loses unsaved edits. A validation or internal error here almost always
+/// comes from the user's shader: naga accepted it, but wgpu or the WebGL
+/// backend rejects the pipeline (a GLSL translation failure is reported as
+/// internal). So blame the newest shader that is not yet on screen (else the
+/// one on screen), go back to the last good one (else the black
+/// placeholder), say so in the status bar, and carry on. Out-of-memory and
+/// device loss, and errors the placeholder still produces, keep the default.
+fn on_render_error(
+    error: &RenderError,
+    main_world: &mut World,
+    render_world: &mut World,
+) -> RenderErrorPolicy {
+    let quit = |main_world: &mut World| {
+        error!("Quitting the application due to {:?} RenderError", error.ty);
+        main_world.write_message(AppExit::error());
+        RenderErrorPolicy::StopRendering
+    };
+    if !matches!(error.ty, ErrorType::Validation | ErrorType::Internal) {
+        return quit(main_world);
+    }
+    let mut views = render_world.query::<(&mut ShaderToyFragment, Option<&ActiveShader>)>();
+    let Some((requested, active)) = views.iter(render_world).next() else {
+        return quit(main_world);
+    };
+    let active = active.map(|a| a.fragment.clone());
+    let placeholder = main_world.resource::<CurrentShader>().placeholder_fragment();
+    let (culprit, fallback) = match active {
+        Some(a) if a.generation != requested.generation => (requested.generation, a),
+        Some(a) if a.generation != 0 => (a.generation, placeholder),
+        None if requested.generation != 0 => (requested.generation, placeholder),
+        _ => return quit(main_world),
+    };
+
+    render_world.resource_mut::<RejectedGeneration>().0 = Some(culprit);
+    for (mut requested, _) in views.iter_mut(render_world) {
+        *requested = fallback.clone();
+    }
+    let mut cameras = main_world.query::<&mut ShaderToyFragment>();
+    for mut requested in cameras.iter_mut(main_world) {
+        *requested = fallback.clone();
+    }
+    main_world.resource_mut::<CompileStatus>().error = Some(format!(
+        "The GPU rejected the shader:\n{}",
+        error.description
+    ));
+    RenderErrorPolicy::Ignore
+}
+
+/// Write the document to browser storage whenever it changes: edits,
+/// preset picks and opened files alike (a no-op natively, where Ctrl+S
+/// saves). Comparing against the last saved text is cheap next to a frame
+/// and catches every path that changes the document.
+fn autosave(doc: Res<ShaderDoc>, mut saved: Local<Option<String>>) {
+    match saved.as_deref() {
+        // The startup document (a preset or the restored save) is not an edit.
+        None => *saved = Some(doc.text.clone()),
+        Some(text) if text == doc.text => {}
+        Some(_) => {
+            persist::save_doc(&doc.text);
+            *saved = Some(doc.text.clone());
         }
     }
 }
@@ -490,6 +599,7 @@ struct UiParams<'w, 's> {
     current: Res<'w, CurrentShader>,
     highlight: ResMut<'w, editor::HighlightCache>,
     analyzer: Res<'w, analyzer::Analyzer>,
+    playback: ResMut<'w, Playback>,
 }
 
 /// Keep wgsl-analyzer (live diagnostics) in sync with the document and the
@@ -586,10 +696,11 @@ fn ui(mut p: UiParams) {
                 .on_hover_text("Pause / resume the clock");
             if ui
                 .button(icon(lucide_icons::Icon::RotateCcw))
-                .on_hover_text("Reset time")
+                .on_hover_text("Reset time, frame counter and buffers")
                 .clicked()
             {
                 p.state.time = 0.0;
+                p.playback.epoch = p.playback.epoch.wrapping_add(1);
             }
             ui.add(
                 egui::Slider::new(&mut p.state.speed, 0.0..=4.0)
@@ -711,13 +822,10 @@ fn ui(mut p: UiParams) {
                     &mut p.highlight,
                     p.analyzer.diagnostics(),
                 );
-                if out.changed {
-                    persist::save_dirty(ctx, &p.doc.text);
-                    if p.state.auto_run {
-                        // Debounced: the compile fires AUTO_RUN_DELAY after
-                        // the last keystroke, not once per character.
-                        p.state.pending_run = Some(ctx.input(|i| i.time));
-                    }
+                if out.changed && p.state.auto_run {
+                    // Debounced: the compile fires AUTO_RUN_DELAY after the
+                    // last keystroke, not once per character.
+                    p.state.pending_run = Some(ctx.input(|i| i.time));
                 }
             });
     }

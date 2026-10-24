@@ -1,5 +1,6 @@
 //! Rendering wiring: the shadertoy fullscreen-material plugin.
 
+pub mod active;
 pub mod buffers;
 pub mod fullscreen_material;
 
@@ -11,7 +12,7 @@ use bevy::math::Vec4;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::extract_resource::ExtractResourcePlugin;
 use bevy::render::render_resource::ShaderType;
-use bevy::render::{RenderApp, RenderStartup};
+use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 pub use fullscreen_material::ShaderToyFragment;
 use fullscreen_material::{
@@ -88,23 +89,32 @@ impl Plugin for ShaderToyRenderPlugin {
     fn build(&self, app: &mut bevy::app::App) {
         app.add_plugins((
             FullscreenMaterialPlugin::<ShaderToyUniform>::default(),
-            ExtractResourcePlugin::<buffers::BufferMask>::default(),
+            ExtractResourcePlugin::<active::Playback>::default(),
             ExtractResourcePlugin::<crate::debugger::DebuggerShader>::default(),
             ExtractResourcePlugin::<crate::debugger::DebuggerOn>::default(),
         ));
-        app.init_resource::<buffers::BufferMask>()
-            .init_resource::<crate::debugger::DebuggerOn>();
+        // One feedback channel, shared (not extracted) by both worlds.
+        let feedback = active::ShaderFeedback::default();
+        app.init_resource::<active::Playback>()
+            .init_resource::<crate::debugger::DebuggerOn>()
+            .insert_resource(feedback.clone());
         app.add_systems(bevy::app::Startup, crate::debugger::setup_debugger_shader);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         render_app
-            .init_resource::<buffers::BufferMask>()
+            .init_resource::<active::Playback>()
+            .init_resource::<active::RejectedGeneration>()
+            .insert_resource(feedback)
             .init_resource::<buffers::BufferTargets>()
             .init_resource::<buffers::BufferPipelines>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .add_systems(RenderStartup, crate::debugger::setup_debugger)
+            .add_systems(
+                Render,
+                active::activate_shader.in_set(RenderSystems::Queue),
+            )
             .add_systems(
                 Core3d,
                 (
