@@ -16,6 +16,7 @@
 //! the same way as in the real compile, and diagnostics arrive in editor
 //! coordinates (as UTF-16 columns, converted to egui's char indices here).
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use bevy::log::{debug, info, warn};
@@ -52,9 +53,38 @@ fn workspace_files() -> Vec<(String, &'static str)> {
         ),
     ];
     for (path, source) in crate::compile::lygia_files() {
-        files.push((format!("lygia/{path}"), source));
+        files.push((format!("lygia/{}", renamed_module(&path)), source));
     }
     files
+}
+
+/// LYGIA modules whose names are WGSL reserved words, with a stand-in of the
+/// same length. The WESL spec allows reserved words as module names
+/// (wesl-spec#127) and the compiler accepts them, but wgsl-analyzer 0.12
+/// still rejects them, so the workspace mirror and the text it is sent use
+/// the stand-in. Same length, so diagnostic offsets need no remapping.
+const RESERVED_MODULES: &[(&str, &str)] = &[("filter", "filtre")];
+
+/// `path` (relative to the LYGIA root) with reserved module names swapped.
+fn renamed_module(path: &str) -> String {
+    let (first, rest) = path.split_once('/').unwrap_or((path, ""));
+    match RESERVED_MODULES.iter().find(|(name, _)| *name == first) {
+        Some((_, stand_in)) if !rest.is_empty() => format!("{stand_in}/{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+/// The editor text as the analyzer sees it: `lygia::filter::…` imports point
+/// at the renamed mirror (see [`RESERVED_MODULES`]).
+fn for_analyzer(text: &str) -> Cow<'_, str> {
+    let mut text = Cow::Borrowed(text);
+    for (name, stand_in) in RESERVED_MODULES {
+        let from = format!("lygia::{name}::");
+        if text.contains(&from) {
+            text = Cow::Owned(text.replace(&from, &format!("lygia::{stand_in}::")));
+        }
+    }
+    text
 }
 
 /// A connection to a language server, as the [`Client`] needs it.
@@ -327,12 +357,13 @@ impl<L: Link> Client<L> {
     /// Open the document, or replace its whole text.
     fn sync(&mut self, text: &str) {
         let uri = format!("{}/{USER_DOC}", self.link.root_uri());
+        let sent = for_analyzer(text);
         self.version += 1;
         if self.synced.is_none() {
             self.notify(
                 "textDocument/didOpen",
                 json!({ "textDocument": {
-                    "uri": uri, "languageId": "wesl", "version": self.version, "text": text,
+                    "uri": uri, "languageId": "wesl", "version": self.version, "text": sent,
                 } }),
             );
         } else {
@@ -340,7 +371,7 @@ impl<L: Link> Client<L> {
                 "textDocument/didChange",
                 json!({
                     "textDocument": { "uri": uri, "version": self.version },
-                    "contentChanges": [{ "text": text }],
+                    "contentChanges": [{ "text": sent }],
                 }),
             );
         }
@@ -429,6 +460,29 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+
+    /// Reserved-word LYGIA modules are renamed alike in the mirror and the
+    /// text, keeping the text's length so diagnostic offsets still line up.
+    #[test]
+    fn reserved_lygia_modules_are_renamed() {
+        assert_eq!(
+            renamed_module("filter/edge/prewitt.wesl"),
+            "filtre/edge/prewitt.wesl"
+        );
+        assert_eq!(renamed_module("filter.wesl"), "filter.wesl");
+        assert_eq!(renamed_module("math/filter.wesl"), "math/filter.wesl");
+        let text = "import lygia::filter::edge::prewitt::edgePrewitt;\nfn filter() {}";
+        let sent = for_analyzer(text);
+        assert_eq!(sent.len(), text.len());
+        assert!(sent.contains("lygia::filtre::edge") && sent.contains("fn filter()"));
+        let files = workspace_files();
+        assert!(
+            files
+                .iter()
+                .any(|(p, _)| p == "lygia/filtre/edge/prewitt.wesl")
+        );
+        assert!(!files.iter().any(|(p, _)| p.starts_with("lygia/filter/")));
+    }
 
     /// Marks follow their characters through an edit until the server
     /// reports on the new text.
