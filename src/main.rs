@@ -11,17 +11,28 @@
 
 mod analyzer;
 mod browser;
-mod compile;
 mod debugger;
+mod drag;
 mod editor;
-mod examples;
+mod evolve;
+mod export;
+mod flags;
+mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
+mod heatmap;
 mod highlight;
+mod library;
 mod persist;
 mod render;
+mod share;
 mod theme;
-mod tweak;
+mod ui_texture;
+mod wesl_scan;
+
+// The compiler, the tweak rewrite and the examples live in the library
+// (`src/lib.rs`); re-exported here so the app keeps its `crate::` paths.
+use wesl_shadertoy::{compile, examples, tweak};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -56,6 +67,10 @@ fn main() {
             headless::run_render_cli(&args);
             return;
         }
+        if args.iter().any(|a| a == "--render-drag") {
+            drag::run_cli(&args);
+            return;
+        }
     }
     App::new()
         .add_plugins(
@@ -87,8 +102,16 @@ fn main() {
         .init_resource::<editor::HighlightCache>()
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
+        .init_resource::<evolve::Evolve>()
+        .init_resource::<heatmap::Heat>()
+        .init_resource::<library::Library>()
+        .init_resource::<flags::FlagsPanel>()
+        .init_resource::<graph::GraphView>()
+        .init_resource::<drag::DragPicture>()
+        .init_resource::<share::Shared>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
+        .add_plugins(ui_texture::UiTexturePlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
         .add_systems(Startup, setup)
         .add_systems(
@@ -97,11 +120,14 @@ fn main() {
                 install_fonts,
                 (update_uniforms, compile_and_apply, poll_render_feedback).chain(),
                 run_analyzer,
+                heatmap::upload,
                 autosave,
                 browser::update_previews,
+                evolve::update_previews.after(browser::update_previews),
+                graph::update_thumbnails.after(browser::update_previews),
             ),
         )
-        .add_systems(EguiPrimaryContextPass, ui)
+        .add_systems(EguiPrimaryContextPass, (ui, drag::update.after(ui)))
         .run();
 }
 
@@ -221,6 +247,11 @@ struct UiWindows {
     editor: bool,
     wgsl: bool,
     constants: bool,
+    /// The LYGIA module index ([`library`]).
+    lygia: bool,
+    /// WESL feature flags and `constants::` values ([`flags`]).
+    flags: bool,
+    graph: bool,
     settings: bool,
     about: bool,
     errors_expanded: bool,
@@ -234,6 +265,9 @@ impl Default for UiWindows {
             editor: true,
             wgsl: false,
             constants: false,
+            lygia: false,
+            flags: false,
+            graph: false,
             settings: false,
             about: false,
             errors_expanded: true,
@@ -297,6 +331,8 @@ struct StartupParams<'w> {
     run: ResMut<'w, RunRequest>,
     state: ResMut<'w, ShaderToyState>,
     wins: ResMut<'w, UiWindows>,
+    heat: ResMut<'w, heatmap::Heat>,
+    shared: ResMut<'w, share::Shared>,
 }
 
 fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: StartupParams) {
@@ -307,13 +343,19 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     commands.insert_resource(settings);
 
     // `--shader <file>` (native) wins over everything: it is how scripted
-    // live tests inject a document. Otherwise restore a saved document
-    // (browser localStorage) or start from an example — a random one when
-    // the fresh-start setting is on.
+    // live tests inject a document. Then a share link ([`share`]). Otherwise
+    // restore a saved document (browser localStorage) or start from an
+    // example — a random one when the fresh-start setting is on.
     app.state.debugger = cli_flag("--debugger");
     app.wins.examples = cli_flag("--examples");
+    app.heat.on = cli_flag("--heat");
+    app.wins.graph = cli_flag("--graph");
+    let link = share::startup(&mut app.shared);
     if let Some(text) = cli_shader() {
         app.doc.text = text;
+    } else if let Some((text, example)) = link {
+        app.doc.text = text;
+        app.state.example = example.map(|e| e.name);
     } else {
         match persist::load_doc() {
             Some(saved) => {
@@ -399,6 +441,7 @@ struct UniformParams<'w, 's> {
     playback: ResMut<'w, Playback>,
     debugger_on: ResMut<'w, debugger::DebuggerOn>,
     tweaks: Res<'w, Tweaks>,
+    drag: Res<'w, drag::DragPicture>,
 }
 
 /// Advance the shadertoy clock, count frames, track iMouse and viewport size.
@@ -444,7 +487,9 @@ fn update_uniforms(mut p: UniformParams) {
             let px = pos * ppp;
             Vec2::new(px.x, resolution.y - px.y)
         });
-        track_mouse(&mut p.state, pos, pressed && on_canvas, held);
+        // Drag mode (or Alt) takes canvas presses for itself.
+        let press = pressed && on_canvas && !p.drag.claims_press(ctx);
+        track_mouse(&mut p.state, pos, press, held);
 
         // Canvas rows under the toolbar and status bar, for the debugger
         // overlay's layout.
@@ -483,6 +528,7 @@ struct CompileParams<'w, 's> {
     fragment: Single<'w, 's, &'static mut ShaderToyFragment>,
     feedback: Res<'w, ShaderFeedback>,
     tweaks: ResMut<'w, Tweaks>,
+    heat: Res<'w, heatmap::Heat>,
 }
 
 /// Compile the editor text and, on success, hot-swap the running shader.
@@ -496,7 +542,7 @@ fn compile_and_apply(mut p: CompileParams) {
     p.status.note = None;
 
     let started = Instant::now();
-    match compile::compile_user_shader(&p.doc.text) {
+    match compile::compile_user_shader_with(&p.doc.text, p.heat.on) {
         Ok(compiled) => {
             // Replace the slot that is not on screen. Repeated compiles
             // before the first lands keep overwriting the same pending slot.
@@ -650,7 +696,15 @@ struct UiParams<'w, 's> {
     blur: ResMut<'w, render::blur::Blur>,
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
+    evolve: ResMut<'w, evolve::Evolve>,
+    library: ResMut<'w, library::Library>,
+    flag_panel: ResMut<'w, flags::FlagsPanel>,
+    drag: ResMut<'w, drag::DragPicture>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
+    ui_texture: ResMut<'w, ui_texture::UiTexture>,
+    heat: ResMut<'w, heatmap::Heat>,
+    graph: ResMut<'w, graph::GraphView>,
+    shared: ResMut<'w, share::Shared>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
 }
@@ -677,11 +731,17 @@ fn ui(mut p: UiParams) {
         return;
     };
     theme::apply(ctx);
-    let sigma = p.settings.blur * ctx.pixels_per_point();
+    // No frosted glass while the UI goes through the shader (see `ui_texture`).
+    let blur = if p.ui_texture.on {
+        0.0
+    } else {
+        p.settings.blur
+    };
+    let sigma = blur * ctx.pixels_per_point();
     if p.blur.sigma != sigma {
         p.blur.sigma = sigma;
     }
-    let glass = (p.settings.blur > 0.0).then(|| Glass {
+    let glass = (blur > 0.0).then(|| Glass {
         texture: blur_texture,
         screen: ctx.viewport_rect(),
     });
@@ -772,14 +832,52 @@ fn ui(mut p: UiParams) {
 
             ui.separator();
 
+            if ui
+                .button("Share")
+                .on_hover_text("Copy a link that contains this shader")
+                .clicked()
+            {
+                p.status.note = Some(share::copy_link(ctx, &p.doc.text, &p.tweaks));
+            }
+            if ui
+                .button("Export")
+                .on_hover_text("Export as a Bevy plugin crate")
+                .clicked()
+            {
+                let values = p.tweaks.values.map(|v| v.to_array());
+                let text =
+                    tweak::written_back(&p.doc.text, &p.tweaks.constants, &values, p.tweaks.dirty);
+                p.status.note = Some(export::export_now(&text, p.state.example));
+            }
+
+            ui.separator();
+
             ui.toggle_value(&mut p.wins.examples, "Examples")
                 .on_hover_text("Browse the examples, running live");
             ui.toggle_value(&mut p.wins.editor, "Code");
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
             ui.toggle_value(&mut p.wins.constants, "Constants")
                 .on_hover_text("Tweak the shader's constants live");
+            ui.toggle_value(&mut p.evolve.on, "Evolve").on_hover_text(
+                "Breed the shader's constants: pick from nine variants (Escape leaves)",
+            );
+            ui.toggle_value(&mut p.wins.flags, "Flags")
+                .on_hover_text("WESL feature flags and constants of the shader and its imports");
+            ui.toggle_value(&mut p.wins.lygia, "LYGIA")
+                .on_hover_text("Browse the bundled LYGIA modules and import from them");
+            ui.toggle_value(&mut p.wins.graph, "Graph")
+                .on_hover_text("The shader's dataflow as a node graph");
+            drag::toggle(ui, &mut p.drag);
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
+            ui_texture::toolbar_toggle(ui, &mut p.ui_texture, &p.current.wgsl);
+            if ui
+                .toggle_value(&mut p.heat.on, icon(lucide_icons::Icon::Flame))
+                .on_hover_text("Cost heatmap: loop iterations per pixel")
+                .changed()
+            {
+                p.run.0 = true;
+            }
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
                 .on_hover_text("Settings");
             ui.toggle_value(&mut p.wins.about, "?")
@@ -798,6 +896,15 @@ fn ui(mut p: UiParams) {
 
     // --- canvas: what the panels leave free shows the shader ----------------
     p.state.canvas = root_ui.available_rect_before_wrap();
+    evolve::show(
+        ctx,
+        &mut p.evolve,
+        &mut p.tweaks,
+        p.state.canvas,
+        p.current.generation,
+        &p.preview_feedback,
+    );
+    heatmap::legend(ctx, p.state.canvas, &mut p.heat);
 
     // --- editor window -------------------------------------------------------
     if p.wins.editor {
@@ -864,6 +971,54 @@ fn ui(mut p: UiParams) {
         tweaks.dirty = 0;
     }
 
+    // --- flags window ---------------------------------------------------------
+    if p.wins.flags {
+        let mut changed = false;
+        show_window(
+            ctx,
+            glass,
+            "flags_window",
+            egui::Window::new("Flags")
+                .default_pos([680.0, 380.0])
+                .default_size([420.0, 260.0])
+                .open(&mut p.wins.flags),
+            |ui| changed = flags::show(ui, &mut p.flag_panel, &mut p.doc.text),
+        );
+        // Flags change the code itself: recompile.
+        p.run.0 |= changed;
+    }
+
+    // --- LYGIA window ---------------------------------------------------------
+    if p.wins.lygia {
+        show_window(
+            ctx,
+            glass,
+            "lygia_window",
+            egui::Window::new("LYGIA")
+                .default_pos([680.0, 60.0])
+                .default_size([560.0, 520.0])
+                .open(&mut p.wins.lygia),
+            |ui| library::show(ui, &mut p.library, &mut p.doc.text),
+        );
+    }
+
+    // --- graph window ---------------------------------------------------------
+    if p.wins.graph {
+        show_window(
+            ctx,
+            glass,
+            "graph_window",
+            egui::Window::new("Graph")
+                .default_pos([680.0, 60.0])
+                .default_size([760.0, 520.0])
+                .open(&mut p.wins.graph),
+            |ui| {
+                let (wgsl, generation) = (&p.current.wgsl, p.current.generation);
+                graph::show(ui, &mut p.graph, wgsl, generation, &p.preview_feedback);
+            },
+        );
+    }
+
     // --- examples window (after the others: on top when they open together) -----------------------------------------------------
     p.browser.begin_frame();
     if p.wins.examples {
@@ -915,6 +1070,18 @@ fn ui(mut p: UiParams) {
         if modal.should_close() {
             p.wins.confirm_example = None;
         }
+    }
+
+    // --- shared link window --------------------------------------------------
+    if let Some(work) = share::show_opened(ctx, glass, &mut p.shared) {
+        open_into(
+            &mut p.doc,
+            &mut p.state,
+            &mut p.run,
+            &mut p.status,
+            work,
+            "your saved work",
+        );
     }
 
     // --- settings window -----------------------------------------------------
@@ -1411,9 +1578,10 @@ fn cli_example() -> Option<&'static examples::Example> {
 }
 
 /// Native-only: whether `flag` was passed. `--debugger` starts with the
-/// in-shader debugger overlay on (same as the toolbar bug icon) and
-/// `--examples` with the Examples window open, so scripted live tests can
-/// show them.
+/// in-shader debugger overlay on (same as the toolbar bug icon),
+/// `--examples` with the Examples window open, `--graph` with the Graph
+/// window open and `--heat` in heat mode (the flame icon), so scripted live
+/// tests can show them.
 fn cli_flag(flag: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {

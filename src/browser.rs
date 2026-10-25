@@ -1,5 +1,7 @@
 //! The Examples window: every built-in example as a card with a live
 //! thumbnail, filtered by a search box and tags; clicking a card opens it.
+//! The tutorial comes first, then the other beginner examples (see
+//! [`examples::rank`]).
 //!
 //! The thumbnails are real renders ([`crate::render::previews`]). Each
 //! example is compiled the first time its card scrolls into view (within a
@@ -17,7 +19,7 @@ use bevy_egui::{EguiContexts, egui};
 use crate::examples::{self, Example};
 use crate::render::ShaderToyUniform;
 use crate::render::previews::{
-    PREVIEW_FORMAT, PREVIEW_SIZE, PreviewFeedback, PreviewJob, PreviewJobs,
+    PREVIEW_FORMAT, PREVIEW_SIZE, PreviewFeedback, PreviewJob, PreviewJobs, PreviewKey,
 };
 use crate::tweak::MAX_TWEAKS;
 
@@ -172,8 +174,10 @@ pub fn update_previews(
         };
         card.last_drawn = now;
         jobs.0.push(PreviewJob {
-            card: i,
+            card: PreviewKey::Example(i),
             image: image.id(),
+            size: PREVIEW_SIZE,
+            generation: 0,
             shader: compiled.shader.clone(),
             buffers: compiled.buffers,
             uniform,
@@ -239,14 +243,16 @@ pub fn show(
     let matches = |e: &Example| {
         b.tag.is_none_or(|t| e.tags.contains(&t))
             && (query.is_empty()
-                || [e.name, e.summary, e.author]
+                || [e.name, e.summary, e.author, e.teaches]
                     .iter()
                     .chain(e.tags)
                     .any(|s| s.to_lowercase().contains(&query)))
     };
-    let shown: Vec<usize> = (0..examples::ALL.len())
+    let mut shown: Vec<usize> = (0..examples::ALL.len())
         .filter(|&i| matches(&examples::ALL[i]))
         .collect();
+    // Newcomers first; a stable sort keeps the rest by name.
+    shown.sort_by_key(|&i| examples::rank(&examples::ALL[i]));
 
     let mut clicked = None;
     egui::ScrollArea::vertical()
@@ -273,7 +279,7 @@ pub fn show(
     clicked
 }
 
-/// One card: thumbnail, name and summary. Returns whether it was clicked.
+/// One card: thumbnail, name, summary and what it teaches. Returns whether it was clicked.
 fn card(
     ui: &mut egui::Ui,
     b: &mut Browser,
@@ -320,6 +326,9 @@ fn card(
             ui.add(
                 egui::Label::new(egui::RichText::new(example.summary).small().weak()).truncate(),
             );
+            if !example.teaches.is_empty() {
+                ui.add(egui::Label::new(teaches(example).small()).truncate());
+            }
             response
         })
         .inner;
@@ -340,7 +349,7 @@ fn thumbnail(ui: &egui::Ui, b: &Browser, i: usize, rect: egui::Rect, feedback: &
                 crate::theme::ERR_COLOR,
             );
         }
-        (Some((_, texture)), _) if feedback.drawn(i) => {
+        (Some((_, texture)), _) if feedback.drawn(PreviewKey::Example(i)) => {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(*texture, rect, uv, egui::Color32::WHITE);
         }
@@ -362,6 +371,9 @@ fn details(ui: &mut egui::Ui, e: &Example) {
     ui.set_max_width(320.0);
     ui.strong(e.name);
     ui.label(e.summary);
+    if !e.teaches.is_empty() {
+        ui.label(teaches(e));
+    }
     ui.separator();
     if !e.author.is_empty() {
         ui.label(format!("by {}", e.author));
@@ -373,6 +385,11 @@ fn details(ui: &mut egui::Ui, e: &Example) {
     if !e.tags.is_empty() {
         ui.label(egui::RichText::new(e.tags.join(" · ")).small().weak());
     }
+}
+
+/// "teaches …", in the color that sets it apart from the summary.
+fn teaches(e: &Example) -> egui::RichText {
+    egui::RichText::new(format!("teaches {}", e.teaches)).color(crate::theme::TEACHES_COLOR)
 }
 
 #[cfg(test)]
@@ -410,10 +427,14 @@ mod tests {
 
         b.tag = Some("lygia");
         run(&mut b, vec![]);
-        let lygia: Vec<usize> = (0..examples::ALL.len())
+        let mut lygia: Vec<usize> = (0..examples::ALL.len())
             .filter(|&i| examples::ALL[i].tags.contains(&"lygia"))
             .collect();
-        assert_eq!(b.visible, lygia);
+        lygia.sort_by_key(|&i| examples::rank(&examples::ALL[i]));
+        // The first rows of them fit.
+        assert!(!b.visible.is_empty());
+        assert_eq!(b.visible, lygia[..b.visible.len()]);
+        assert_eq!(examples::ALL[lygia[0]].name, "LYGIA 101", "tutorial first");
 
         // The first thumbnail sits at the left, below the filter rows.
         let on_first = egui::pos2(60.0, 150.0);

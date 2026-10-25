@@ -174,19 +174,20 @@ fn float_literal(v: f32) -> String {
 // --- scanning ----------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Ident,
     Number,
     Punct(u8),
 }
 
-struct Token {
-    tok: Tok,
-    span: Range<usize>,
+pub(crate) struct Token {
+    pub(crate) tok: Tok,
+    pub(crate) span: Range<usize>,
 }
 
 /// Tokens of `src`, plus the line comments (span of the text after `//`).
-fn lex(src: &str) -> (Vec<Token>, Vec<Range<usize>>) {
+/// Shared with [`crate::heat`], which rewrites loops the same way.
+pub(crate) fn lex(src: &str) -> (Vec<Token>, Vec<Range<usize>>) {
     let b = src.as_bytes();
     let (mut tokens, mut comments) = (Vec::new(), Vec::new());
     let mut i = 0;
@@ -532,6 +533,19 @@ pub fn write_back(src: &mut String, constant: &Constant, value: [f32; 4]) -> boo
     true
 }
 
+/// `src` with the values of the `dirty` slots written back (bit per slot of
+/// `constants`), for sharing or exporting the document while a drag has
+/// not been written into it yet.
+pub fn written_back(src: &str, constants: &[Constant], values: &[[f32; 4]], dirty: u32) -> String {
+    let mut out = src.to_string();
+    for (slot, c) in constants.iter().enumerate() {
+        if dirty & (1 << slot) != 0 {
+            write_back(&mut out, c, values[slot]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +670,14 @@ fn f() {
         assert_eq!(c(Kind::U32, Hint::Auto).range(0.0), (0.0, 1.0));
         assert_eq!(c(Kind::I32, Hint::Auto).range(3.0), (0.0, 6.0));
         assert_eq!(c(Kind::F32, Hint::Range(1.0, 5.0)).range(0.6), (1.0, 5.0));
+    }
+
+    #[test]
+    fn written_back_applies_only_dirty_slots() {
+        let src = "const A: f32 = 1.0;\nconst B: f32 = 2.0;\n";
+        let constants = extract(src);
+        let values = [[5.0, 0.0, 0.0, 0.0], [6.0, 0.0, 0.0, 0.0]];
+        let out = written_back(src, &constants, &values, 0b10);
+        assert_eq!(out, "const A: f32 = 1.0;\nconst B: f32 = 6.0;\n");
     }
 }

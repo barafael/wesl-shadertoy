@@ -249,6 +249,8 @@ impl BufferPass<'_> {
                     &reads[1],
                     &reads[2],
                     &reads[3],
+                    &self.fullscreen.ui_dummy,
+                    &self.fullscreen.ui_sampler,
                 )),
             );
 

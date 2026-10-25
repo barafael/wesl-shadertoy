@@ -34,8 +34,9 @@
   </style>
 </head>
 <body>
-  <!-- Rust emits bulk-memory ops; trunk's bundled wasm-opt needs them enabled. -->
-  <link data-trunk rel="rust" data-wasm-opt="z"
+  <!-- Rust emits bulk-memory ops; trunk's bundled wasm-opt needs them enabled.
+       data-bin: the package also has a library target (src/lib.rs). -->
+  <link data-trunk rel="rust" data-bin="wesl-shadertoy" data-wasm-opt="z"
         data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int" />
   <link data-trunk rel="copy-file" href="web/coi-serviceworker.js" />
   <!-- The wgsl-analyzer language server (web/fetch-wgsl-analyzer.sh). -->
@@ -54,6 +55,11 @@
     // promptly (pattern borrowed from omdurman's index.html).
     window.addEventListener('beforeunload', function () {
       document.querySelectorAll('canvas').forEach(function (c) { c.remove(); });
+    });
+    // A share link pasted into this tab only changes the fragment, which
+    // loads nothing by itself; reload so the app opens it at startup.
+    window.addEventListener('hashchange', function () {
+      if (window.location.hash.length > 1) { window.location.reload(); }
     });
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     // Auto-reload when the WebGL context is lost (GPU switch, sleep, ...).

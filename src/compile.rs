@@ -34,22 +34,27 @@ use std::str::FromStr;
 use wesl::error::ResolveError;
 use wesl::mangler::{EscapeMangler, Mangler};
 use wesl::resolver::{PackageResolver, VirtualResolver};
-use wesl::syntax::ModulePath;
+use wesl::syntax::{ModulePath, PathOrigin};
 use wesl::{CompileOptions, Compiler, Resolver};
 
+use crate::heat;
+use crate::pragmas::Pragmas;
 use crate::tweak::{self, Constant, Hint, MAX_TWEAKS};
 
-/// The WGSL uniform block, shared by [`SHADERTOY_MODULE`] and the debugger
-/// overlay ([`crate::debugger::DEBUGGER_WGSL`]) so the two cannot drift.
-/// Field order must match [`crate::render::ShaderToyUniform`]; the
-/// `uniform_layout_matches_rust` test checks every member's offset.
+/// The WGSL uniform block, shared by [`SHADERTOY_MODULE`] and the app's
+/// debugger overlay (`DEBUGGER_WGSL`) so the two cannot drift. Field order
+/// must match the app's `ShaderToyUniform`; its `uniform_layout_matches_rust`
+/// test checks every member's offset.
+#[macro_export]
+#[doc(hidden)]
 macro_rules! shadertoy_uniforms_wgsl {
     () => {
         r#"struct ShaderToyUniforms {
     i_time: f32,
     i_time_delta: f32,
     i_frame: u32,
-    _pad: f32,
+    // Heat mode only (`crate::heat`): the count at the palette's hot end.
+    _heat_max: f32,
     i_resolution: vec4<f32>,
     i_mouse: vec4<f32>,
     i_date: vec4<f32>,
@@ -67,10 +72,10 @@ macro_rules! shadertoy_uniforms_wgsl {
 "#
     };
 }
-pub(crate) use shadertoy_uniforms_wgsl;
+pub use crate::shadertoy_uniforms_wgsl;
 
 /// The hidden `package::shadertoy` module: uniforms + accessors.
-pub(crate) const SHADERTOY_MODULE: &str = concat!(
+pub const SHADERTOY_MODULE: &str = concat!(
     r#"// The shadertoy environment, provided by wesl-shadertoy.
 // Uniforms live in the dynamic uniform buffer the fullscreen-material
 // pipeline binds at @group(0) @binding(2).
@@ -101,6 +106,14 @@ struct FullscreenVertexOutput {
 @group(0) @binding(5) var i_channel_2: texture_2d<f32>;
 /// Buffer channel D (`buffer_d`).
 @group(0) @binding(6) var i_channel_3: texture_2d<f32>;
+/// The rendered UI (toolbar, windows, everything) while the toolbar's UI
+/// texture mode is on, else a transparent 1x1 texture. Only the image pass
+/// sees it, and the shader's output replaces the UI on screen. Colors are
+/// premultiplied by alpha. Read it through `i_ui_sample`, or texels with
+/// `textureLoad` (row 0 is the top).
+@group(0) @binding(7) var i_ui: texture_2d<f32>;
+/// Bilinear, clamp-to-edge sampler for `i_ui`.
+@group(0) @binding(8) var i_ui_sampler: sampler;
 
 /// Seconds since (re)start.
 fn i_time() -> f32 { return st_uniforms.i_time; }
@@ -128,6 +141,13 @@ fn i_channel_resolution(i: u32) -> vec3<f32> { return st_uniforms.i_channel_reso
 /// Live value of tweakable constant slot i; used by the generated loader,
 /// not meant to be called by hand.
 fn i_tweak(i: u32) -> vec4<f32> { return st_uniforms.i_tweaks[i]; }
+/// The UI at `uv` (0..1, origin bottom-left like
+/// `frag_coord / i_resolution().xy`), bilinear and premultiplied:
+/// `ui.rgb + col * (1.0 - ui.a)` lays it over `col`. Transparent while the
+/// UI texture mode is off.
+fn i_ui_sample(uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(i_ui, i_ui_sampler, vec2<f32>(uv.x, 1.0 - uv.y), 0.0);
+}
 "#
 );
 
@@ -140,7 +160,7 @@ mod lygia {
 /// Every bundled LYGIA module as `(path relative to the package root,
 /// source)`, e.g. `("generative/snoise.wesl", …)`: the files the analyzer's
 /// workspace mirrors.
-pub(crate) fn lygia_files() -> Vec<(String, &'static str)> {
+pub fn lygia_files() -> Vec<(String, &'static str)> {
     fn walk(
         module: &wesl::package::StaticPackageModule,
         dir: &str,
@@ -158,18 +178,33 @@ pub(crate) fn lygia_files() -> Vec<(String, &'static str)> {
     files
 }
 
+/// The source of the bundled LYGIA module at `path` (`::`-separated below
+/// the package root, e.g. `generative::snoise`).
+pub fn lygia_source(path: &str) -> Option<&'static str> {
+    let mut module = lygia::LYGIA.root;
+    for name in path.split("::") {
+        module = module.submodules.iter().find(|m| m.name == name).copied()?;
+    }
+    (!module.source.is_empty()).then_some(module.source)
+}
+
 /// Everything a compile can import: the app's in-memory `package::` modules
-/// (`main`, `shadertoy`, `user`) and the external packages, i.e. `lygia::`.
+/// (`main`, `shadertoy`, `user`), the external packages, i.e. `lygia::`,
+/// and WESL's virtual `constants::` module.
 struct Modules<'a> {
     local: VirtualResolver<'a>,
     packages: PackageResolver,
+    /// The `constants` module's source (see [`Pragmas`]).
+    constants: String,
 }
 
 impl<'a> Modules<'a> {
-    /// `shadertoy` plus `user` (and whatever `extra` modules) under `package::`.
+    /// `shadertoy` plus `user` (and whatever `extra` modules) under
+    /// `package::`, and the constants `pragmas` set.
     fn new(
         user: Cow<'a, str>,
         extra: impl IntoIterator<Item = (&'static str, Cow<'a, str>)>,
+        pragmas: &Pragmas,
     ) -> Self {
         let mut local = VirtualResolver::new();
         let modules = [("shadertoy", SHADERTOY_MODULE.into()), ("user", user)];
@@ -178,13 +213,28 @@ impl<'a> Modules<'a> {
         }
         let mut packages = PackageResolver::new();
         packages.add_package(&lygia::LYGIA);
-        Self { local, packages }
+        let constants = pragmas.constants_module();
+        Self {
+            local,
+            packages,
+            constants,
+        }
     }
+}
+
+/// Whether `path` is in the `constants` module. Imported from inside a
+/// package it may arrive as `lygia/constants`; every package shares the
+/// one module, as with wesl's own `StandardResolver`.
+fn is_constants(path: &ModulePath) -> bool {
+    matches!(&path.origin, PathOrigin::Package(name)
+        if name == "constants" || name.ends_with("/constants"))
 }
 
 impl Resolver for Modules<'_> {
     fn resolve_source<'b>(&'b self, path: &ModulePath) -> Result<Cow<'b, str>, ResolveError> {
-        if path.origin.is_package() {
+        if is_constants(path) {
+            Ok(Cow::Borrowed(self.constants.as_str()))
+        } else if path.origin.is_package() {
             self.packages.resolve_source(path)
         } else {
             self.local.resolve_source(path)
@@ -192,7 +242,12 @@ impl Resolver for Modules<'_> {
     }
 
     fn canonical_path(&self, path: &ModulePath) -> ModulePath {
-        if path.origin.is_package() {
+        if is_constants(path) {
+            ModulePath::new(
+                PathOrigin::Package("constants".to_string()),
+                path.components.clone(),
+            )
+        } else if path.origin.is_package() {
             self.packages.canonical_path(path)
         } else {
             path.clone()
@@ -202,10 +257,12 @@ impl Resolver for Modules<'_> {
 
 /// WESL's defaults, minus visibility checks: LYGIA marks nothing `public`
 /// (its own tooling does not enforce visibility), and with them on, wesl
-/// refuses every import from it.
-fn compile_options() -> CompileOptions {
+/// refuses every import from it. The feature flags are the ones `pragmas`
+/// turn on.
+fn compile_options(pragmas: &Pragmas) -> CompileOptions {
     CompileOptions {
         visibility: false,
+        features: pragmas.features(),
         ..Default::default()
     }
 }
@@ -252,7 +309,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// Build the `package::main` module for a shader that defines the buffer
 /// passes selected by `buffers` (bit per [`BUFFER_NAMES`] entry). Each buffer
 /// gets its own fragment entry point, rendered into that channel's offscreen
-/// target; undefined buffers get a stub entry (see the comment inside).
+/// target; undefined buffers get a stub entry (see the comment inside)
+/// when `stubs` is set.
 ///
 /// Buffer entries pass `@builtin(position)` through unflipped, so a buffer's
 /// `frag_coord.y` equals its texture row. A fragment always writes the texel
@@ -263,7 +321,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// displays the buffer space bottom-up just like the image space (and like
 /// shadertoy's `texture(iChannel0, fragCoord / resolution)`): `frag_coord.y`
 /// grows upward on screen and `i_mouse()` lines up with the cursor.
-fn main_module_for(buffers: u8) -> String {
+///
+/// With `heat` on, the image entry shows the cost heatmap instead
+/// ([`heat::MAIN_MODULE_HEAD`]); buffer entries stay as they are.
+fn main_module_for(buffers: u8, heat: bool, stubs: bool) -> String {
     let mut wgsl = String::new();
     // Imports must come first
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
@@ -271,8 +332,16 @@ fn main_module_for(buffers: u8) -> String {
             wgsl.push_str(&format!("import package::user::{name};\n"));
         }
     }
-    wgsl.push_str(MAIN_MODULE_HEAD);
+    if heat {
+        wgsl.push_str(heat::MAIN_MODULE_HEAD);
+        wgsl.push_str(&heat::palette_wgsl());
+    } else {
+        wgsl.push_str(MAIN_MODULE_HEAD);
+    }
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
+        if !stubs && buffers & (1 << i) == 0 {
+            continue;
+        }
         let body = if buffers & (1 << i) != 0 {
             format!(
                 "\x20   st_load_tweaks();\n\
@@ -343,6 +412,35 @@ impl std::fmt::Display for CompileError {
 /// way [`tweak::const_context_names`] did not spot — are found by compiling
 /// them one at a time and left as plain constants.
 pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileError> {
+    compile_user_shader_with(user_source, false)
+}
+
+/// [`compile_user_shader`], with the image pass showing the cost heatmap
+/// when `heat` is on (see [`heat`]). Errors are reported against the
+/// plain source, as if heat mode were off.
+pub fn compile_user_shader_with(
+    user_source: &str,
+    heat: bool,
+) -> Result<CompiledShader, CompileError> {
+    match compile_variant(user_source, heat, true) {
+        Err(e) if heat => Err(compile_variant(user_source, false, true).err().unwrap_or(e)),
+        result => result,
+    }
+}
+
+/// [`compile_user_shader`] without the stub entry points of undefined
+/// buffer passes, which only the app's shader slot reuse needs: a shader
+/// without buffers then has `fragment` as its only entry point, which is
+/// what exported crates (Bevy's stock fullscreen material) expect.
+pub fn compile_for_export(user_source: &str) -> Result<CompiledShader, CompileError> {
+    compile_variant(user_source, false, false)
+}
+
+fn compile_variant(
+    user_source: &str,
+    heat: bool,
+    stubs: bool,
+) -> Result<CompiledShader, CompileError> {
     let buffers = detect_buffers(user_source)?;
 
     let in_const_context = tweak::const_context_names(user_source);
@@ -359,21 +457,22 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
         }
     }
 
-    let wgsl = match compile_instrumented(user_source, buffers, &tweaks) {
+    let wgsl = match compile_instrumented(user_source, buffers, stubs, &tweaks, heat) {
         Ok(wgsl) => wgsl,
         Err(_) if !tweaks.is_empty() => {
             // Report the user's own errors against the plain source.
-            compile_instrumented(user_source, buffers, &[])?;
+            compile_instrumented(user_source, buffers, stubs, &[], heat)?;
             let (ok, bad): (Vec<Constant>, Vec<Constant>) = tweaks.into_iter().partition(|c| {
-                compile_instrumented(user_source, buffers, std::slice::from_ref(c)).is_ok()
+                compile_instrumented(user_source, buffers, stubs, std::slice::from_ref(c), heat)
+                    .is_ok()
             });
             fixed.extend(bad.into_iter().map(|c| c.name));
             tweaks = ok;
-            match compile_instrumented(user_source, buffers, &tweaks) {
+            match compile_instrumented(user_source, buffers, stubs, &tweaks, heat) {
                 Ok(wgsl) => wgsl,
                 Err(_) => {
                     fixed.extend(tweaks.drain(..).map(|c| c.name));
-                    compile_instrumented(user_source, buffers, &[])?
+                    compile_instrumented(user_source, buffers, stubs, &[], heat)?
                 }
             }
         }
@@ -388,17 +487,27 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
 }
 
 /// Compile the user source with `tweaks` made live (see [`tweak::instrument`])
-/// into a validated WGSL module.
+/// and, with `heat` on, its loops counted (see [`heat::instrument`]) into
+/// a validated WGSL module, under the flags and constants its pragma lines
+/// set ([`crate::pragmas`]).
 fn compile_instrumented(
     user_source: &str,
     buffers: u8,
+    stubs: bool,
     tweaks: &[Constant],
+    heat: bool,
 ) -> Result<String, CompileError> {
+    let pragmas = Pragmas::parse(user_source);
+    let mut user = tweak::instrument(user_source, tweaks);
+    if heat {
+        user = heat::instrument(&user);
+    }
     let resolver = Modules::new(
-        tweak::instrument(user_source, tweaks).into(),
-        [("main", main_module_for(buffers).into())],
+        user.into(),
+        [("main", main_module_for(buffers, heat, stubs).into())],
+        &pragmas,
     );
-    let compiler = Compiler::new_with_resolver(compile_options(), resolver);
+    let compiler = Compiler::new_with_resolver(compile_options(&pragmas), resolver);
     let result = compiler
         .compile_module(&package_path("main"))
         .map_err(|e| CompileError::Wesl(e.to_string()))?;
@@ -450,7 +559,7 @@ fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
     }
     Err(CompileError::Binding(format!(
         "{} binds resources wesl-shadertoy does not provide. Import them from \
-         package::shadertoy instead (i_sampler, i_channel_0..i_channel_3; the \
+         package::shadertoy instead (i_sampler, i_channel_0..i_channel_3, i_ui; the \
          uniforms through i_time() and friends).",
         foreign.join(", ")
     )))
@@ -459,7 +568,8 @@ fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
 /// Compile `package::user` on its own and report which buffer passes it
 /// defines, by looking for `fn buffer_a`..`buffer_d` in the output.
 fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
-    let resolver = Modules::new(user_source.into(), []);
+    let pragmas = Pragmas::parse(user_source);
+    let resolver = Modules::new(user_source.into(), [], &pragmas);
 
     // `keep_main` disables stripping *within* package::user, so unreferenced
     // `buffer_*` functions survive to be detected (the real compile in
@@ -467,7 +577,7 @@ fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
     // from the generated `package::main` entry points there).
     let options = CompileOptions {
         keep_main: true,
-        ..compile_options()
+        ..compile_options(&pragmas)
     };
     let compiler = Compiler::new_with_resolver(options, resolver);
     let result = compiler
@@ -542,87 +652,6 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 }
 "#;
         compile_user_shader(src).expect("should compile");
-    }
-
-    /// The Rust uniform struct and the WGSL `ShaderToyUniforms` struct are
-    /// maintained on both sides of FFI-bytes: every WGSL member must sit at
-    /// the offset where the Rust field of the same name is encoded, and the
-    /// sizes must agree. (The debugger overlay shares the WGSL struct through
-    /// `shadertoy_uniforms_wgsl!`, so this covers it too.)
-    #[test]
-    fn uniform_layout_matches_rust() {
-        use bevy::math::Vec4;
-        use bevy::render::render_resource::ShaderType;
-
-        use crate::render::ShaderToyUniform;
-
-        // Every 4-byte slot gets a distinct value, so the encoded bytes tell
-        // which Rust field landed where.
-        let v = |a: f32| Vec4::new(a, a + 1.0, a + 2.0, a + 3.0);
-        let rust = ShaderToyUniform {
-            time: 1.0,
-            time_delta: 2.0,
-            frame: 3,
-            _pad: 4.0,
-            resolution: v(5.0),
-            mouse: v(9.0),
-            date: v(13.0),
-            sample_rate: 17.0,
-            frame_rate: 18.0,
-            overlay_top: 19.0,
-            overlay_bottom: 20.0,
-            channel_time: v(21.0),
-            channel_resolution: [v(25.0), v(29.0), v(33.0), v(37.0)],
-            tweaks: std::array::from_fn(|i| v(41.0 + 4.0 * i as f32)),
-        };
-        let bytes = crate::render::uniform_bytes(&rust);
-        assert_eq!(bytes.len() as u64, ShaderToyUniform::min_size().get());
-        let word = |offset: u32| {
-            let o = offset as usize;
-            u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
-        };
-        // WGSL member name -> the first word its Rust namesake encodes.
-        let expected = [
-            ("i_time", 1.0f32.to_bits()),
-            ("i_time_delta", 2.0f32.to_bits()),
-            ("i_frame", 3),
-            ("_pad", 4.0f32.to_bits()),
-            ("i_resolution", 5.0f32.to_bits()),
-            ("i_mouse", 9.0f32.to_bits()),
-            ("i_date", 13.0f32.to_bits()),
-            ("i_sample_rate", 17.0f32.to_bits()),
-            ("i_frame_rate", 18.0f32.to_bits()),
-            ("_overlay_top", 19.0f32.to_bits()),
-            ("_overlay_bottom", 20.0f32.to_bits()),
-            ("i_channel_time", 21.0f32.to_bits()),
-            ("i_channel_resolution", 25.0f32.to_bits()),
-            ("i_tweaks", 41.0f32.to_bits()),
-        ];
-
-        let module =
-            naga::front::wgsl::parse_str(SHADERTOY_MODULE).expect("shadertoy module parses");
-        let (handle, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("ShaderToyUniforms"))
-            .expect("ShaderToyUniforms present");
-        let naga::TypeInner::Struct { members, .. } = &ty.inner else {
-            panic!("ShaderToyUniforms is a struct");
-        };
-        let names: Vec<_> = members.iter().filter_map(|m| m.name.as_deref()).collect();
-        let expected_names: Vec<_> = expected.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, expected_names);
-        for (member, (name, first_word)) in members.iter().zip(expected) {
-            assert_eq!(
-                word(member.offset),
-                first_word,
-                "{name} at offset {}",
-                member.offset
-            );
-        }
-        let mut layouter = naga::proc::Layouter::default();
-        layouter.update(module.to_ctx()).unwrap();
-        assert_eq!(u64::from(layouter[handle].size), bytes.len() as u64);
     }
 
     /// Resources the pipeline does not provide are a compile error, not a
@@ -709,6 +738,16 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         );
     }
 
+    /// Exports carry only the entry points the shader uses.
+    #[test]
+    fn export_has_no_stub_entries() {
+        let src = "fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0); }\n";
+        let wgsl = compile_for_export(src).expect("should compile").wgsl;
+        assert_eq!(wgsl.matches("@fragment").count(), 1, "{wgsl}");
+        let wgsl = compile_user_shader(src).expect("should compile").wgsl;
+        assert_eq!(wgsl.matches("@fragment").count(), 5, "{wgsl}");
+    }
+
     #[test]
     fn buffer_names_in_comments_are_not_entries() {
         let src = r#"
@@ -786,6 +825,69 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
                        fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(nope()); }\n";
         let msg = compile_user_shader(missing).unwrap_err().to_string();
         assert!(msg.contains("nope"), "{msg}");
+    }
+
+    /// A `// wesl-flags:` line switches a LYGIA module's `@if` branch, and
+    /// user code can test flags of its own.
+    #[test]
+    fn flags_select_lygia_code() {
+        let src = r#"
+import lygia::color::space::rgb2yuv::rgb2yuv;
+
+@if(BRIGHT)
+const GAIN: f32 = 2.5; // tweak: off
+@else
+const GAIN: f32 = 1.5; // tweak: off
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(rgb2yuv(vec3<f32>(frag_coord.x * 0.001)) * GAIN, 1.0);
+}
+"#;
+        let hdtv = compile_user_shader(src)
+            .expect("compiles without flags")
+            .wgsl;
+        let flagged = format!("// wesl-flags: YUV_SDTV, BRIGHT\n{src}");
+        let sdtv = compile_user_shader(&flagged)
+            .expect("compiles with flags")
+            .wgsl;
+        assert_ne!(hdtv, sdtv);
+        // BT.709 luma weights without the flag, BT.601 with it.
+        assert!(hdtv.contains("0.2126") && !hdtv.contains("0.299"), "{hdtv}");
+        assert!(sdtv.contains("0.299") && !sdtv.contains("0.2126"), "{sdtv}");
+        assert!(hdtv.contains("1.5") && !hdtv.contains("2.5"), "{hdtv}");
+        assert!(sdtv.contains("2.5") && !sdtv.contains("1.5"), "{sdtv}");
+    }
+
+    /// `// wesl-const:` feeds the `constants::` module, and turns on the
+    /// same-named flag that guards its import in LYGIA.
+    #[test]
+    fn constants_reach_lygia() {
+        let src = r#"
+import package::shadertoy::i_frame;
+import lygia::distort::marble::marbleBake1;
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(f32(marbleBake1(f32(i_frame()))));
+}
+"#;
+        let default = compile_user_shader(src).expect("compiles").wgsl;
+        assert!(default.contains("60.0"), "{default}");
+        let set = format!("// wesl-const: MARBLE_PERIOD = 90.0\n{src}");
+        let wgsl = compile_user_shader(&set)
+            .expect("compiles with the constant")
+            .wgsl;
+        assert!(wgsl.contains("90.0") && !wgsl.contains("60.0"), "{wgsl}");
+
+        // The user's own code can read constants too, of any WGSL type.
+        let own = "// wesl-const: TINT = vec3f(0.25, 0.5, 1.0)\n\
+                   import constants::TINT;\n\
+                   fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(TINT, 1.0); }\n";
+        let wgsl = compile_user_shader(own).expect("compiles").wgsl;
+        assert!(wgsl.contains("0.25"), "{wgsl}");
+        // Without a value the import fails, and says what is missing.
+        let missing = own.lines().skip(1).collect::<Vec<_>>().join("\n");
+        let msg = compile_user_shader(&missing).unwrap_err().to_string();
+        assert!(msg.contains("TINT"), "{msg}");
     }
 
     #[test]

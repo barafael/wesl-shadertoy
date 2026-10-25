@@ -19,6 +19,10 @@
 //!   3..6) for shadertoy's buffer channels, and the bind group is rebuilt
 //!   every frame instead of cached, because those channel views ping-pong
 //!   per frame (see [`super::buffers`]).
+//! * Two more entries (bindings 7 and 8) carry the rendered UI and a
+//!   bilinear sampler for it (`i_ui`, see [`super::ui_pass`]). While that
+//!   mode is on, [`fullscreen_material_system`] stands aside and the same
+//!   pass is recorded after egui instead.
 
 use core::any::type_name;
 use core::marker::PhantomData;
@@ -30,7 +34,7 @@ use bevy::ecs::component::Component;
 use bevy::ecs::error::BevyError;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::{IntoScheduleConfigs, ScheduleConfigs, ScheduleLabel};
-use bevy::ecs::system::{BoxedSystem, Commands, Local, Res};
+use bevy::ecs::system::{BoxedSystem, Commands, Local, Res, SystemParam};
 use bevy::platform::collections::HashMap;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{
@@ -146,6 +150,10 @@ impl ChannelViews {
 pub struct FullscreenMaterialPipeline<T: FullscreenMaterial> {
     pub(crate) layout: BindGroupLayoutDescriptor,
     pub(crate) sampler: Sampler,
+    /// Bound as `i_ui` whenever the rendered UI is not (transparent 1×1).
+    pub(crate) ui_dummy: TextureView,
+    /// `i_ui_sampler`: bilinear, clamp-to-edge.
+    pub(crate) ui_sampler: Sampler,
     pub(crate) vertex: VertexState,
     /// One specialization cache per fragment shader handle.
     variants:
@@ -241,10 +249,15 @@ fn init_pipeline<T: FullscreenMaterial>(
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 texture_2d(TextureSampleType::Float { filterable: false }),
+                // `i_ui` and `i_ui_sampler`: the rendered UI (an 8-bit
+                // colour target, so filterable) and a bilinear sampler.
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
             ),
         ),
     );
     let sampler = render_device.create_sampler(&SamplerDescriptor::default());
+    let (ui_dummy, ui_sampler) = super::ui_pass::ui_bindings(&render_device);
 
     // Black 1×1 stand-in for channels the shader does not define. Textures
     // read as zero before anything is written, so a plain TEXTURE_BINDING
@@ -272,6 +285,8 @@ fn init_pipeline<T: FullscreenMaterial>(
     commands.insert_resource(FullscreenMaterialPipeline::<T> {
         layout,
         sampler,
+        ui_dummy,
+        ui_sampler,
         vertex: fullscreen_shader.to_vertex_state(),
         variants: HashMap::default(),
         _marker: PhantomData,
@@ -304,77 +319,126 @@ type MaterialView<'w, 's, T> = ViewQuery<
     ),
 >;
 
-/// (Modified from Bevy: instead of a cached [`FullscreenMaterialBindGroup`],
-/// the bind group is created every frame so it always carries the current
-/// [`ChannelViews`] — the buffer channels ping-pong each frame.)
-#[allow(clippy::too_many_arguments)] // Bevy system: params are the natural shape
-pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
-    view: MaterialView<'w, 's, T>,
-    pipeline_cache: Res<PipelineCache>,
-    fullscreen_pipeline: Res<FullscreenMaterialPipeline<T>>,
-    render_device: Res<RenderDevice>,
-    data_uniforms: Res<ComponentUniforms<T>>,
-    channels: Res<ChannelViews>,
-    target: crate::debugger::MainPassTarget,
-    mut ctx: RenderContext,
-    mut pass_label: Local<String>,
-) {
-    let (view_target, settings_index, pipeline_id) = view.into_inner();
+/// What recording the main pass needs besides its view, shared by
+/// [`fullscreen_material_system`] and [`super::ui_pass::ui_melt_pass`].
+#[derive(SystemParam)]
+pub struct MainPassParams<'w, T: FullscreenMaterial> {
+    pipeline_cache: Res<'w, PipelineCache>,
+    fullscreen_pipeline: Res<'w, FullscreenMaterialPipeline<T>>,
+    render_device: Res<'w, RenderDevice>,
+    data_uniforms: Res<'w, ComponentUniforms<T>>,
+    channels: Res<'w, ChannelViews>,
+}
 
-    let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_id.0) else {
-        return;
-    };
-    let Some(settings_binding) = data_uniforms.uniforms().binding() else {
-        return;
-    };
-
-    let post_process = view_target.post_process_write();
-    let source = post_process.source;
-    // While the debugger is on, render into its offscreen image target;
-    // `debugger_blit_pass` then draws it plus the overlay to the view.
-    let destination = target.view(post_process.destination);
-
-    let bind_group = render_device.create_bind_group(
-        "fullscreen_material_bind_group",
-        &pipeline_cache.get_bind_group_layout(&fullscreen_pipeline.layout),
-        &BindGroupEntries::sequential((
-            source,
-            &fullscreen_pipeline.sampler,
-            settings_binding,
-            &channels.views[0],
-            &channels.views[1],
-            &channels.views[2],
-            &channels.views[3],
-        )),
-    );
-
-    if pass_label.is_empty() {
-        *pass_label = format!("fullscreen_material_pass<{}>", type_name::<T>());
+impl<T: FullscreenMaterial> MainPassParams<'_, T> {
+    /// Whether `pipeline_id` is built, i.e. whether [`Self::draw`] would draw.
+    pub fn ready(&self, pipeline_id: CachedRenderPipelineId) -> bool {
+        self.pipeline_cache
+            .get_render_pipeline(pipeline_id)
+            .is_some()
     }
-    let pass_descriptor = RenderPassDescriptor {
-        label: Some(&pass_label),
-        color_attachments: &[Some(RenderPassColorAttachment {
-            view: destination,
-            depth_slice: None,
-            resolve_target: None,
-            ops: Operations::default(),
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    };
 
-    {
+    /// Record the main pass of `pipeline_id` into `destination`, reading
+    /// `source` at binding 0 and `ui` as `i_ui` (the transparent dummy for
+    /// `None`). Does nothing while the pipeline is still compiling.
+    #[allow(clippy::too_many_arguments)] // one pass, described in full
+    pub fn draw(
+        &self,
+        ctx: &mut RenderContext,
+        label: &str,
+        pipeline_id: CachedRenderPipelineId,
+        settings_index: u32,
+        source: &TextureView,
+        ui: Option<&TextureView>,
+        destination: &TextureView,
+    ) {
+        let Some(pipeline) = self.pipeline_cache.get_render_pipeline(pipeline_id) else {
+            return;
+        };
+        let Some(settings_binding) = self.data_uniforms.uniforms().binding() else {
+            return;
+        };
+        let fullscreen = &self.fullscreen_pipeline;
+        let bind_group = self.render_device.create_bind_group(
+            "fullscreen_material_bind_group",
+            &self
+                .pipeline_cache
+                .get_bind_group_layout(&fullscreen.layout),
+            &BindGroupEntries::sequential((
+                source,
+                &fullscreen.sampler,
+                settings_binding,
+                &self.channels.views[0],
+                &self.channels.views[1],
+                &self.channels.views[2],
+                &self.channels.views[3],
+                ui.unwrap_or(&fullscreen.ui_dummy),
+                &fullscreen.ui_sampler,
+            )),
+        );
+
+        let pass_descriptor = RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        };
+
         let diagnostics = ctx.diagnostic_recorder();
         let diagnostics = diagnostics.as_deref();
 
         let mut render_pass = ctx.command_encoder().begin_render_pass(&pass_descriptor);
-        let pass_span = diagnostics.pass_span(&mut render_pass, pass_label.clone());
+        let pass_span = diagnostics.pass_span(&mut render_pass, label.to_owned());
 
         render_pass.set_pipeline(pipeline);
-        render_pass.set_bind_group(0, &bind_group, &[settings_index.index()]);
+        render_pass.set_bind_group(0, &bind_group, &[settings_index]);
         render_pass.draw(0..3, 0..1);
         pass_span.end(&mut render_pass);
     }
+}
+
+/// (Modified from Bevy: instead of a cached [`FullscreenMaterialBindGroup`],
+/// the bind group is created every frame so it always carries the current
+/// [`ChannelViews`] — the buffer channels ping-pong each frame. While the
+/// UI-texture mode is on, [`super::ui_pass::ui_melt_pass`] draws instead.)
+pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
+    view: MaterialView<'w, 's, T>,
+    p: MainPassParams<T>,
+    ui_texture: Res<crate::ui_texture::UiTexture>,
+    target: crate::debugger::MainPassTarget,
+    mut ctx: RenderContext,
+    mut pass_label: Local<String>,
+) {
+    if ui_texture.on {
+        return;
+    }
+    let (view_target, settings_index, pipeline_id) = view.into_inner();
+    if !p.ready(pipeline_id.0) {
+        return;
+    }
+
+    let post_process = view_target.post_process_write();
+    // While the debugger is on, render into its offscreen image target;
+    // `debugger_blit_pass` then draws it plus the overlay to the view.
+    let destination = target.view(post_process.destination);
+
+    if pass_label.is_empty() {
+        *pass_label = format!("fullscreen_material_pass<{}>", type_name::<T>());
+    }
+    p.draw(
+        &mut ctx,
+        &pass_label,
+        pipeline_id.0,
+        settings_index.index(),
+        post_process.source,
+        None,
+        destination,
+    );
 }

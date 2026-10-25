@@ -63,6 +63,9 @@ pub const OK_COLOR: Color32 = rgb(d::GREEN);
 /// Red for "compile failed".
 pub const ERR_COLOR: Color32 = rgb(d::RED);
 
+/// Aqua for what an example teaches, on its card in the Examples window.
+pub const TEACHES_COLOR: Color32 = rgb(d::AQUA);
+
 pub fn visuals() -> Visuals {
     let mut v = Visuals::dark();
     v.panel_fill = rgb(d::BG0);
