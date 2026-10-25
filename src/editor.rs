@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn editor_text_survives_font_atlas_rebuilds() {
-        let mut text = crate::presets::ALL[0].code.to_string();
+        let mut text = crate::examples::default().code.to_string();
         survives_atlas_rebuilds(|ui, cache| {
             show_code_editor(ui, &mut text, cache, &[]);
         });
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn viewer_text_survives_font_atlas_rebuilds() {
-        let text = crate::presets::ALL[0].code;
+        let text = crate::examples::default().code;
         survives_atlas_rebuilds(|ui, cache| show_code_view(ui, text, cache));
     }
 
@@ -655,7 +655,7 @@ mod tests {
     fn editor_cache_holds_full_job() {
         let ctx = Context::default();
         let mut cache = HighlightCache::default();
-        let mut text = crate::presets::ALL[0].code.to_string();
+        let mut text = crate::examples::default().code.to_string();
         for _ in 0..3 {
             ctx.run_ui(bevy_egui::egui::RawInput::default(), |ui| {
                 show_code_editor(ui, &mut text, &mut cache, &[]);
@@ -732,7 +732,7 @@ mod tests {
     fn viewer_cache_holds_full_job() {
         let ctx = Context::default();
         let mut cache = HighlightCache::default();
-        let text = crate::presets::ALL[0].code;
+        let text = crate::examples::default().code;
         for _ in 0..3 {
             ctx.run_ui(bevy_egui::egui::RawInput::default(), |ui| {
                 show_code_view(ui, text, &mut cache);

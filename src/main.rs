@@ -10,14 +10,15 @@
 //! iMouse, iDate, iFrame) ride along as a dynamic uniform buffer component.
 
 mod analyzer;
+mod browser;
 mod compile;
 mod debugger;
 mod editor;
+mod examples;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod highlight;
 mod persist;
-mod presets;
 mod render;
 mod theme;
 mod tweak;
@@ -85,6 +86,7 @@ fn main() {
         .init_resource::<UiWindows>()
         .init_resource::<editor::HighlightCache>()
         .init_resource::<analyzer::Analyzer>()
+        .init_resource::<browser::Browser>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
@@ -96,6 +98,7 @@ fn main() {
                 (update_uniforms, compile_and_apply, poll_render_feedback).chain(),
                 run_analyzer,
                 autosave,
+                browser::update_previews,
             ),
         )
         .add_systems(EguiPrimaryContextPass, ui)
@@ -119,7 +122,9 @@ struct ShaderToyState {
     fps: f32,
     /// In-shader debugger overlay on/off (toolbar bug icon).
     debugger: bool,
-    last_preset: &'static str,
+    /// The example last loaded into the editor (`None` for files and
+    /// restored documents); the Examples window marks its card.
+    example: Option<&'static str>,
     /// The viewport area the panels leave free (egui points), recorded by
     /// [`ui`] each frame; iMouse only counts presses there.
     canvas: egui::Rect,
@@ -134,7 +139,7 @@ impl Default for ShaderToyState {
             mouse_held: false,
             fps: 0.0,
             debugger: false,
-            last_preset: "Plasma",
+            example: None,
             canvas: egui::Rect::NOTHING,
         }
     }
@@ -210,6 +215,9 @@ struct RunRequest(bool);
 
 #[derive(Resource)]
 struct UiWindows {
+    examples: bool,
+    /// An example clicked while the editor holds other work: asks first.
+    confirm_example: Option<&'static examples::Example>,
     editor: bool,
     wgsl: bool,
     constants: bool,
@@ -221,6 +229,8 @@ struct UiWindows {
 impl Default for UiWindows {
     fn default() -> Self {
         Self {
+            examples: false,
+            confirm_example: None,
             editor: true,
             wgsl: false,
             constants: false,
@@ -235,7 +245,7 @@ impl Default for UiWindows {
 /// `localStorage` on the web; in-memory only in native builds.
 #[derive(Resource)]
 struct Settings {
-    random_preset: bool,
+    random_example: bool,
     /// Live diagnostics from wgsl-analyzer while editing.
     analyzer: bool,
     /// Frosted glass: how blurred the shader shows through windows and
@@ -244,11 +254,11 @@ struct Settings {
 }
 
 impl Settings {
-    /// Used when nothing is saved yet: random preset, live diagnostics and
+    /// Used when nothing is saved yet: random example, live diagnostics and
     /// frosted glass on.
     fn fallback() -> Self {
         Self {
-            random_preset: true,
+            random_example: true,
             analyzer: true,
             blur: 12.0,
         }
@@ -257,7 +267,7 @@ impl Settings {
     fn encode(&self) -> String {
         format!(
             "random={};analyzer={};blur_px={}",
-            self.random_preset as u8, self.analyzer as u8, self.blur
+            self.random_example as u8, self.analyzer as u8, self.blur
         )
     }
 
@@ -265,7 +275,7 @@ impl Settings {
         let mut out = Self::fallback();
         for part in s.split(';') {
             match part.split_once('=') {
-                Some(("random", r)) => out.random_preset = r == "1",
+                Some(("random", r)) => out.random_example = r == "1",
                 Some(("analyzer", a)) => out.analyzer = a == "1",
                 Some(("blur_px", b)) => {
                     if let Ok(b) = b.parse::<f32>() {
@@ -286,35 +296,35 @@ struct StartupParams<'w> {
     current: ResMut<'w, CurrentShader>,
     run: ResMut<'w, RunRequest>,
     state: ResMut<'w, ShaderToyState>,
+    wins: ResMut<'w, UiWindows>,
 }
 
 fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: StartupParams) {
     let settings = persist::load_settings()
         .map(|s| Settings::decode(&s))
         .unwrap_or_else(Settings::fallback);
-    let random = settings.random_preset;
+    let random = settings.random_example;
     commands.insert_resource(settings);
 
     // `--shader <file>` (native) wins over everything: it is how scripted
     // live tests inject a document. Otherwise restore a saved document
-    // (browser localStorage) or start from a preset — a random one when
+    // (browser localStorage) or start from an example — a random one when
     // the fresh-start setting is on.
-    app.state.debugger = cli_debugger();
+    app.state.debugger = cli_flag("--debugger");
+    app.wins.examples = cli_flag("--examples");
     if let Some(text) = cli_shader() {
         app.doc.text = text;
-        app.state.last_preset = "file";
     } else {
         match persist::load_doc() {
             Some(saved) => {
                 app.doc.text = saved;
-                app.state.last_preset = "saved";
             }
             None => {
-                let preset = cli_preset()
-                    .or(random.then(random_preset))
-                    .unwrap_or(presets::DEFAULT);
-                app.doc.text = preset.code.to_string();
-                app.state.last_preset = preset.name;
+                let example = cli_example()
+                    .or(random.then(random_example))
+                    .unwrap_or_else(examples::default);
+                app.doc.text = example.code.to_string();
+                app.state.example = Some(example.name);
             }
         }
     }
@@ -608,12 +618,12 @@ fn on_render_error(
 }
 
 /// Write the document to browser storage whenever it changes: edits,
-/// preset picks and opened files alike (a no-op natively, where Ctrl+S
+/// opened examples and opened files alike (a no-op natively, where Ctrl+S
 /// saves). Comparing against the last saved text is cheap next to a frame
 /// and catches every path that changes the document.
 fn autosave(doc: Res<ShaderDoc>, mut saved: Local<Option<String>>) {
     match saved.as_deref() {
-        // The startup document (a preset or the restored save) is not an edit.
+        // The startup document (an example or the restored save) is not an edit.
         None => *saved = Some(doc.text.clone()),
         Some(text) if text == doc.text => {}
         Some(_) => {
@@ -639,6 +649,8 @@ struct UiParams<'w, 's> {
     playback: ResMut<'w, Playback>,
     blur: ResMut<'w, render::blur::Blur>,
     tweaks: ResMut<'w, Tweaks>,
+    browser: ResMut<'w, browser::Browser>,
+    preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
 }
@@ -760,22 +772,8 @@ fn ui(mut p: UiParams) {
 
             ui.separator();
 
-            egui::ComboBox::from_id_salt("presets")
-                .selected_text(format!("preset: {}", p.state.last_preset))
-                .show_ui(ui, |ui| {
-                    for preset in presets::ALL {
-                        if ui
-                            .selectable_label(p.state.last_preset == preset.name, preset.name)
-                            .clicked()
-                        {
-                            p.doc.text = preset.code.to_string();
-                            p.state.last_preset = preset.name;
-                            p.run.0 = true;
-                        }
-                    }
-                });
-
-            ui.separator();
+            ui.toggle_value(&mut p.wins.examples, "Examples")
+                .on_hover_text("Browse the examples, running live");
             ui.toggle_value(&mut p.wins.editor, "Code");
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
             ui.toggle_value(&mut p.wins.constants, "Constants")
@@ -866,6 +864,55 @@ fn ui(mut p: UiParams) {
         tweaks.dirty = 0;
     }
 
+    // --- examples window (after the others: on top when they open together) -----------------------------------------------------
+    p.browser.begin_frame();
+    if p.wins.examples {
+        let mut picked = None;
+        show_window(
+            ctx,
+            glass,
+            "examples_window",
+            egui::Window::new("Examples")
+                .default_pos([220.0, 60.0])
+                .default_size([700.0, 520.0])
+                .open(&mut p.wins.examples),
+            |ui| {
+                picked = browser::show(ui, &mut p.browser, &p.preview_feedback, p.state.example);
+            },
+        );
+        if let Some(example) = picked {
+            // Loading replaces the editor text (and its autosave): ask unless
+            // it is unchanged from an example.
+            if examples::ALL.iter().any(|e| e.code == p.doc.text) {
+                load_example(&mut p.doc, &mut p.state, &mut p.run, example);
+            } else {
+                p.wins.confirm_example = Some(example);
+            }
+        }
+    }
+    if let Some(example) = p.wins.confirm_example {
+        let modal = egui::Modal::new(egui::Id::new("confirm_example")).show(ctx, |ui| {
+            ui.set_max_width(340.0);
+            ui.strong(format!("Open {}?", example.name));
+            ui.label(
+                "This replaces the code in the editor, and your edits are not \
+                 saved anywhere else. Ctrl+S saves them to a file first.",
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Replace").clicked() {
+                    load_example(&mut p.doc, &mut p.state, &mut p.run, example);
+                    ui.close();
+                }
+                if ui.button("Cancel").clicked() {
+                    ui.close();
+                }
+            });
+        });
+        if modal.should_close() {
+            p.wins.confirm_example = None;
+        }
+    }
+
     // --- settings window -----------------------------------------------------
     if p.wins.settings {
         show_window(
@@ -878,13 +925,13 @@ fn ui(mut p: UiParams) {
                 .open(&mut p.wins.settings),
             |ui| {
                 let before = (
-                    p.settings.random_preset,
+                    p.settings.random_example,
                     p.settings.analyzer,
                     p.settings.blur,
                 );
                 ui.checkbox(
-                    &mut p.settings.random_preset,
-                    "random preset on fresh start",
+                    &mut p.settings.random_example,
+                    "random example on fresh start",
                 );
                 ui.checkbox(&mut p.settings.analyzer, "live diagnostics (wgsl-analyzer)");
                 if let analyzer::Status::Unavailable(why) = p.analyzer.status() {
@@ -902,7 +949,7 @@ fn ui(mut p: UiParams) {
                 ui.separator();
                 ui.weak("Ctrl+S saves · Ctrl+O opens a .wesl file");
                 let after = (
-                    p.settings.random_preset,
+                    p.settings.random_example,
                     p.settings.analyzer,
                     p.settings.blur,
                 );
@@ -945,8 +992,10 @@ fn ui(mut p: UiParams) {
                      · debugger overlay ported from eliotbo/bevy_shadertoy_wgsl \
                      (MIT OR Apache-2.0) \
                      · coi-serviceworker by Guido Zuidhof (MIT) \
-                     · Gruvbox colors by morhetz · presets ported from shadertoy \
-                     classics and public-domain snippets.",
+                     · Gruvbox colors by morhetz · examples ported from shadertoy \
+                     classics (each credits its author and license in its header) \
+                     · LYGIA by Patricio Gonzalez Vivo and contributors (Prosperity \
+                     License 3.0.0 or Patron License).",
                 );
             },
         );
@@ -1288,14 +1337,26 @@ fn open_into(
     name: &str,
 ) {
     doc.text = text;
-    state.last_preset = "file";
+    state.example = None;
     run.0 = true;
     status.note = Some((format!("opened {name}"), true));
 }
 
+/// Put `example` in the editor and compile it.
+fn load_example(
+    doc: &mut ShaderDoc,
+    state: &mut ShaderToyState,
+    run: &mut RunRequest,
+    example: &'static examples::Example,
+) {
+    doc.text = example.code.to_string();
+    state.example = Some(example.name);
+    run.0 = true;
+}
+
 /// Native-only: `--shader <file>` seeds the editor with the contents of a
 /// WGSL file, so scripted live tests can inject a document without GUI
-/// input. Takes precedence over saved documents and presets. Web builds
+/// input. Takes precedence over saved documents and examples. Web builds
 /// have no argv and always return `None`.
 fn cli_shader() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
@@ -1312,7 +1373,7 @@ fn cli_shader() -> Option<String> {
                 match std::fs::read_to_string(&path) {
                     Ok(text) => return Some(text),
                     Err(e) => {
-                        warn!("--shader {path}: {e}; starting with the default preset");
+                        warn!("--shader {path}: {e}; starting with the default example");
                         return None;
                     }
                 }
@@ -1322,10 +1383,11 @@ fn cli_shader() -> Option<String> {
     }
 }
 
-/// Native-only: `--preset <name>` picks the startup preset (case-insensitive
-/// match against [`presets::ALL`]), so scripted screenshot runs can pin a
-/// deterministic shader. Web builds have no argv and always return `None`.
-fn cli_preset() -> Option<&'static presets::Preset> {
+/// Native-only: `--example <name>` picks the startup example
+/// (case-insensitive, see [`examples::by_name`]), so scripted screenshot runs
+/// can pin a deterministic shader. Web builds have no argv and always return
+/// `None`.
+fn cli_example() -> Option<&'static examples::Example> {
     #[cfg(target_arch = "wasm32")]
     {
         None
@@ -1334,39 +1396,40 @@ fn cli_preset() -> Option<&'static presets::Preset> {
     {
         let mut args = std::env::args();
         while let Some(arg) = args.next() {
-            if arg == "--preset"
+            if arg == "--example"
                 && let Some(name) = args.next()
             {
-                return presets::ALL
-                    .iter()
-                    .find(|p| p.name.eq_ignore_ascii_case(&name));
+                return examples::by_name(&name);
             }
         }
         None
     }
 }
 
-/// Native-only: `--debugger` starts with the in-shader debugger overlay on
-/// (same as the toolbar bug icon), so scripted live tests can show it.
-fn cli_debugger() -> bool {
+/// Native-only: whether `flag` was passed. `--debugger` starts with the
+/// in-shader debugger overlay on (same as the toolbar bug icon) and
+/// `--examples` with the Examples window open, so scripted live tests can
+/// show them.
+fn cli_flag(flag: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
+        let _ = flag;
         false
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::env::args().any(|a| a == "--debugger")
+        std::env::args().any(|a| a == flag)
     }
 }
 
 /// Time-seeded xorshift pick — no `rand` dependency for one roll per start.
-fn random_preset() -> &'static presets::Preset {
+fn random_example() -> &'static examples::Example {
     let mut x = (now_epoch_secs() * 1.0e6) as u64;
     x ^= x >> 12;
     x ^= x << 25;
     x ^= x >> 27;
-    let idx = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as usize % presets::ALL.len();
-    &presets::ALL[idx]
+    let idx = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as usize % examples::ALL.len();
+    &examples::ALL[idx]
 }
 
 /// A Lucide icon as a one-char string; [`install_fonts`] registers the font

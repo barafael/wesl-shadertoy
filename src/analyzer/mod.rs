@@ -10,7 +10,8 @@
 //!   ([`web`]). It needs a cross-origin isolated page, see `index.html`.
 //!
 //! The workspace mirrors what [`crate::compile`] links: `shaders/shadertoy.wesl`
-//! holds the hidden `package::shadertoy` module and the editor text is the
+//! holds the hidden `package::shadertoy` module, `lygia/` the bundled LYGIA
+//! package (a path dependency in `wesl.toml`), and the editor text is the
 //! open document `shaders/user.wesl`, i.e. `package::user`. Imports resolve
 //! the same way as in the real compile, and diagnostics arrive in editor
 //! coordinates (as UTF-16 columns, converted to egui's char indices here).
@@ -34,12 +35,26 @@ use web::Transport;
 /// The open document holding the editor text, relative to the workspace root.
 const USER_DOC: &str = "shaders/user.wesl";
 
-/// Files every server starts with, relative to its workspace root.
-fn workspace_files() -> [(&'static str, &'static str); 2] {
-    [
-        ("wesl.toml", "edition = \"2026_pre\"\n"),
-        ("shaders/shadertoy.wesl", crate::compile::SHADERTOY_MODULE),
-    ]
+/// Files every server starts with, relative to its workspace root: the
+/// hidden `package::shadertoy` module, and the bundled LYGIA as the path
+/// dependency `lygia/`, so `lygia::` imports resolve as in the real compile.
+fn workspace_files() -> Vec<(String, &'static str)> {
+    let manifest = "edition = \"2026_pre\"\n\n[dependencies]\nlygia = { path = \"lygia\" }\n";
+    let mut files = vec![
+        ("wesl.toml".to_string(), manifest),
+        (
+            "shaders/shadertoy.wesl".to_string(),
+            crate::compile::SHADERTOY_MODULE,
+        ),
+        (
+            "lygia/wesl.toml".to_string(),
+            "edition = \"2026_pre\"\nroot = \".\"\n",
+        ),
+    ];
+    for (path, source) in crate::compile::lygia_files() {
+        files.push((format!("lygia/{path}"), source));
+    }
+    files
 }
 
 /// A connection to a language server, as the [`Client`] needs it.
@@ -616,22 +631,22 @@ mod tests {
             }
         };
 
-        // Every preset is clean (imports from package::shadertoy resolve).
-        for preset in crate::presets::ALL {
-            wait_for(&mut analyzer, preset.code, &|a| {
+        // Every example is clean (imports from package::shadertoy resolve).
+        for example in crate::examples::ALL {
+            wait_for(&mut analyzer, example.code, &|a| {
                 a.status == Status::Ready
-                    && a.client.as_ref().and_then(|c| c.synced.as_deref()) == Some(preset.code)
+                    && a.client.as_ref().and_then(|c| c.synced.as_deref()) == Some(example.code)
             });
             // Give the server time to publish for this version.
             for _ in 0..50 {
-                analyzer.update(true, preset.code);
+                analyzer.update(true, example.code);
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             assert_eq!(
                 analyzer.diagnostics(),
                 [],
                 "{} should be clean",
-                preset.name
+                example.name
             );
         }
 
