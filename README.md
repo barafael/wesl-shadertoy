@@ -14,7 +14,7 @@ Runs natively and in the browser as WASM.
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
-| Examples | `Examples` window — 23 examples (Plasma, Seascape, Fluid, two LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
+| Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
 | Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
@@ -140,8 +140,15 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 Function names carry their overload as a suffix (`snoise2`, `snoise3`, …);
 browse the modules in [`vendor/lygia`](vendor/lygia) or on
 [lygia.xyz](https://lygia.xyz). LYGIA's 2D shapes are centered on (0.5, 0.5),
-and a few (like `heartSDF`) assume y points down, unlike `frag_coord`. The `Lygia Noise` and `Lygia Shapes` examples show
-it in use. LYGIA is licensed separately from this project, under the
+and a few (like `heartSDF`) assume y points down, unlike `frag_coord`. Some
+tonemappers (`tonemapFilmic3`, `tonemapUnreal3`) bake in gamma 2.2, which the
+sRGB output then applies a second time. Its `lighting::raymarch` helpers are
+still stubs in the WESL port, so bring your own marcher. The twelve
+`Lygia …` examples show it in use, from noise, palettes, tilings and easing
+to marbling (`distort::marble` across two buffers), post-processing filters
+over a buffer, and a raymarched Cook-Torrance material study. The editor's
+wgsl-analyzer still rejects `filter` (a WGSL reserved word) as a module name,
+which WESL allows, so it is shown `lygia::filtre::…` behind the scenes. LYGIA is licensed separately from this project, under the
 Prosperity Public License 3.0.0 or the Patron License: see
 [`vendor/lygia/VENDORED.md`](vendor/lygia/VENDORED.md).
 

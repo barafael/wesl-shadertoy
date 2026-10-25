@@ -868,13 +868,17 @@ fn ui(mut p: UiParams) {
     p.browser.begin_frame();
     if p.wins.examples {
         let mut picked = None;
+        // Pinned to 90% of the canvas every frame, so it follows window
+        // resizes (and the first frame's provisional canvas size).
+        let rect =
+            egui::Rect::from_center_size(p.state.canvas.center(), p.state.canvas.size() * 0.9);
         show_window(
             ctx,
             glass,
             "examples_window",
             egui::Window::new("Examples")
-                .default_pos([220.0, 60.0])
-                .default_size([700.0, 520.0])
+                .fixed_rect(rect)
+                .collapsible(false)
                 .open(&mut p.wins.examples),
             |ui| {
                 picked = browser::show(ui, &mut p.browser, &p.preview_feedback, p.state.example);
