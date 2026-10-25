@@ -151,9 +151,9 @@ async fn render(
         source: wgpu::ShaderSource::Wgsl(crate::debugger::DEBUGGER_WGSL.into()),
     });
 
-    // The composed module references bindings 1..6 (sampler, uniform, four
-    // channels); binding 0 (the app's view texture) is never sampled, so this
-    // layout skips it.
+    // The composed module references bindings 1..8 (sampler, uniform, four
+    // channels, the UI texture and its sampler); binding 0 (the app's view
+    // texture) is never sampled, so this layout skips it.
     let tex = |binding| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -172,6 +172,23 @@ async fn render(
             tex(4),
             tex(5),
             tex(6),
+            // `i_ui`: there is no UI here, so always the transparent dummy.
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -277,6 +294,28 @@ async fn render(
         view_formats: &[],
     });
     let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Transparent 1x1 `i_ui` (no UI is rendered here) and its sampler.
+    let ui_dummy = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ui-dummy"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let ui_dummy_view = ui_dummy.create_view(&wgpu::TextureViewDescriptor::default());
+    let ui_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
 
     // Ping-pong pairs for the defined buffers, viewport-sized like the app.
     let make_surface = |label: &str| {
@@ -496,6 +535,14 @@ async fn render(
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(channels[3]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&ui_dummy_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::Sampler(&ui_sampler),
                 },
             ],
         })
