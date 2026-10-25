@@ -35,8 +35,10 @@ pub struct ShaderToyUniform {
     pub time_delta: f32,
     /// Render frame counter.
     pub frame: u32,
-    /// Padding so `resolution` starts on a 16-byte boundary.
-    pub _pad: f32,
+    /// Heat mode only: the loop count at the hot end of the heatmap's
+    /// palette (`crate::heatmap`). Also pads `resolution` onto a 16-byte
+    /// boundary.
+    pub heat_max: f32,
     /// xy: viewport size in physical pixels, z: 1.0, w: unused.
     pub resolution: Vec4,
     /// Shadertoy-style mouse (see `i_mouse` in the environment module).

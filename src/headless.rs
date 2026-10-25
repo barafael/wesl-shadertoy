@@ -6,10 +6,12 @@
 //! involved, which makes it usable as a deterministic smoke test for examples
 //! and ports. Buffer passes (`buffer_a`..`buffer_d`) run with the same
 //! ping-pong semantics as the app; `--frames N` replays N frames so feedback
-//! loops accumulate.
+//! loops accumulate; `--heat [--heat-max N]` renders the cost heatmap
+//! ([`crate::heatmap`]) instead of the image.
 
-use crate::compile::{self, compile_user_shader};
+use crate::compile::{self, compile_user_shader_with};
 use crate::examples;
+use crate::heatmap;
 use crate::render::{ShaderToyUniform, uniform_bytes};
 use bevy::math::Vec4;
 use bevy::render::render_resource::ShaderType;
@@ -42,11 +44,19 @@ pub fn run_render_cli(args: &[String]) {
     let mut time = 3.0f32;
     let mut frames = 1u32;
     let mut debugger = false;
+    let mut heat = false;
+    let mut heat_max = heatmap::DEFAULT_MAX;
     let mut positional: Vec<String> = Vec::new();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--render" => {}
             "--debugger" => debugger = true,
+            "--heat" => heat = true,
+            "--heat-max" => {
+                if let Some(m) = iter.next() {
+                    heat_max = m.parse().unwrap_or(heatmap::DEFAULT_MAX);
+                }
+            }
             "--time" => {
                 if let Some(t) = iter.next() {
                     time = t.parse().unwrap_or(3.0);
@@ -63,14 +73,14 @@ pub fn run_render_cli(args: &[String]) {
     if positional.len() < 2 {
         eprintln!(
             "usage: wesl-shadertoy --render <example-name|file.wesl> <out.png> \
-             [--time SECS] [--frames N] [--debugger]"
+             [--time SECS] [--frames N] [--debugger] [--heat [--heat-max N]]"
         );
         std::process::exit(2);
     }
     let (name, source) = resolve_source(&positional[0]);
     let out = positional[1].clone();
 
-    let compiled = match compile_user_shader(&source) {
+    let compiled = match compile_user_shader_with(&source, heat) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{name}: compile failed:\n{e}");
@@ -79,7 +89,9 @@ pub fn run_render_cli(args: &[String]) {
     };
 
     let (width, height) = (640, 360);
-    let result = pollster::block_on(render(&compiled, width, height, time, frames, debugger));
+    let result = pollster::block_on(render(
+        &compiled, width, height, time, frames, debugger, heat_max,
+    ));
     match result {
         Ok(rgba) => {
             if let Err(e) = write_png(&out, width, height, &rgba) {
@@ -119,6 +131,7 @@ struct Surface {
 /// pass renders straight to the output) and read back the final image.
 /// With `debugger` on, the overlay is composited and `iMouse` is parked at
 /// the centre so the crosshair and probe boxes are visible in the PNG.
+/// `heat_max` is the heatmap's scale (used only by a heat-mode compile).
 async fn render(
     compiled: &compile::CompiledShader,
     width: u32,
@@ -126,6 +139,7 @@ async fn render(
     time: f32,
     frames: u32,
     debugger: bool,
+    heat_max: f32,
 ) -> Result<Vec<u8>, String> {
     let (wgsl, buffers) = (compiled.wgsl.as_str(), compiled.buffers);
     let instance = wgpu::Instance::default();
@@ -511,6 +525,7 @@ async fn render(
             resolution: Vec4::new(width as f32, height as f32, 1.0, 0.0),
             sample_rate: 44100.0,
             frame_rate: 60.0,
+            heat_max,
             ..Default::default()
         };
         // The constants at their source values, as the app starts them.

@@ -37,6 +37,7 @@ use wesl::resolver::{PackageResolver, VirtualResolver};
 use wesl::syntax::ModulePath;
 use wesl::{CompileOptions, Compiler, Resolver};
 
+use crate::heatmap;
 use crate::tweak::{self, Constant, Hint, MAX_TWEAKS};
 
 /// The WGSL uniform block, shared by [`SHADERTOY_MODULE`] and the debugger
@@ -49,7 +50,8 @@ macro_rules! shadertoy_uniforms_wgsl {
     i_time: f32,
     i_time_delta: f32,
     i_frame: u32,
-    _pad: f32,
+    // Heat mode only (`crate::heatmap`): the count at the palette's hot end.
+    _heat_max: f32,
     i_resolution: vec4<f32>,
     i_mouse: vec4<f32>,
     i_date: vec4<f32>,
@@ -263,7 +265,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// displays the buffer space bottom-up just like the image space (and like
 /// shadertoy's `texture(iChannel0, fragCoord / resolution)`): `frag_coord.y`
 /// grows upward on screen and `i_mouse()` lines up with the cursor.
-fn main_module_for(buffers: u8) -> String {
+///
+/// With `heat` on, the image entry shows the cost heatmap instead
+/// ([`heatmap::MAIN_MODULE_HEAD`]); buffer entries stay as they are.
+fn main_module_for(buffers: u8, heat: bool) -> String {
     let mut wgsl = String::new();
     // Imports must come first
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
@@ -271,7 +276,12 @@ fn main_module_for(buffers: u8) -> String {
             wgsl.push_str(&format!("import package::user::{name};\n"));
         }
     }
-    wgsl.push_str(MAIN_MODULE_HEAD);
+    if heat {
+        wgsl.push_str(heatmap::MAIN_MODULE_HEAD);
+        wgsl.push_str(&heatmap::palette_wgsl());
+    } else {
+        wgsl.push_str(MAIN_MODULE_HEAD);
+    }
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
         let body = if buffers & (1 << i) != 0 {
             format!(
@@ -343,6 +353,23 @@ impl std::fmt::Display for CompileError {
 /// way [`tweak::const_context_names`] did not spot — are found by compiling
 /// them one at a time and left as plain constants.
 pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileError> {
+    compile_user_shader_with(user_source, false)
+}
+
+/// [`compile_user_shader`], with the image pass showing the cost heatmap
+/// when `heat` is on (see [`heatmap`]). Errors are reported against the
+/// plain source, as if heat mode were off.
+pub fn compile_user_shader_with(
+    user_source: &str,
+    heat: bool,
+) -> Result<CompiledShader, CompileError> {
+    match compile_variant(user_source, heat) {
+        Err(e) if heat => Err(compile_variant(user_source, false).err().unwrap_or(e)),
+        result => result,
+    }
+}
+
+fn compile_variant(user_source: &str, heat: bool) -> Result<CompiledShader, CompileError> {
     let buffers = detect_buffers(user_source)?;
 
     let in_const_context = tweak::const_context_names(user_source);
@@ -359,21 +386,21 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
         }
     }
 
-    let wgsl = match compile_instrumented(user_source, buffers, &tweaks) {
+    let wgsl = match compile_instrumented(user_source, buffers, &tweaks, heat) {
         Ok(wgsl) => wgsl,
         Err(_) if !tweaks.is_empty() => {
             // Report the user's own errors against the plain source.
-            compile_instrumented(user_source, buffers, &[])?;
+            compile_instrumented(user_source, buffers, &[], heat)?;
             let (ok, bad): (Vec<Constant>, Vec<Constant>) = tweaks.into_iter().partition(|c| {
-                compile_instrumented(user_source, buffers, std::slice::from_ref(c)).is_ok()
+                compile_instrumented(user_source, buffers, std::slice::from_ref(c), heat).is_ok()
             });
             fixed.extend(bad.into_iter().map(|c| c.name));
             tweaks = ok;
-            match compile_instrumented(user_source, buffers, &tweaks) {
+            match compile_instrumented(user_source, buffers, &tweaks, heat) {
                 Ok(wgsl) => wgsl,
                 Err(_) => {
                     fixed.extend(tweaks.drain(..).map(|c| c.name));
-                    compile_instrumented(user_source, buffers, &[])?
+                    compile_instrumented(user_source, buffers, &[], heat)?
                 }
             }
         }
@@ -388,15 +415,21 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
 }
 
 /// Compile the user source with `tweaks` made live (see [`tweak::instrument`])
-/// into a validated WGSL module.
+/// and, with `heat` on, its loops counted (see [`heatmap::instrument`]) into
+/// a validated WGSL module.
 fn compile_instrumented(
     user_source: &str,
     buffers: u8,
     tweaks: &[Constant],
+    heat: bool,
 ) -> Result<String, CompileError> {
+    let mut user = tweak::instrument(user_source, tweaks);
+    if heat {
+        user = heatmap::instrument(&user);
+    }
     let resolver = Modules::new(
-        tweak::instrument(user_source, tweaks).into(),
-        [("main", main_module_for(buffers).into())],
+        user.into(),
+        [("main", main_module_for(buffers, heat).into())],
     );
     let compiler = Compiler::new_with_resolver(compile_options(), resolver);
     let result = compiler
@@ -563,7 +596,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             time: 1.0,
             time_delta: 2.0,
             frame: 3,
-            _pad: 4.0,
+            heat_max: 4.0,
             resolution: v(5.0),
             mouse: v(9.0),
             date: v(13.0),
@@ -586,7 +619,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             ("i_time", 1.0f32.to_bits()),
             ("i_time_delta", 2.0f32.to_bits()),
             ("i_frame", 3),
-            ("_pad", 4.0f32.to_bits()),
+            ("_heat_max", 4.0f32.to_bits()),
             ("i_resolution", 5.0f32.to_bits()),
             ("i_mouse", 9.0f32.to_bits()),
             ("i_date", 13.0f32.to_bits()),
