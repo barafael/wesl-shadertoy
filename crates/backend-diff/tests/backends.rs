@@ -12,13 +12,15 @@ use wesl_shadertoy::compile::compile_user_shader;
 const FUZZ_SEEDS: std::ops::Range<u64> = 0..48;
 
 /// Examples whose picture legitimately depends on the backend, reported but
-/// not failed. All four hash with `fract(sin(dot(p, K)) * 43758.5453)`, and
+/// not failed. Both hash with `fract(sin(dot(p, K)) * 43758.5453)`, and
 /// drivers may contract `dot` into a fused multiply-add in either operand
 /// order (RADV's SPIR-V path and radeonsi's GLSL path pick opposite ones):
 /// the last bit of the dot product differs, and `sin(…) * 43758.5` followed
 /// by `fract` turns that bit into a different random value per cell.
 /// Allowed by both WGSL and Vulkan precision rules, so not a translation bug.
-const BACKEND_DEPENDENT: &[&str] = &["Elevated", "Fire", "Seascape", "Voronoi"];
+/// (Fire and Voronoi used to be listed too, until their noise moved to
+/// LYGIA's, which doesn't hash this way.)
+const BACKEND_DEPENDENT: &[&str] = &["Elevated", "Seascape"];
 
 /// Translate every case for every target; the failures, one line each.
 fn translation_failures(cases: &[Case]) -> Vec<String> {

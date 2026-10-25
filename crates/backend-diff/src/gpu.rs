@@ -77,6 +77,9 @@ pub struct Gpu {
     layout: wgpu::PipelineLayout,
     sampler: wgpu::Sampler,
     dummy_view: wgpu::TextureView,
+    /// `i_ui` (transparent: there is no UI here) and its sampler.
+    ui_view: wgpu::TextureView,
+    ui_sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     uniforms: UniformLayout,
 }
@@ -140,7 +143,8 @@ impl Gpu {
         });
         let uniforms = UniformLayout::new();
 
-        // Bindings 1..6 of the composed module: sampler, uniforms, channels.
+        // Bindings 1..8 of the composed module: sampler, uniforms, channels,
+        // and `i_ui` with its sampler (always a transparent dummy here).
         let tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -174,6 +178,22 @@ impl Gpu {
                 tex(4),
                 tex(5),
                 tex(6),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -185,6 +205,20 @@ impl Gpu {
         let dummy_view = device
             .create_texture(&texture_descriptor("channel-dummy", 1, 1, BUFFER_FORMAT))
             .create_view(&Default::default());
+        // Textures start zeroed: a transparent `i_ui`.
+        let ui_view = device
+            .create_texture(&texture_descriptor(
+                "ui-dummy",
+                1,
+                1,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            ))
+            .create_view(&Default::default());
+        let ui_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadertoy-uniform"),
             size: uniforms.size,
@@ -204,6 +238,8 @@ impl Gpu {
             layout,
             sampler,
             dummy_view,
+            ui_view,
+            ui_sampler,
             uniform,
             uniforms,
         })
@@ -299,6 +335,14 @@ impl Gpu {
                     resource: wgpu::BindingResource::TextureView(view),
                 });
             }
+            entries.push(wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&self.ui_view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::Sampler(&self.ui_sampler),
+            });
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.bgl,
