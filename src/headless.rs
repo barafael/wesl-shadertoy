@@ -13,6 +13,7 @@ use crate::compile::{self, compile_user_shader_with};
 use crate::examples;
 use crate::heatmap;
 use crate::render::{ShaderToyUniform, uniform_bytes};
+use crate::tweak::MAX_TWEAKS;
 use bevy::math::Vec4;
 use bevy::render::render_resource::ShaderType;
 
@@ -108,7 +109,7 @@ pub fn run_render_cli(args: &[String]) {
 }
 
 /// Example name (case-insensitive) or path to a `.wesl` file.
-fn resolve_source(arg: &str) -> (String, String) {
+pub fn resolve_source(arg: &str) -> (String, String) {
     if let Some(e) = examples::by_name(arg) {
         return (e.name.to_string(), e.code.to_string());
     }
@@ -126,9 +127,43 @@ struct Surface {
     view: wgpu::TextureView,
 }
 
-/// Render `frames` frames (buffer passes, the main pass into the offscreen
-/// image target, then the debugger blit pass; with `debugger` off the main
-/// pass renders straight to the output) and read back the final image.
+/// The debugger's blit pass: the image target plus the overlay → output.
+struct DebuggerBlit {
+    image_view: wgpu::TextureView,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+}
+
+/// A compiled shader on a windowless device, ready to render frames at a
+/// fixed size and read the result back. `--render` uses one once;
+/// [`crate::drag`] keeps one per compile and renders many variants of the
+/// same shader with different `i_tweaks`.
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    buffers: u8,
+    bgl: wgpu::BindGroupLayout,
+    main_pipeline: wgpu::RenderPipeline,
+    buffer_pipelines: Vec<(usize, wgpu::RenderPipeline)>,
+    uniform: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+    dummy_view: wgpu::TextureView,
+    /// Transparent 1x1 `i_ui` (no UI is rendered here) and its sampler.
+    ui_view: wgpu::TextureView,
+    ui_sampler: wgpu::Sampler,
+    pairs: Vec<[Surface; 2]>,
+    target: wgpu::Texture,
+    view: wgpu::TextureView,
+    debugger: Option<DebuggerBlit>,
+    /// The heatmap's scale, read only by a heat-mode compile.
+    pub heat_max: f32,
+}
+
+/// Render `frames` frames of `compiled` (constants at their source values)
+/// and read back the final image as RGBA8.
 /// With `debugger` on, the overlay is composited and `iMouse` is parked at
 /// the centre so the crosshair and probe boxes are visible in the PNG.
 /// `heat_max` is the heatmap's scale (used only by a heat-mode compile).
@@ -141,200 +176,272 @@ async fn render(
     debugger: bool,
     heat_max: f32,
 ) -> Result<Vec<u8>, String> {
-    let (wgsl, buffers) = (compiled.wgsl.as_str(), compiled.buffers);
-    let instance = wgpu::Instance::default();
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
-        .await
-        .map_err(|e| e.to_string())?;
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor::default())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let user_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("user"),
-        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-    });
-    let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("fullscreen-vs"),
-        source: wgpu::ShaderSource::Wgsl(VERTEX_WGSL.into()),
-    });
-    let debugger_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("debugger"),
-        source: wgpu::ShaderSource::Wgsl(crate::debugger::DEBUGGER_WGSL.into()),
-    });
-
-    // The composed module references bindings 1..8 (sampler, uniform, four
-    // channels, the UI texture and its sampler); binding 0 (the app's view
-    // texture) is never sampled, so this layout skips it.
-    let tex = |binding| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            // Channels are Rgba32Float (unfilterable in core WebGPU).
-            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    };
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("shadertoy-bgl"),
-        entries: &[
-            tex(3),
-            tex(4),
-            tex(5),
-            tex(6),
-            // `i_ui`: there is no UI here, so always the transparent dummy.
-            wgpu::BindGroupLayoutEntry {
-                binding: 7,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 8,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                // Must match the app's layout (fullscreen_material.rs).
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: Some(ShaderToyUniform::min_size()),
-                },
-                count: None,
-            },
-        ],
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("shadertoy-pl"),
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-
-    let make_pipeline = |entry: &str, format: wgpu::TextureFormat, label: &str| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &user_module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        })
-    };
-
-    // Like the app, the main pass renders into the offscreen image target
-    // only while the debugger is on, and straight to the output otherwise.
-    let main_format = if debugger {
-        crate::debugger::IMAGE_FORMAT
+    let mut renderer = Renderer::new(
+        &compiled.wgsl,
+        compiled.buffers,
+        width,
+        height,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        debugger,
+    )
+    .await?;
+    renderer.heat_max = heat_max;
+    let mut tweaks = [Vec4::ZERO; MAX_TWEAKS];
+    for (slot, c) in compiled.tweaks.iter().enumerate() {
+        tweaks[slot] = Vec4::from_array(c.value);
+    }
+    // Park iMouse at the centre (y-up, like the app) with a held click
+    // there too, so the crosshair, ring and probe boxes show.
+    let (mx, my) = (width as f32 / 2.0, height as f32 / 2.0);
+    let mouse = if debugger {
+        Vec4::new(mx, my, mx, my)
     } else {
-        wgpu::TextureFormat::Rgba8UnormSrgb
+        Vec4::ZERO
     };
-    let main_pipeline = make_pipeline(compile::MAIN_ENTRY, main_format, "main-rp");
-    let buffer_pipelines: Vec<_> = compile::BUFFER_NAMES
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| buffers & (1 << i) != 0)
-        .map(|(i, name)| {
-            (
-                i,
-                make_pipeline(
-                    &compile::buffer_entry(name),
-                    wgpu::TextureFormat::Rgba32Float,
-                    "buffer-rp",
-                ),
-            )
-        })
-        .collect();
+    renderer.render(time, frames, &tweaks, mouse)?;
+    renderer.read()
+}
 
-    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("shadertoy-uniform"),
-        size: ShaderToyUniform::min_size().get(),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+impl Renderer {
+    /// Set up a device and pipelines for the composed module `wgsl`.
+    /// `format` is the output's: `Rgba8UnormSrgb` for PNGs, `Rgba32Float`
+    /// for unquantized readback. With `debugger` on, the main pass renders
+    /// into the offscreen image target and a blit pass composites the
+    /// overlay, like the app; otherwise the main pass renders straight to
+    /// the output.
+    pub async fn new(
+        wgsl: &str,
+        buffers: u8,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        debugger: bool,
+    ) -> Result<Self, String> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .map_err(|e| e.to_string())?;
 
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        let user_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("user"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fullscreen-vs"),
+            source: wgpu::ShaderSource::Wgsl(VERTEX_WGSL.into()),
+        });
 
-    // Black 1x1 stand-in for undefined channels (and binding-0 filler).
-    let dummy = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("channel-dummy"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
+        // The composed module references bindings 1..8 (sampler, uniform,
+        // four channels, the UI texture and its sampler); binding 0 (the
+        // app's view texture) is never sampled, so this layout skips it.
+        let tex = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                // Channels are Rgba32Float (unfilterable in core WebGPU).
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadertoy-bgl"),
+            entries: &[
+                tex(3),
+                tex(4),
+                tex(5),
+                tex(6),
+                // `i_ui`: there is no UI here, so always the transparent dummy.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // Must match the app's layout (fullscreen_material.rs).
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(ShaderToyUniform::min_size()),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadertoy-pl"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
 
-    // Transparent 1x1 `i_ui` (no UI is rendered here) and its sampler.
-    let ui_dummy = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("ui-dummy"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let ui_dummy_view = ui_dummy.create_view(&wgpu::TextureViewDescriptor::default());
-    let ui_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
+        let make_pipeline = |entry: &str, format: wgpu::TextureFormat, label: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &vs_module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &user_module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
 
-    // Ping-pong pairs for the defined buffers, viewport-sized like the app.
-    let make_surface = |label: &str| {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
+        let main_format = if debugger {
+            crate::debugger::IMAGE_FORMAT
+        } else {
+            format
+        };
+        let main_pipeline = make_pipeline(compile::MAIN_ENTRY, main_format, "main-rp");
+        let buffer_pipelines: Vec<_> = compile::BUFFER_NAMES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| buffers & (1 << i) != 0)
+            .map(|(i, name)| {
+                (
+                    i,
+                    make_pipeline(
+                        &compile::buffer_entry(name),
+                        wgpu::TextureFormat::Rgba32Float,
+                        "buffer-rp",
+                    ),
+                )
+            })
+            .collect();
+
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadertoy-uniform"),
+            size: ShaderToyUniform::min_size().get(),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+
+        // Black 1x1 stand-in for undefined channels (and binding-0 filler).
+        let dummy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("channel-dummy"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let ui_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui-dummy"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let ui_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Ping-pong pairs for the defined buffers, viewport-sized like the app.
+        let make_surface = |label: &str| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            Surface {
+                view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            }
+        };
+        let mut pairs: Vec<[Surface; 2]> = Vec::new();
+        for (i, name) in compile::BUFFER_NAMES.iter().enumerate() {
+            if buffers & (1 << i) != 0 {
+                pairs.push([
+                    make_surface(&format!("buffer_{name}_0")),
+                    make_surface(&format!("buffer_{name}_1")),
+                ]);
+            } else {
+                pairs.push([
+                    Surface {
+                        view: dummy_view.clone(),
+                    },
+                    Surface {
+                        view: dummy_view.clone(),
+                    },
+                ]);
+            }
+        }
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("smoke-target"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -343,196 +450,58 @@ async fn render(
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        Surface {
-            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
-        }
-    };
-    let mut pairs: Vec<[Surface; 2]> = Vec::new();
-    for (i, name) in compile::BUFFER_NAMES.iter().enumerate() {
-        if buffers & (1 << i) != 0 {
-            pairs.push([
-                make_surface(&format!("buffer_{name}_0")),
-                make_surface(&format!("buffer_{name}_1")),
-            ]);
-        } else {
-            pairs.push([
-                Surface {
-                    view: dummy_view.clone(),
-                },
-                Surface {
-                    view: dummy_view.clone(),
-                },
-            ]);
-        }
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let debugger = debugger.then(|| {
+            DebuggerBlit::new(
+                &device,
+                &queue,
+                &vs_module,
+                &uniform,
+                (width, height),
+                format,
+            )
+        });
+
+        Ok(Self {
+            device,
+            queue,
+            width,
+            height,
+            format,
+            buffers,
+            bgl,
+            main_pipeline,
+            buffer_pipelines,
+            uniform,
+            sampler,
+            dummy_view,
+            ui_view,
+            ui_sampler,
+            pairs,
+            target,
+            view,
+            debugger,
+            heat_max: heatmap::DEFAULT_MAX,
+        })
     }
 
-    let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("smoke-target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-
-    // --- debugger plumbing: font atlas, offscreen image target, blit pass ---
-    let atlas = crate::debugger::font_atlas_pixels();
-    let font = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("debugger-font-atlas"),
-        size: wgpu::Extent3d {
-            width: crate::debugger::ATLAS_SIZE,
-            height: crate::debugger::ATLAS_SIZE,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        font.as_image_copy(),
-        &atlas,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(crate::debugger::ATLAS_SIZE), // R8, multiple of 256
-            rows_per_image: Some(crate::debugger::ATLAS_SIZE),
-        },
-        wgpu::Extent3d {
-            width: crate::debugger::ATLAS_SIZE,
-            height: crate::debugger::ATLAS_SIZE,
-            depth_or_array_layers: 1,
-        },
-    );
-    let font_view = font.create_view(&wgpu::TextureViewDescriptor::default());
-
-    let image = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("image-target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: crate::debugger::IMAGE_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
-
-    let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("debugger-blit-bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: Some(ShaderToyUniform::min_size()),
-                },
-                count: None,
-            },
-        ],
-    });
-    let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("debugger-blit-pl"),
-        bind_group_layouts: &[Some(&blit_bgl)],
-        immediate_size: 0,
-    });
-    let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("debugger-blit-rp"),
-        layout: Some(&blit_layout),
-        vertex: wgpu::VertexState {
-            module: &vs_module,
-            entry_point: Some("vs"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &debugger_module,
-            entry_point: Some(crate::debugger::BLIT_ENTRY),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-    let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("debugger-blit-bg"),
-        layout: &blit_bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&image_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&font_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: uniform.as_entire_binding(),
-            },
-        ],
-    });
-
-    let make_bind_group = |label: &str, channels: [&wgpu::TextureView; 4]| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+    fn bind_group(&self, label: &str, channels: [&wgpu::TextureView; 4]) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
-            layout: &bgl,
+            layout: &self.bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: uniform.as_entire_binding(),
+                    resource: self.uniform.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -552,201 +521,376 @@ async fn render(
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&ui_dummy_view),
+                    resource: wgpu::BindingResource::TextureView(&self.ui_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: wgpu::BindingResource::Sampler(&ui_sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.ui_sampler),
                 },
             ],
         })
-    };
+    }
 
-    // Replay `frames` frames, ending at the requested `time`.
-    for frame in 0..frames {
-        let t = time * (frame + 1) as f32 / frames as f32;
-        let mut uniforms = ShaderToyUniform {
-            time: t,
-            time_delta: time / frames as f32,
-            frame, // 0 on the first frame, like the app
-            resolution: Vec4::new(width as f32, height as f32, 1.0, 0.0),
-            sample_rate: 44100.0,
-            frame_rate: 60.0,
-            heat_max,
-            ..Default::default()
-        };
-        // The constants at their source values, as the app starts them.
-        for (slot, c) in compiled.tweaks.iter().enumerate() {
-            uniforms.tweaks[slot] = Vec4::from_array(c.value);
-        }
-        if debugger {
-            // Park iMouse at the centre (y-up, like the app) with a held
-            // click there too, so the crosshair, ring and probe boxes show.
-            let (mx, my) = (width as f32 / 2.0, height as f32 / 2.0);
-            uniforms.mouse = Vec4::new(mx, my, mx, my);
-        }
-        for i in 0..4 {
-            if buffers & (1 << i) != 0 {
-                // iChannelTime counts from (re)compile, which is t = 0 here.
-                uniforms.channel_time[i] = t;
-                uniforms.channel_resolution[i] = Vec4::new(width as f32, height as f32, 0.0, 0.0);
+    /// Render `frames` frames (buffer passes, the main pass, then the
+    /// debugger blit pass if on), ending at `time`, with the given
+    /// `i_tweaks` and `i_mouse`. Every call counts frames from 0; the
+    /// buffers keep what the previous call left in them.
+    pub fn render(
+        &mut self,
+        time: f32,
+        frames: u32,
+        tweaks: &[Vec4; MAX_TWEAKS],
+        mouse: Vec4,
+    ) -> Result<(), String> {
+        let (width, height, buffers) = (self.width, self.height, self.buffers);
+        let (dummy_view, pairs) = (&self.dummy_view, &self.pairs);
+        for frame in 0..frames {
+            let t = time * (frame + 1) as f32 / frames as f32;
+            let mut uniforms = ShaderToyUniform {
+                time: t,
+                time_delta: time / frames as f32,
+                frame, // 0 on the first frame, like the app
+                resolution: Vec4::new(width as f32, height as f32, 1.0, 0.0),
+                mouse,
+                sample_rate: 44100.0,
+                frame_rate: 60.0,
+                heat_max: self.heat_max,
+                tweaks: *tweaks,
+                ..Default::default()
+            };
+            for i in 0..4 {
+                if buffers & (1 << i) != 0 {
+                    // iChannelTime counts from (re)compile, which is t = 0 here.
+                    uniforms.channel_time[i] = t;
+                    uniforms.channel_resolution[i] =
+                        Vec4::new(width as f32, height as f32, 0.0, 0.0);
+                }
             }
-        }
-        let bytes = uniform_bytes(&uniforms);
-        queue.write_buffer(&uniform, 0, &bytes);
+            let bytes = uniform_bytes(&uniforms);
+            self.queue.write_buffer(&self.uniform, 0, &bytes);
 
-        let write_slot = (frame % 2) as usize;
-        let read_slot = write_slot ^ 1;
+            let write_slot = (frame % 2) as usize;
+            let read_slot = write_slot ^ 1;
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("smoke-encoder"),
-        });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("smoke-encoder"),
+                });
 
-        // Buffer passes, A→D. Earlier channels read this frame's result;
-        // self and later channels read the previous frame's slot.
-        for &(i, ref pipeline) in &buffer_pipelines {
-            let reads: [&wgpu::TextureView; 4] = std::array::from_fn(|j| {
+            // Buffer passes, A→D. Earlier channels read this frame's result;
+            // self and later channels read the previous frame's slot.
+            for &(i, ref pipeline) in &self.buffer_pipelines {
+                let reads: [&wgpu::TextureView; 4] = std::array::from_fn(|j| {
+                    if buffers & (1 << j) == 0 {
+                        dummy_view
+                    } else if j < i {
+                        &pairs[j][write_slot].view
+                    } else {
+                        &pairs[j][read_slot].view
+                    }
+                });
+                let bind_group = self.bind_group("buffer-bg", reads);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("buffer-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &pairs[i][write_slot].view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // Main pass: every defined channel reads this frame's fresh result.
+            let channels: [&wgpu::TextureView; 4] = std::array::from_fn(|j| {
                 if buffers & (1 << j) == 0 {
-                    &dummy_view
-                } else if j < i {
-                    &pairs[j][write_slot].view
+                    dummy_view
                 } else {
-                    &pairs[j][read_slot].view
+                    &pairs[j][write_slot].view
                 }
             });
-            let bind_group = make_bind_group("buffer-bg", reads);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("buffer-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &pairs[i][write_slot].view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        // Main pass: every defined channel reads this frame's fresh result.
-        let channels: [&wgpu::TextureView; 4] = std::array::from_fn(|j| {
-            if buffers & (1 << j) == 0 {
-                &dummy_view
-            } else {
-                &pairs[j][write_slot].view
+            let bind_group = self.bind_group("main-bg", channels);
+            {
+                // Like the app, the main pass renders into the offscreen
+                // image target only while the debugger is on.
+                let target = match &self.debugger {
+                    Some(blit) => &blit.image_view,
+                    None => &self.view,
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("smoke-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.main_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.draw(0..3, 0..1);
             }
+
+            // Blit pass: image target plus the debugger overlay -> final target.
+            if let Some(blit) = &self.debugger {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("debugger-blit-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&blit.pipeline);
+                pass.set_bind_group(0, &blit.bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Read back the last rendered frame: tightly packed rows, top row
+    /// first, in the output format (4 bytes per pixel for RGBA8, 16 for
+    /// RGBA32F).
+    pub fn read(&self) -> Result<Vec<u8>, String> {
+        let (width, height) = (self.width, self.height);
+        let pixel = self
+            .format
+            .block_copy_size(None)
+            .ok_or("output format has no fixed pixel size")?;
+        let row = width * pixel;
+        let stride = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("readback-encoder"),
+            });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("smoke-readback"),
+            size: u64::from(stride * height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
         });
-        let bind_group = make_bind_group("main-bg", channels);
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("smoke-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: if debugger { &image_view } else { &view },
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&main_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        encoder.copy_texture_to_buffer(
+            self.target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Blit pass: image target plus the debugger overlay -> final target.
-        if debugger {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("debugger-blit-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&blit_pipeline);
-            pass.set_bind_group(0, &blit_bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        queue.submit(std::iter::once(encoder.finish()));
-        device
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = sender.send(r);
+        });
+        self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|e| e.to_string())?;
+        receiver
+            .recv()
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let mapped = slice.get_mapped_range().map_err(|e| e.to_string())?;
+        let (stride, row) = (stride as usize, row as usize);
+        let mut out = Vec::with_capacity(row * height as usize);
+        for y in 0..height as usize {
+            out.extend_from_slice(&mapped[y * stride..y * stride + row]);
+        }
+        Ok(out)
     }
-
-    // Read back the final frame.
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("readback-encoder"),
-    });
-    let readback_bytes = (width * 4).next_multiple_of(256) * height;
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("smoke-readback"),
-        size: u64::from(readback_bytes),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    encoder.copy_texture_to_buffer(
-        target.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some((width * 4).next_multiple_of(256)),
-                rows_per_image: Some(height),
-            },
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(std::iter::once(encoder.finish()));
-
-    let slice = readback.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = sender.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| e.to_string())?;
-    receiver
-        .recv()
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-    let mapped = slice.get_mapped_range().map_err(|e| e.to_string())?;
-    let stride = (width * 4).next_multiple_of(256) as usize;
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for row in 0..height as usize {
-        rgba.extend_from_slice(&mapped[row * stride..row * stride + width as usize * 4]);
-    }
-    Ok(rgba)
 }
 
-fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+impl DebuggerBlit {
+    /// The font atlas, the offscreen image target and the blit pipeline
+    /// that composites them into an output of `format`.
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vs_module: &wgpu::ShaderModule,
+        uniform: &wgpu::Buffer,
+        (width, height): (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        let debugger_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("debugger"),
+            source: wgpu::ShaderSource::Wgsl(crate::debugger::DEBUGGER_WGSL.into()),
+        });
+        let atlas = crate::debugger::font_atlas_pixels();
+        let font = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("debugger-font-atlas"),
+            size: wgpu::Extent3d {
+                width: crate::debugger::ATLAS_SIZE,
+                height: crate::debugger::ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            font.as_image_copy(),
+            &atlas,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(crate::debugger::ATLAS_SIZE), // R8, multiple of 256
+                rows_per_image: Some(crate::debugger::ATLAS_SIZE),
+            },
+            wgpu::Extent3d {
+                width: crate::debugger::ATLAS_SIZE,
+                height: crate::debugger::ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        let font_view = font.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let image = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image-target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::debugger::IMAGE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let texture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("debugger-blit-bgl"),
+            entries: &[
+                texture(0),
+                texture(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(ShaderToyUniform::min_size()),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("debugger-blit-pl"),
+            bind_group_layouts: &[Some(&blit_bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("debugger-blit-rp"),
+            layout: Some(&blit_layout),
+            vertex: wgpu::VertexState {
+                module: vs_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &debugger_module,
+                entry_point: Some(crate::debugger::BLIT_ENTRY),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("debugger-blit-bg"),
+            layout: &blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&image_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&font_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
+        });
+        Self {
+            image_view,
+            pipeline,
+            bind_group,
+        }
+    }
+}
+
+pub fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
     encoder.set_color(png::ColorType::Rgba);

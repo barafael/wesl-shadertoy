@@ -19,9 +19,9 @@ Runs natively and in the browser as WASM.
 | Evolve | toolbar `Evolve`: the canvas becomes a 3×3 grid, the current constants in the middle and eight mutations around them, all running live (hover one to drive its `iMouse`). Click a variant to breed from it (the centre rolls eight new ones), **Ctrl/Cmd+Z** or the undo button walks back the lineage, the slider sets how far mutations stray. **Keep** writes the centre's constants into the code; **Discard** or **Escape** leaves it unchanged |
 | Browse LYGIA | `LYGIA` window: search the ~380 bundled modules by path, function name or description, filter by directory; each entry shows the module's doc text and its WGSL declarations, an **import** button per declaration adds the `import lygia::…;` line to your code, **source** opens the module read-only |
 | Feature flags | `Flags` window: a checkbox per WESL `@if` flag your code and its LYGIA imports test, a value per `constants::` setting they read; changes recompile (see [Feature flags and constants](#feature-flags-and-constants)) |
-| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Flags`, `LYGIA` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Dataflow graph | `Graph` window (or `--graph` natively): the naga IR of `main_image` (or any other function of yours, buffer passes included) as a left-to-right node graph — `named lets` shows only `let`s, `var`s and returns, each with the formula it computes; `all expressions` one node per operation. Drag to pan, scroll to zoom, hover for the full formula. The `let`s of `main_image` carry live thumbnails of their value (scalars: orange positive, blue negative) |
-| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Graph` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
+| Drag the picture *(experimental, native only)* | toolbar hand, or **Alt+drag** on the canvas: grab a spot of the image and drag it; the float constant that moves that spot best along the drag follows the pointer (with time frozen), and the code changes on release (see [Dragging the picture](#dragging-the-picture-experimental)) |
+| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Flags`, `LYGIA`, `Graph` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
@@ -99,6 +99,30 @@ window lists them. Up to 32 per shader.
 some of them by a random step scaled to their range. Annotated ranges are never
 left, colors stay within 0..1, unannotated numbers keep their sign, and integer
 constants mutate rarely, since they tend to change a shader's structure.
+
+#### Dragging the picture (experimental)
+
+A prototype, native builds only (the web build shows the toggle disabled).
+On a press in Drag mode a background thread renders the shader at 192 px
+wide at the frozen time, once as is and twice per float constant (or
+vector component; integers and colors are left out) nudged by ±1.5% of its
+range. Lucas–Kanade optical flow on a patch around the grab point (with a
+brightness gain and offset, so color changes don't pass for motion) gives
+how far the spot moves per constant: a 2×N Jacobian. Once the drag has a
+direction, the constant that best moves the spot along it is picked and
+steered so the spot follows the pointer (or, with **Shift** held, a damped
+least-squares blend of all of them). Whenever the thread is free it finds
+the spot again (block matching against the press-time frame) and
+re-estimates the Jacobian there, so the model's errors don't pile up.
+Ranges are respected like in Evolve. Works well where a shape's edge moves
+with a constant (Metaballs, Sunset's horizon, Lygia Shapes in the direction
+its spin allows); smooth, non-rigid patterns like Plasma are hit and miss.
+`--render-drag` runs the same estimate and solve headlessly and checks, by
+block matching on full-size renders, that the spot really moved:
+
+```sh
+cargo run -- --render-drag Metaballs 130 80 -20 0 [--time 3] [--steps 4] [--mix] [--out shot]
+```
 
 Available uniforms (import from `package::shadertoy`):
 
@@ -319,6 +343,8 @@ src/
   ui_texture.rs the UI texture mode's switch: toolbar toggle (only for
                 shaders that read `i_ui`) and the F2 emergency off
   headless.rs   `--render`: windowless wgpu renderer writing a PNG (native)
+  drag.rs       drag the picture (experimental, native): finite-difference
+                renders, patch optical flow, Jacobian solve, `--render-drag`
   render/
     mod.rs                    ShaderToyUniform/Fragment components + plugin
     active.rs                 which shader is on screen: switches once the
@@ -412,6 +438,8 @@ integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 cargo run              # native (dynamic Bevy, fast rebuilds)
 cargo test             # compile pipeline, examples, highlighter, editor
 cargo run -- --render Plasma out.png [--time 3] [--debugger] [--heat [--heat-max 256]]  # headless PNG
+cargo run -- --render-drag Metaballs 130 80 -20 0  # drag-the-picture check
+cargo run -- --example Metaballs --drag  # start in Drag mode
 cargo run -- --example Fluid --examples  # start on an example, browser open
 cargo run -- --example "UI Melt" --ui-texture  # start with the shader eating the UI
 

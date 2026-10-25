@@ -12,6 +12,7 @@
 mod analyzer;
 mod browser;
 mod debugger;
+mod drag;
 mod editor;
 mod evolve;
 mod flags;
@@ -64,6 +65,10 @@ fn main() {
             headless::run_render_cli(&args);
             return;
         }
+        if args.iter().any(|a| a == "--render-drag") {
+            drag::run_cli(&args);
+            return;
+        }
     }
     App::new()
         .add_plugins(
@@ -100,6 +105,7 @@ fn main() {
         .init_resource::<library::Library>()
         .init_resource::<flags::FlagsPanel>()
         .init_resource::<graph::GraphView>()
+        .init_resource::<drag::DragPicture>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .add_plugins(ui_texture::UiTexturePlugin)
@@ -118,7 +124,7 @@ fn main() {
                 graph::update_thumbnails.after(browser::update_previews),
             ),
         )
-        .add_systems(EguiPrimaryContextPass, ui)
+        .add_systems(EguiPrimaryContextPass, (ui, drag::update.after(ui)))
         .run();
 }
 
@@ -427,6 +433,7 @@ struct UniformParams<'w, 's> {
     playback: ResMut<'w, Playback>,
     debugger_on: ResMut<'w, debugger::DebuggerOn>,
     tweaks: Res<'w, Tweaks>,
+    drag: Res<'w, drag::DragPicture>,
 }
 
 /// Advance the shadertoy clock, count frames, track iMouse and viewport size.
@@ -472,7 +479,9 @@ fn update_uniforms(mut p: UniformParams) {
             let px = pos * ppp;
             Vec2::new(px.x, resolution.y - px.y)
         });
-        track_mouse(&mut p.state, pos, pressed && on_canvas, held);
+        // Drag mode (or Alt) takes canvas presses for itself.
+        let press = pressed && on_canvas && !p.drag.claims_press(ctx);
+        track_mouse(&mut p.state, pos, press, held);
 
         // Canvas rows under the toolbar and status bar, for the debugger
         // overlay's layout.
@@ -682,6 +691,7 @@ struct UiParams<'w, 's> {
     evolve: ResMut<'w, evolve::Evolve>,
     library: ResMut<'w, library::Library>,
     flag_panel: ResMut<'w, flags::FlagsPanel>,
+    drag: ResMut<'w, drag::DragPicture>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     ui_texture: ResMut<'w, ui_texture::UiTexture>,
     heat: ResMut<'w, heatmap::Heat>,
@@ -828,6 +838,7 @@ fn ui(mut p: UiParams) {
                 .on_hover_text("Browse the bundled LYGIA modules and import from them");
             ui.toggle_value(&mut p.wins.graph, "Graph")
                 .on_hover_text("The shader's dataflow as a node graph");
+            drag::toggle(ui, &mut p.drag);
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui_texture::toolbar_toggle(ui, &mut p.ui_texture, &p.current.wgsl);
