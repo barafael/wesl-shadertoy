@@ -5,6 +5,7 @@ pub mod blur;
 pub mod buffers;
 pub mod fullscreen_material;
 pub mod previews;
+pub mod ui_pass;
 
 use bevy::app::Plugin;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
@@ -99,6 +100,7 @@ impl Plugin for ShaderToyRenderPlugin {
             ExtractResourcePlugin::<crate::debugger::DebuggerOn>::default(),
             ExtractResourcePlugin::<blur::Blur>::default(),
             ExtractResourcePlugin::<previews::PreviewJobs>::default(),
+            ExtractResourcePlugin::<crate::ui_texture::UiTexture>::default(),
         ));
         // Feedback channels, shared (not extracted) by both worlds.
         let feedback = active::ShaderFeedback::default();
@@ -106,6 +108,7 @@ impl Plugin for ShaderToyRenderPlugin {
         app.init_resource::<active::Playback>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .init_resource::<previews::PreviewJobs>()
+            .init_resource::<crate::ui_texture::UiTexture>()
             .insert_resource(feedback.clone())
             .insert_resource(preview_feedback.clone());
         app.add_systems(
@@ -126,6 +129,7 @@ impl Plugin for ShaderToyRenderPlugin {
             .init_resource::<buffers::BufferTargets>()
             .init_resource::<buffers::BufferPipelines>()
             .init_resource::<crate::debugger::DebuggerOn>()
+            .init_resource::<crate::ui_texture::UiTexture>()
             .add_systems(
                 RenderStartup,
                 (crate::debugger::setup_debugger, blur::setup_blur_pipelines),
@@ -143,6 +147,12 @@ impl Plugin for ShaderToyRenderPlugin {
                     blur::blur_pass
                         .in_set(Core3dSystems::PostProcess)
                         .after(crate::debugger::debugger_blit_pass),
+                    ui_pass::ui_clear_pass
+                        .in_set(Core3dSystems::PostProcess)
+                        .after(blur::blur_pass),
+                    ui_pass::ui_melt_pass
+                        .after(bevy_egui::render::egui_pass)
+                        .before(bevy::core_pipeline::upscaling::upscaling),
                 ),
             )
             .add_systems(

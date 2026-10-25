@@ -208,6 +208,8 @@ pub fn preview_pass(
                 &channels[1],
                 &channels[2],
                 &channels[3],
+                &p.fullscreen.ui_dummy,
+                &p.fullscreen.ui_sampler,
             )),
         );
         let mut pass = ctx

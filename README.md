@@ -14,12 +14,13 @@ Runs natively and in the browser as WASM.
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
-| Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
+| Examples | `Examples` window — 34 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
 | Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
+| The shader eats the editor | toolbar droplet icon (enabled while the shader reads `i_ui`, e.g. the `UI Melt` example): the rendered UI goes into the shader as a texture and the shader's output is what you see, so it can ripple, smear or melt the editor you type into. Clicks and typing still land on the undistorted UI. **F2** always switches it off; it is never saved, and it pauses the frosted glass and the debugger overlay (see [The UI as a texture](#the-ui-as-a-texture)) |
 | Debugger overlay | toolbar bug icon (or `--debugger` natively): crosshair and click ring, RGBA probe boxes for the pixels under the cursor and the last click, a swatch of the clicked pixel's color, mouse position, resolution, fps |
 
 The document auto-saves to `localStorage` (browser builds) on every change —
@@ -87,6 +88,7 @@ Available uniforms (import from `package::shadertoy`):
 | `i_sample_rate() -> f32` | `iSampleRate` | 44100 (there is no audio input) |
 | `i_channel_time(i: u32) -> f32` | `iChannelTime[i]` | seconds since buffer channel `i` started (0 if the shader has no such buffer) |
 | `i_channel_resolution(i: u32) -> vec3<f32>` | `iChannelResolution[i]` | size of buffer channel `i` in pixels (0 if unused) |
+| `i_ui_sample(uv: vec2<f32>) -> vec4<f32>` | — | the rendered UI at `uv` (premultiplied; transparent unless the UI texture mode is on, see [below](#the-ui-as-a-texture)) |
 
 `frag_coord` is in pixels with the origin **bottom-left**, like shadertoy's
 `fragCoord` (and `i_mouse()`); the wrapper flips WGSL's top-left
@@ -118,6 +120,33 @@ sees that buffer's current frame. Buffers are unfilterable float textures:
 read them with `textureLoad`, or nearest-sample them through the
 `i_sampler` global. They start out black and are cleared on every compile,
 on Reset and on resize.
+
+### The UI as a texture
+
+With the toolbar's droplet on, the image pass also receives the rendered UI
+(toolbar, windows, panels, everything) and its output replaces the UI on
+screen:
+
+```rust
+import package::shadertoy::{i_resolution, i_time, i_ui_sample};
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    var uv = frag_coord / i_resolution().xy;
+    uv.x += 0.004 * sin(uv.y * 60.0 + i_time() * 4.0);  // wobble the UI
+    let ui = i_ui_sample(uv);                            // premultiplied
+    let bg = vec3<f32>(0.1, 0.07, 0.15);
+    return vec4<f32>(ui.rgb + bg * (1.0 - ui.a), 1.0);
+}
+```
+
+`i_ui_sample(uv)` samples it bilinearly at `uv` in 0..1 with the origin
+bottom-left (like `frag_coord / i_resolution().xy`); the raw `i_ui` texture
+(row 0 at the top) and its `i_ui_sampler` are importable too. Colors are
+premultiplied by alpha, which is 0 where no UI is drawn. While the mode is
+off, and in buffer passes, thumbnails and `--render`, `i_ui` is a transparent
+1×1 texture, so the shader shows just its background. The toggle only enables
+for shaders that read `i_ui` (any other would hide the UI) and switches off
+when a compile stops reading it.
 
 ### LYGIA
 
@@ -198,6 +227,8 @@ src/
                 uniform-fed `var<private>`s, write tweaked values back
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
+  ui_texture.rs the UI texture mode's switch: toolbar toggle (only for
+                shaders that read `i_ui`) and the F2 emergency off
   headless.rs   `--render`: windowless wgpu renderer writing a PNG (native)
   render/
     mod.rs                    ShaderToyUniform/Fragment components + plugin
@@ -212,6 +243,9 @@ src/
     blur.rs                   frosted-glass backdrop: the finished frame,
                               downsampled 4x and Gaussian-blurred into an
                               image egui paints under windows and panels
+    ui_pass.rs                the UI texture mode: clears the view for egui,
+                              then runs the image pass after egui with the
+                              UI bound as `i_ui`
     fullscreen_material.rs    vendored from Bevy 0.20, modified to take its
                               fragment shader per view at runtime
   debugger.rs   debugger overlay (ported from bevy_shadertoy_wgsl): blit pass,
@@ -241,7 +275,11 @@ Rendering is the vendored Bevy `fullscreen_material` plugin: the user shader
 runs as a fullscreen pass in `Core3d`'s post-process stage with
 `Tonemapping::None`, so colors hit the screen untouched, after the buffer
 passes. Per-frame uniforms ride in a dynamic uniform buffer bound at
-`@group(0) @binding(2)`, the buffer channels at bindings 3..6.
+`@group(0) @binding(2)`, the buffer channels at bindings 3..6, `i_ui` and
+its bilinear sampler at 7 and 8. In the UI texture mode the image pass moves
+behind egui instead: the view is cleared to transparent, egui draws into it,
+and the user shader reads that as `i_ui` and writes the frame; egui's input
+and layout are untouched, which is why clicks still hit the undistorted UI.
 
 Compiles alternate between two shader assets, replacing the one that is not
 on screen. Bevy then rebuilds that asset's pipelines in place, so the set of
@@ -262,6 +300,7 @@ cargo run              # native (dynamic Bevy, fast rebuilds)
 cargo test             # compile pipeline, examples, highlighter, editor
 cargo run -- --render Plasma out.png [--time 3] [--debugger]  # headless PNG
 cargo run -- --example Fluid --examples  # start on an example, browser open
+cargo run -- --example "UI Melt" --ui-texture  # start with the shader eating the UI
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 trunk serve            # browser build on http://127.0.0.1:8080
 ```

@@ -101,6 +101,14 @@ struct FullscreenVertexOutput {
 @group(0) @binding(5) var i_channel_2: texture_2d<f32>;
 /// Buffer channel D (`buffer_d`).
 @group(0) @binding(6) var i_channel_3: texture_2d<f32>;
+/// The rendered UI (toolbar, windows, everything) while the toolbar's UI
+/// texture mode is on, else a transparent 1x1 texture. Only the image pass
+/// sees it, and the shader's output replaces the UI on screen. Colors are
+/// premultiplied by alpha. Read it through `i_ui_sample`, or texels with
+/// `textureLoad` (row 0 is the top).
+@group(0) @binding(7) var i_ui: texture_2d<f32>;
+/// Bilinear, clamp-to-edge sampler for `i_ui`.
+@group(0) @binding(8) var i_ui_sampler: sampler;
 
 /// Seconds since (re)start.
 fn i_time() -> f32 { return st_uniforms.i_time; }
@@ -128,6 +136,13 @@ fn i_channel_resolution(i: u32) -> vec3<f32> { return st_uniforms.i_channel_reso
 /// Live value of tweakable constant slot i; used by the generated loader,
 /// not meant to be called by hand.
 fn i_tweak(i: u32) -> vec4<f32> { return st_uniforms.i_tweaks[i]; }
+/// The UI at `uv` (0..1, origin bottom-left like
+/// `frag_coord / i_resolution().xy`), bilinear and premultiplied:
+/// `ui.rgb + col * (1.0 - ui.a)` lays it over `col`. Transparent while the
+/// UI texture mode is off.
+fn i_ui_sample(uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(i_ui, i_ui_sampler, vec2<f32>(uv.x, 1.0 - uv.y), 0.0);
+}
 "#
 );
 
@@ -450,7 +465,7 @@ fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
     }
     Err(CompileError::Binding(format!(
         "{} binds resources wesl-shadertoy does not provide. Import them from \
-         package::shadertoy instead (i_sampler, i_channel_0..i_channel_3; the \
+         package::shadertoy instead (i_sampler, i_channel_0..i_channel_3, i_ui; the \
          uniforms through i_time() and friends).",
         foreign.join(", ")
     )))

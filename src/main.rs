@@ -22,6 +22,7 @@ mod persist;
 mod render;
 mod theme;
 mod tweak;
+mod ui_texture;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -89,6 +90,7 @@ fn main() {
         .init_resource::<browser::Browser>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
+        .add_plugins(ui_texture::UiTexturePlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
         .add_systems(Startup, setup)
         .add_systems(
@@ -651,6 +653,7 @@ struct UiParams<'w, 's> {
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
+    ui_texture: ResMut<'w, ui_texture::UiTexture>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
 }
@@ -677,11 +680,17 @@ fn ui(mut p: UiParams) {
         return;
     };
     theme::apply(ctx);
-    let sigma = p.settings.blur * ctx.pixels_per_point();
+    // No frosted glass while the UI goes through the shader (see `ui_texture`).
+    let blur = if p.ui_texture.on {
+        0.0
+    } else {
+        p.settings.blur
+    };
+    let sigma = blur * ctx.pixels_per_point();
     if p.blur.sigma != sigma {
         p.blur.sigma = sigma;
     }
-    let glass = (p.settings.blur > 0.0).then(|| Glass {
+    let glass = (blur > 0.0).then(|| Glass {
         texture: blur_texture,
         screen: ctx.viewport_rect(),
     });
@@ -780,6 +789,7 @@ fn ui(mut p: UiParams) {
                 .on_hover_text("Tweak the shader's constants live");
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
+            ui_texture::toolbar_toggle(ui, &mut p.ui_texture, &p.current.wgsl);
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
                 .on_hover_text("Settings");
             ui.toggle_value(&mut p.wins.about, "?")
