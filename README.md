@@ -14,6 +14,7 @@ Runs natively and in the browser as WASM.
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
 | Share | **Share** button: copies a link that *is* the shader (see [Share links](#share-links)) |
+| Export | **Export** button: the shader as a standalone Bevy 0.20 plugin crate (see [Export to Bevy](#export-to-bevy)) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
 | Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
@@ -45,6 +46,33 @@ link a *Shared link* window offers to go back to it. The fragment is then
 cleared from the address bar, so reloading after an edit shows the edit. A
 damaged link (cut off, or from a newer format) opens nothing and says why.
 Natively, `--open-link <url>` opens a link the same way.
+
+### Export to Bevy
+
+**Export** turns the document into a tiny crate for Bevy 0.20, so a look
+prototyped here drops into a game:
+
+```
+<name>-bevy/
+  Cargo.toml        bevy 0.20 with the same lean feature set as this app
+  src/lib.rs        <Name>Plugin, the <Name>Shader camera component (the
+                    shadertoy uniforms, filled in every frame from Time, the
+                    window and the mouse) and <Name>Tweaks
+  src/shader.wgsl   the linked WGSL, embedded with load_internal_asset!
+  src/shader.wesl   the source it was compiled from, for reference
+  examples/demo.rs  a window with the shader: cargo run --example demo
+```
+
+It draws with Bevy's stock `fullscreen_material` (the shader's bindings 0..2
+are exactly the ones it provides), as a post-process pass on every camera with
+a `<Name>Shader`. The live constants become `<Name>Tweaks`, a
+`#[derive(Resource, Reflect)]` struct with a field per constant (`SEA_HEIGHT`
+→ `sea_height: f32`, colors as `Vec3`): the WGSL reads them from the same
+uniform slots the Constants window drives, so changing a field, by hand or in
+an inspector, changes the shader live. Natively the crate is written to
+`./<name>-bevy/` (existing files are replaced); the web build downloads it
+as `<name>-bevy.zip`. Shaders with buffer passes are not exported yet: they
+need this app's ping-pong renderer, so Export says so instead.
 
 ## The shader dialect
 
@@ -215,6 +243,8 @@ src/
   tweak.rs      tweakable constants: find literal consts, rewrite them into
                 uniform-fed `var<private>`s, write tweaked values back
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
+  export.rs     Export → Bevy: the standalone plugin crate (templates with
+                the WGSL and constants spliced in), written to disk or zipped
   share.rs      share links: the document deflated + base64url in the URL
                 fragment, the Share button, opening links at startup
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
@@ -284,6 +314,7 @@ cargo run -- --render Plasma out.png [--time 3] [--debugger]  # headless PNG
 cargo run -- --example Fluid --examples  # start on an example, browser open
 cargo run -- --open-link '<share link>'  # open a share link
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
+cargo test -- --ignored exported_crates_build  # exported crates build (slow)
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
 

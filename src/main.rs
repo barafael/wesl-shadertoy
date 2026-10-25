@@ -15,6 +15,7 @@ mod compile;
 mod debugger;
 mod editor;
 mod examples;
+mod export;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod highlight;
@@ -786,6 +787,16 @@ fn ui(mut p: UiParams) {
                 .clicked()
             {
                 p.status.note = Some(share::copy_link(ctx, &p.doc.text, &p.tweaks));
+            }
+            if ui
+                .button("Export")
+                .on_hover_text("Export as a Bevy plugin crate")
+                .clicked()
+            {
+                let values = p.tweaks.values.map(|v| v.to_array());
+                let text =
+                    tweak::written_back(&p.doc.text, &p.tweaks.constants, &values, p.tweaks.dirty);
+                p.status.note = Some(export::export_now(&text, p.state.example));
             }
 
             ui.separator();

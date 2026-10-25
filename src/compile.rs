@@ -252,7 +252,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// Build the `package::main` module for a shader that defines the buffer
 /// passes selected by `buffers` (bit per [`BUFFER_NAMES`] entry). Each buffer
 /// gets its own fragment entry point, rendered into that channel's offscreen
-/// target; undefined buffers get a stub entry (see the comment inside).
+/// target; undefined buffers get a stub entry (see the comment inside)
+/// when `stubs` is set.
 ///
 /// Buffer entries pass `@builtin(position)` through unflipped, so a buffer's
 /// `frag_coord.y` equals its texture row. A fragment always writes the texel
@@ -263,7 +264,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// displays the buffer space bottom-up just like the image space (and like
 /// shadertoy's `texture(iChannel0, fragCoord / resolution)`): `frag_coord.y`
 /// grows upward on screen and `i_mouse()` lines up with the cursor.
-fn main_module_for(buffers: u8) -> String {
+fn main_module_for(buffers: u8, stubs: bool) -> String {
     let mut wgsl = String::new();
     // Imports must come first
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
@@ -273,6 +274,9 @@ fn main_module_for(buffers: u8) -> String {
     }
     wgsl.push_str(MAIN_MODULE_HEAD);
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
+        if !stubs && buffers & (1 << i) == 0 {
+            continue;
+        }
         let body = if buffers & (1 << i) != 0 {
             format!(
                 "\x20   st_load_tweaks();\n\
@@ -343,6 +347,18 @@ impl std::fmt::Display for CompileError {
 /// way [`tweak::const_context_names`] did not spot — are found by compiling
 /// them one at a time and left as plain constants.
 pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileError> {
+    compile_with(user_source, true)
+}
+
+/// [`compile_user_shader`] without the stub entry points of undefined
+/// buffer passes, which only the app's shader slot reuse needs: a shader
+/// without buffers then has `fragment` as its only entry point, which is
+/// what [`crate::export`]ed crates (Bevy's stock fullscreen material) expect.
+pub fn compile_for_export(user_source: &str) -> Result<CompiledShader, CompileError> {
+    compile_with(user_source, false)
+}
+
+fn compile_with(user_source: &str, stubs: bool) -> Result<CompiledShader, CompileError> {
     let buffers = detect_buffers(user_source)?;
 
     let in_const_context = tweak::const_context_names(user_source);
@@ -359,21 +375,21 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
         }
     }
 
-    let wgsl = match compile_instrumented(user_source, buffers, &tweaks) {
+    let wgsl = match compile_instrumented(user_source, buffers, stubs, &tweaks) {
         Ok(wgsl) => wgsl,
         Err(_) if !tweaks.is_empty() => {
             // Report the user's own errors against the plain source.
-            compile_instrumented(user_source, buffers, &[])?;
+            compile_instrumented(user_source, buffers, stubs, &[])?;
             let (ok, bad): (Vec<Constant>, Vec<Constant>) = tweaks.into_iter().partition(|c| {
-                compile_instrumented(user_source, buffers, std::slice::from_ref(c)).is_ok()
+                compile_instrumented(user_source, buffers, stubs, std::slice::from_ref(c)).is_ok()
             });
             fixed.extend(bad.into_iter().map(|c| c.name));
             tweaks = ok;
-            match compile_instrumented(user_source, buffers, &tweaks) {
+            match compile_instrumented(user_source, buffers, stubs, &tweaks) {
                 Ok(wgsl) => wgsl,
                 Err(_) => {
                     fixed.extend(tweaks.drain(..).map(|c| c.name));
-                    compile_instrumented(user_source, buffers, &[])?
+                    compile_instrumented(user_source, buffers, stubs, &[])?
                 }
             }
         }
@@ -392,11 +408,12 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
 fn compile_instrumented(
     user_source: &str,
     buffers: u8,
+    stubs: bool,
     tweaks: &[Constant],
 ) -> Result<String, CompileError> {
     let resolver = Modules::new(
         tweak::instrument(user_source, tweaks).into(),
-        [("main", main_module_for(buffers).into())],
+        [("main", main_module_for(buffers, stubs).into())],
     );
     let compiler = Compiler::new_with_resolver(compile_options(), resolver);
     let result = compiler
@@ -707,6 +724,16 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             !entry.contains("i_resolution"),
             "unexpected y-flip:\n{entry}"
         );
+    }
+
+    /// Exports carry only the entry points the shader uses.
+    #[test]
+    fn export_has_no_stub_entries() {
+        let src = "fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0); }\n";
+        let wgsl = compile_for_export(src).expect("should compile").wgsl;
+        assert_eq!(wgsl.matches("@fragment").count(), 1, "{wgsl}");
+        let wgsl = compile_user_shader(src).expect("should compile").wgsl;
+        assert_eq!(wgsl.matches("@fragment").count(), 5, "{wgsl}");
     }
 
     #[test]
