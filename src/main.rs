@@ -15,6 +15,7 @@ mod compile;
 mod debugger;
 mod editor;
 mod examples;
+mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod highlight;
@@ -87,6 +88,7 @@ fn main() {
         .init_resource::<editor::HighlightCache>()
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
+        .init_resource::<graph::GraphView>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
@@ -99,6 +101,7 @@ fn main() {
                 run_analyzer,
                 autosave,
                 browser::update_previews,
+                graph::update_thumbnails.after(browser::update_previews),
             ),
         )
         .add_systems(EguiPrimaryContextPass, ui)
@@ -221,6 +224,7 @@ struct UiWindows {
     editor: bool,
     wgsl: bool,
     constants: bool,
+    graph: bool,
     settings: bool,
     about: bool,
     errors_expanded: bool,
@@ -234,6 +238,7 @@ impl Default for UiWindows {
             editor: true,
             wgsl: false,
             constants: false,
+            graph: false,
             settings: false,
             about: false,
             errors_expanded: true,
@@ -312,6 +317,7 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     // the fresh-start setting is on.
     app.state.debugger = cli_flag("--debugger");
     app.wins.examples = cli_flag("--examples");
+    app.wins.graph = cli_flag("--graph");
     if let Some(text) = cli_shader() {
         app.doc.text = text;
     } else {
@@ -651,6 +657,7 @@ struct UiParams<'w, 's> {
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
+    graph: ResMut<'w, graph::GraphView>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
 }
@@ -778,6 +785,8 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
             ui.toggle_value(&mut p.wins.constants, "Constants")
                 .on_hover_text("Tweak the shader's constants live");
+            ui.toggle_value(&mut p.wins.graph, "Graph")
+                .on_hover_text("The shader's dataflow as a node graph");
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
@@ -862,6 +871,23 @@ fn ui(mut p: UiParams) {
             }
         }
         tweaks.dirty = 0;
+    }
+
+    // --- graph window ---------------------------------------------------------
+    if p.wins.graph {
+        show_window(
+            ctx,
+            glass,
+            "graph_window",
+            egui::Window::new("Graph")
+                .default_pos([680.0, 60.0])
+                .default_size([760.0, 520.0])
+                .open(&mut p.wins.graph),
+            |ui| {
+                let (wgsl, generation) = (&p.current.wgsl, p.current.generation);
+                graph::show(ui, &mut p.graph, wgsl, generation, &p.preview_feedback);
+            },
+        );
     }
 
     // --- examples window (after the others: on top when they open together) -----------------------------------------------------
@@ -1411,9 +1437,9 @@ fn cli_example() -> Option<&'static examples::Example> {
 }
 
 /// Native-only: whether `flag` was passed. `--debugger` starts with the
-/// in-shader debugger overlay on (same as the toolbar bug icon) and
-/// `--examples` with the Examples window open, so scripted live tests can
-/// show them.
+/// in-shader debugger overlay on (same as the toolbar bug icon),
+/// `--examples` with the Examples window open and `--graph` with the Graph
+/// window open, so scripted live tests can show them.
 fn cli_flag(flag: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {

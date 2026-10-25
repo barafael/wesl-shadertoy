@@ -16,7 +16,8 @@ Runs natively and in the browser as WASM.
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
 | Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
-| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
+| Dataflow graph | `Graph` window (or `--graph` natively): the naga IR of `main_image` (or any other function of yours, buffer passes included) as a left-to-right node graph — `named lets` shows only `let`s, `var`s and returns, each with the formula it computes; `all expressions` one node per operation. Drag to pan, scroll to zoom, hover for the full formula. The `let`s of `main_image` carry live thumbnails of their value (scalars: orange positive, blue negative) |
+| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Graph` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
@@ -206,9 +207,9 @@ src/
                               channel clocks and buffers on the switch
     buffers.rs                the buffer_a..buffer_d passes (ping-pong
                               Rgba32Float targets behind i_channel_0..3)
-    previews.rs               the example browser's live thumbnails: each
-                              example's buffer and image passes into a small
-                              image of its own
+    previews.rs               live thumbnails (example browser, Graph
+                              window): each shader's buffer and image passes
+                              into a small image of its own
     blur.rs                   frosted-glass backdrop: the finished frame,
                               downsampled 4x and Gaussian-blurred into an
                               image egui paints under windows and panels
@@ -223,6 +224,13 @@ src/
                 which also parses each file's name/author/license header)
   browser.rs    the Examples window: cards, filters, lazy compiles, and which
                 thumbnails to draw each frame
+  graph/        the Graph window
+    mod.rs        state, canvas (pan/zoom/hover), per-`let` thumbnail
+                  variants drawn through render/previews.rs
+    extract.rs    naga IR -> nodes and edges, formulas rebuilt from the IR,
+                  WESL-mangled names mapped back
+    layout.rs     layered left-to-right layout: cycle breaking, longest-path
+                  columns, dummy nodes, barycenter crossing reduction
   analyzer/     wgsl-analyzer LSP client (live diagnostics)
     mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
     native.rs     the wgsl-analyzer executable over stdio
@@ -262,6 +270,7 @@ cargo run              # native (dynamic Bevy, fast rebuilds)
 cargo test             # compile pipeline, examples, highlighter, editor
 cargo run -- --render Plasma out.png [--time 3] [--debugger]  # headless PNG
 cargo run -- --example Fluid --examples  # start on an example, browser open
+cargo run -- --example Plasma --graph    # start with the Graph window open
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 trunk serve            # browser build on http://127.0.0.1:8080
 ```

@@ -1,4 +1,5 @@
-//! Live thumbnails for the example browser.
+//! Live thumbnails for the example browser (and the Graph window's
+//! per-`let` thumbnails, [`crate::graph`], which queue jobs the same way).
 //!
 //! The main world ([`crate::browser`]) compiles each example on first sight
 //! into a shader asset of its own and, every frame, lists the cards to draw
@@ -42,7 +43,8 @@ pub const PREVIEW_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 /// One thumbnail to draw this frame.
 #[derive(Clone)]
 pub struct PreviewJob {
-    /// Index into [`crate::examples::ALL`].
+    /// Index into [`crate::examples::ALL`], or a Graph window thumbnail
+    /// slot (from `crate::graph`'s `CARD_BASE` up).
     pub card: usize,
     pub image: AssetId<Image>,
     pub shader: Handle<Shader>,
