@@ -1,15 +1,15 @@
-//! Native-only offscreen renderer: `wesl-shadertoy --render <preset|file> <out.png> [time]`.
+//! Native-only offscreen renderer: `wesl-shadertoy --render <example|file> <out.png> [time]`.
 //!
-//! Creates a windowless wgpu device, compiles a preset (or `.wgsl` file)
+//! Creates a windowless wgpu device, compiles an example (or `.wesl` file)
 //! through the exact same [`crate::compile::compile_user_shader`] path the app
 //! uses, renders frames offscreen, and writes a PNG. No display server is
-//! involved, which makes it usable as a deterministic smoke test for presets
+//! involved, which makes it usable as a deterministic smoke test for examples
 //! and ports. Buffer passes (`buffer_a`..`buffer_d`) run with the same
 //! ping-pong semantics as the app; `--frames N` replays N frames so feedback
 //! loops accumulate.
 
 use crate::compile::{self, compile_user_shader};
-use crate::presets;
+use crate::examples;
 use crate::render::{ShaderToyUniform, uniform_bytes};
 use bevy::math::Vec4;
 use bevy::render::render_resource::ShaderType;
@@ -62,7 +62,7 @@ pub fn run_render_cli(args: &[String]) {
     }
     if positional.len() < 2 {
         eprintln!(
-            "usage: wesl-shadertoy --render <preset-name|file.wgsl> <out.png> \
+            "usage: wesl-shadertoy --render <example-name|file.wesl> <out.png> \
              [--time SECS] [--frames N] [--debugger]"
         );
         std::process::exit(2);
@@ -95,18 +95,15 @@ pub fn run_render_cli(args: &[String]) {
     }
 }
 
-/// Preset name (case-insensitive) or path to a `.wgsl` file.
+/// Example name (case-insensitive) or path to a `.wesl` file.
 fn resolve_source(arg: &str) -> (String, String) {
-    if let Some(p) = presets::ALL
-        .iter()
-        .find(|p| p.name.eq_ignore_ascii_case(arg))
-    {
-        return (p.name.to_string(), p.code.to_string());
+    if let Some(e) = examples::by_name(arg) {
+        return (e.name.to_string(), e.code.to_string());
     }
     match std::fs::read_to_string(arg) {
         Ok(text) => (arg.to_string(), text),
         Err(e) => {
-            eprintln!("no preset named {arg:?} and no readable file ({e})");
+            eprintln!("no example named {arg:?} and no readable file ({e})");
             std::process::exit(2);
         }
     }

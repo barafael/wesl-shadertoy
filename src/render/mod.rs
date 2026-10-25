@@ -4,6 +4,7 @@ pub mod active;
 pub mod blur;
 pub mod buffers;
 pub mod fullscreen_material;
+pub mod previews;
 
 use bevy::app::Plugin;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
@@ -97,12 +98,16 @@ impl Plugin for ShaderToyRenderPlugin {
             ExtractResourcePlugin::<crate::debugger::DebuggerShader>::default(),
             ExtractResourcePlugin::<crate::debugger::DebuggerOn>::default(),
             ExtractResourcePlugin::<blur::Blur>::default(),
+            ExtractResourcePlugin::<previews::PreviewJobs>::default(),
         ));
-        // One feedback channel, shared (not extracted) by both worlds.
+        // Feedback channels, shared (not extracted) by both worlds.
         let feedback = active::ShaderFeedback::default();
+        let preview_feedback = previews::PreviewFeedback::default();
         app.init_resource::<active::Playback>()
             .init_resource::<crate::debugger::DebuggerOn>()
-            .insert_resource(feedback.clone());
+            .init_resource::<previews::PreviewJobs>()
+            .insert_resource(feedback.clone())
+            .insert_resource(preview_feedback.clone());
         app.add_systems(
             bevy::app::Startup,
             (crate::debugger::setup_debugger_shader, blur::setup_blur),
@@ -116,6 +121,8 @@ impl Plugin for ShaderToyRenderPlugin {
             .init_resource::<active::Playback>()
             .init_resource::<active::RejectedGeneration>()
             .insert_resource(feedback)
+            .insert_resource(preview_feedback)
+            .init_resource::<previews::PreviewState>()
             .init_resource::<buffers::BufferTargets>()
             .init_resource::<buffers::BufferPipelines>()
             .init_resource::<crate::debugger::DebuggerOn>()
@@ -140,9 +147,14 @@ impl Plugin for ShaderToyRenderPlugin {
             )
             .add_systems(
                 Core3d,
-                buffers::shadertoy_buffer_pass
-                    .in_set(Core3dSystems::PostProcess)
-                    .before(fullscreen_material_system::<ShaderToyUniform>),
+                (
+                    previews::preview_pass
+                        .in_set(Core3dSystems::PostProcess)
+                        .before(buffers::shadertoy_buffer_pass),
+                    buffers::shadertoy_buffer_pass
+                        .in_set(Core3dSystems::PostProcess)
+                        .before(fullscreen_material_system::<ShaderToyUniform>),
+                ),
             );
     }
 }

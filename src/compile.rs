@@ -20,16 +20,22 @@
 //!   entries pass `@builtin(position)` through unflipped (texel space), so
 //!   `textureLoad` reads line up with the writes (see [`main_module_for`]).
 //!
+//! User code may also import the bundled [LYGIA](https://lygia.xyz) shader
+//! library as the external WESL package `lygia` (`import
+//! lygia::generative::snoise::snoise2;`), see [`Modules`].
+//!
 //! The composed WGSL is then parsed and validated with `naga` (same major
 //! version as the wgpu inside Bevy 0.20) so type errors in user code are
 //! reported in the UI instead of only in the browser console.
 
+use std::borrow::Cow;
 use std::str::FromStr;
 
+use wesl::error::ResolveError;
 use wesl::mangler::{EscapeMangler, Mangler};
-use wesl::resolver::VirtualResolver;
+use wesl::resolver::{PackageResolver, VirtualResolver};
 use wesl::syntax::ModulePath;
-use wesl::{CompileOptions, Compiler};
+use wesl::{CompileOptions, Compiler, Resolver};
 
 use crate::tweak::{self, Constant, Hint, MAX_TWEAKS};
 
@@ -124,6 +130,90 @@ fn i_channel_resolution(i: u32) -> vec3<f32> { return st_uniforms.i_channel_reso
 fn i_tweak(i: u32) -> vec4<f32> { return st_uniforms.i_tweaks[i]; }
 "#
 );
+
+/// The bundled LYGIA modules (`vendor/lygia`, embedded by `build.rs`).
+mod lygia {
+    use wesl::package::{StaticPackage, StaticPackageModule};
+    include!(concat!(env!("OUT_DIR"), "/lygia.rs"));
+}
+
+/// Every bundled LYGIA module as `(path relative to the package root,
+/// source)`, e.g. `("generative/snoise.wesl", …)`: the files the analyzer's
+/// workspace mirrors.
+pub(crate) fn lygia_files() -> Vec<(String, &'static str)> {
+    fn walk(
+        module: &wesl::package::StaticPackageModule,
+        dir: &str,
+        out: &mut Vec<(String, &'static str)>,
+    ) {
+        for sub in module.submodules {
+            if !sub.source.is_empty() {
+                out.push((format!("{dir}{}.wesl", sub.name), sub.source));
+            }
+            walk(sub, &format!("{dir}{}/", sub.name), out);
+        }
+    }
+    let mut files = Vec::new();
+    walk(lygia::LYGIA.root, "", &mut files);
+    files
+}
+
+/// Everything a compile can import: the app's in-memory `package::` modules
+/// (`main`, `shadertoy`, `user`) and the external packages, i.e. `lygia::`.
+struct Modules<'a> {
+    local: VirtualResolver<'a>,
+    packages: PackageResolver,
+}
+
+impl<'a> Modules<'a> {
+    /// `shadertoy` plus `user` (and whatever `extra` modules) under `package::`.
+    fn new(
+        user: Cow<'a, str>,
+        extra: impl IntoIterator<Item = (&'static str, Cow<'a, str>)>,
+    ) -> Self {
+        let mut local = VirtualResolver::new();
+        let modules = [("shadertoy", SHADERTOY_MODULE.into()), ("user", user)];
+        for (name, source) in modules.into_iter().chain(extra) {
+            local.add_module(package_path(name), source);
+        }
+        let mut packages = PackageResolver::new();
+        packages.add_package(&lygia::LYGIA);
+        Self { local, packages }
+    }
+}
+
+impl Resolver for Modules<'_> {
+    fn resolve_source<'b>(&'b self, path: &ModulePath) -> Result<Cow<'b, str>, ResolveError> {
+        if path.origin.is_package() {
+            self.packages.resolve_source(path)
+        } else {
+            self.local.resolve_source(path)
+        }
+    }
+
+    fn canonical_path(&self, path: &ModulePath) -> ModulePath {
+        if path.origin.is_package() {
+            self.packages.canonical_path(path)
+        } else {
+            path.clone()
+        }
+    }
+}
+
+/// WESL's defaults, minus visibility checks: LYGIA marks nothing `public`
+/// (its own tooling does not enforce visibility), and with them on, wesl
+/// refuses every import from it.
+fn compile_options() -> CompileOptions {
+    CompileOptions {
+        visibility: false,
+        ..Default::default()
+    }
+}
+
+/// `package::{name}`.
+fn package_path(name: &str) -> ModulePath {
+    ModulePath::from_str(&format!("package::{name}")).expect("valid module path")
+}
 
 /// Names of the optional per-frame buffer passes, in shadertoy's A→D
 /// evaluation order. Bit *i* of a buffer mask means `BUFFER_NAMES[i]` is
@@ -304,24 +394,13 @@ fn compile_instrumented(
     buffers: u8,
     tweaks: &[Constant],
 ) -> Result<String, CompileError> {
-    let mut resolver = VirtualResolver::new();
-    resolver.add_module(
-        ModulePath::from_str("package::main").expect("valid module path"),
-        main_module_for(buffers).into(),
-    );
-    resolver.add_module(
-        ModulePath::from_str("package::shadertoy").expect("valid module path"),
-        SHADERTOY_MODULE.into(),
-    );
-    resolver.add_module(
-        ModulePath::from_str("package::user").expect("valid module path"),
+    let resolver = Modules::new(
         tweak::instrument(user_source, tweaks).into(),
+        [("main", main_module_for(buffers).into())],
     );
-
-    let compiler = Compiler::new_with_resolver(CompileOptions::default(), resolver);
-    let main_path = ModulePath::from_str("package::main").expect("valid module path");
+    let compiler = Compiler::new_with_resolver(compile_options(), resolver);
     let result = compiler
-        .compile_module(&main_path)
+        .compile_module(&package_path("main"))
         .map_err(|e| CompileError::Wesl(e.to_string()))?;
     let wgsl = result.to_string();
 
@@ -347,7 +426,7 @@ fn compile_instrumented(
 /// the layout lacks or types differently, and Bevy's default render error
 /// handler quits the app on that error, taking unsaved edits with it.
 fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
-    let env = ModulePath::from_str("package::shadertoy").expect("valid module path");
+    let env = package_path("shadertoy");
     let foreign: Vec<String> = module
         .global_variables
         .iter()
@@ -380,15 +459,7 @@ fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
 /// Compile `package::user` on its own and report which buffer passes it
 /// defines, by looking for `fn buffer_a`..`buffer_d` in the output.
 fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
-    let mut resolver = VirtualResolver::new();
-    resolver.add_module(
-        ModulePath::from_str("package::shadertoy").expect("valid module path"),
-        SHADERTOY_MODULE.into(),
-    );
-    resolver.add_module(
-        ModulePath::from_str("package::user").expect("valid module path"),
-        user_source.to_string().into(),
-    );
+    let resolver = Modules::new(user_source.into(), []);
 
     // `keep_main` disables stripping *within* package::user, so unreferenced
     // `buffer_*` functions survive to be detected (the real compile in
@@ -396,12 +467,11 @@ fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
     // from the generated `package::main` entry points there).
     let options = CompileOptions {
         keep_main: true,
-        ..Default::default()
+        ..compile_options()
     };
     let compiler = Compiler::new_with_resolver(options, resolver);
-    let user_path = ModulePath::from_str("package::user").expect("valid module path");
     let result = compiler
-        .compile_module(&user_path)
+        .compile_module(&package_path("user"))
         .map_err(|e| CompileError::Wesl(e.to_string()))?;
     let wgsl = result.to_string();
     let module = naga::front::wgsl::parse_str(&wgsl)
@@ -690,6 +760,46 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         let msg = compile_user_shader(src).unwrap_err().to_string();
         assert!(!msg.contains("var<private>"), "{msg}");
         assert!(!msg.contains("st_load_tweaks"), "{msg}");
+    }
+
+    /// The bundled LYGIA resolves as the `lygia` package, including its
+    /// own internal imports, and only what is used is linked in.
+    #[test]
+    fn imports_lygia() {
+        let src = r#"
+import package::shadertoy::i_time;
+import lygia::generative::snoise::snoise3;
+import lygia::color::palette::spectral::spectral;
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    let n = snoise3(vec3<f32>(frag_coord / 200.0, i_time()));
+    return vec4<f32>(spectral(0.5 + 0.5 * n), 1.0);
+}
+"#;
+        let wgsl = compile_user_shader(src).expect("should compile").wgsl;
+        assert!(wgsl.contains("snoise3"), "{wgsl}");
+        // snoise3 imports permute/mod289 from elsewhere in LYGIA.
+        assert!(wgsl.contains("mod289"), "{wgsl}");
+        assert!(!wgsl.contains("worley"), "unused modules leaked in");
+
+        let missing = "import lygia::generative::nope::nope;\n\
+                       fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(nope()); }\n";
+        let msg = compile_user_shader(missing).unwrap_err().to_string();
+        assert!(msg.contains("nope"), "{msg}");
+    }
+
+    #[test]
+    fn lygia_files_mirror_the_package() {
+        let files = lygia_files();
+        assert!(files.len() > 300, "{}", files.len());
+        let snoise = files
+            .iter()
+            .find(|(path, _)| path == "generative/snoise.wesl")
+            .expect("snoise module");
+        assert!(snoise.1.contains("fn snoise3"));
+        // A module that is both a file and a directory keeps both.
+        assert!(files.iter().any(|(p, _)| p == "math/quat.wesl"));
+        assert!(files.iter().any(|(p, _)| p.starts_with("math/quat/")));
     }
 
     #[test]

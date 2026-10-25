@@ -26,10 +26,10 @@ pub struct Transport;
 
 impl Transport {
     /// Begin loading the server; [`Link::state`] reports when it is up.
-    pub fn start(files: &[(&str, &str)]) -> Result<Self, String> {
+    pub fn start(files: &[(String, &str)]) -> Result<Self, String> {
         let files: serde_json::Map<String, Value> = files
             .iter()
-            .map(|(path, contents)| ((*path).to_owned(), Value::from(*contents)))
+            .map(|(path, contents)| (path.clone(), Value::from(*contents)))
             .collect();
         analyzer_start(ROOT, &Value::Object(files).to_string());
         Ok(Self)

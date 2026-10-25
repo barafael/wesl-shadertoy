@@ -25,10 +25,10 @@ use bevy::platform::collections::HashMap;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::{ComponentUniforms, DynamicUniformIndex};
 use bevy::render::render_resource::{
-    BindGroupEntries, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d,
-    FragmentState, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipelineDescriptor, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureView, TextureViewDescriptor,
+    BindGroupEntries, BindingResource, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+    CommandEncoder, Extent3d, FragmentState, Operations, PipelineCache, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipelineDescriptor, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::shader::Shader;
@@ -65,7 +65,7 @@ impl BufferTargets {
     /// Drop contents when the viewport changed size (buffers always match
     /// it) or a different activation took over. Returns whether it did;
     /// fresh textures read as zero.
-    fn reset_if_stale(&mut self, size: UVec2, owner: (u32, u32)) -> bool {
+    pub(crate) fn reset_if_stale(&mut self, size: UVec2, owner: (u32, u32)) -> bool {
         let size = size.max(UVec2::ONE);
         if self.size == size && self.owner == Some(owner) {
             return false;
@@ -77,6 +77,13 @@ impl BufferTargets {
             pair.current = 0;
         }
         true
+    }
+
+    /// Start a frame: every pair swaps its write and read slots.
+    pub(crate) fn advance(&mut self) {
+        for pair in self.pairs.iter_mut() {
+            pair.current ^= 1;
+        }
     }
 
     /// The surface for channel `i`, slot `slot`, creating it on first use.
@@ -171,6 +178,103 @@ impl BufferPipelines {
     }
 }
 
+/// One frame's buffer passes for one shader: what [`Self::draw`] binds.
+pub(crate) struct BufferPass<'a> {
+    pub device: &'a RenderDevice,
+    pub pipeline_cache: &'a PipelineCache,
+    pub fullscreen: &'a FullscreenMaterialPipeline<ShaderToyUniform>,
+    /// From [`BufferPipelines::ids_for`].
+    pub ids: [Option<CachedRenderPipelineId>; 4],
+    /// Bit per channel the shader defines.
+    pub mask: u8,
+    /// The shader's uniforms: a dynamic uniform buffer and its offset.
+    pub uniforms: BindingResource<'a>,
+    pub offset: u32,
+    /// [`ChannelViews::dummy`], bound for channels the shader lacks.
+    pub dummy: &'a TextureView,
+}
+
+impl BufferPass<'_> {
+    /// Render the defined buffer passes (A→D) into `targets` (already
+    /// [advanced](BufferTargets::advance) for this frame), publishing each
+    /// result in `channels` for the passes after it and the image pass.
+    /// Undefined channels are pointed at the black dummy; a channel whose
+    /// pipeline is still compiling keeps its previous view.
+    pub fn draw(
+        &self,
+        encoder: &mut CommandEncoder,
+        targets: &mut BufferTargets,
+        channels: &mut [TextureView; 4],
+    ) {
+        let dummy = self.dummy;
+        for (i, slot) in channels.iter_mut().enumerate() {
+            if self.mask & (1 << i) == 0 {
+                *slot = dummy.clone();
+            }
+        }
+        let bgl = self
+            .pipeline_cache
+            .get_bind_group_layout(&self.fullscreen.layout);
+        for (i, name) in crate::compile::BUFFER_NAMES.iter().enumerate() {
+            if self.mask & (1 << i) == 0 {
+                continue;
+            }
+            let write = targets.write_view(i, self.device);
+            // Earlier buffers already wrote their current-frame slot; later
+            // and self reads see the previous frame's slot.
+            let reads: [TextureView; 4] = std::array::from_fn(|j| {
+                if self.mask & (1 << j) == 0 {
+                    dummy.clone()
+                } else if j < i {
+                    targets.write_view(j, self.device)
+                } else {
+                    targets.read_view(j, self.device)
+                }
+            });
+
+            let Some(Some(pipeline)) =
+                self.ids[i].map(|id| self.pipeline_cache.get_render_pipeline(id))
+            else {
+                continue; // pipeline still compiling; channel keeps its stale view
+            };
+
+            let bind_group = self.device.create_bind_group(
+                Some(format!("shadertoy_buffer_bind_group_{name}").as_str()),
+                &bgl,
+                &BindGroupEntries::sequential((
+                    dummy,
+                    &self.fullscreen.sampler,
+                    self.uniforms.clone(),
+                    &reads[0],
+                    &reads[1],
+                    &reads[2],
+                    &reads[3],
+                )),
+            );
+
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some(&format!("shadertoy_buffer_pass_{name}")),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &write,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations::default(),
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[self.offset]);
+            pass.draw(0..3, 0..1);
+            drop(pass);
+
+            channels[i] = write;
+        }
+    }
+}
+
 type BufferPassView<'w, 's> = ViewQuery<
     'w,
     's,
@@ -232,10 +336,7 @@ pub fn shadertoy_buffer_pass(
     if p.playback.paused && !fresh {
         return;
     }
-    // Advance the clock: every pair swaps write/read slots once per frame.
-    for pair in p.targets.pairs.iter_mut() {
-        pair.current ^= 1;
-    }
+    p.targets.advance();
 
     let ids = p.pipelines.ids_for(
         &p.pipeline_cache,
@@ -243,67 +344,18 @@ pub fn shadertoy_buffer_pass(
         &active.fragment.handle,
         mask,
     );
-
     let Some(settings_binding) = p.data_uniforms.uniforms().binding() else {
         return;
     };
-    let bgl = p.pipeline_cache.get_bind_group_layout(&p.fullscreen.layout);
-
-    for (i, name) in crate::compile::BUFFER_NAMES.iter().enumerate() {
-        if mask & (1 << i) == 0 {
-            continue;
-        }
-        let write = p.targets.write_view(i, &p.render_device);
-        // Earlier buffers already wrote their current-frame slot; later and
-        // self reads see the previous frame's slot.
-        let reads: [TextureView; 4] = std::array::from_fn(|j| {
-            if mask & (1 << j) == 0 {
-                dummy.clone()
-            } else if j < i {
-                p.targets.write_view(j, &p.render_device)
-            } else {
-                p.targets.read_view(j, &p.render_device)
-            }
-        });
-
-        let Some(Some(pipeline)) = ids[i].map(|id| p.pipeline_cache.get_render_pipeline(id)) else {
-            continue; // pipeline still compiling; channel keeps its stale view
-        };
-
-        let bind_group = p.render_device.create_bind_group(
-            Some(format!("shadertoy_buffer_bind_group_{name}").as_str()),
-            &bgl,
-            &BindGroupEntries::sequential((
-                &dummy,
-                &p.fullscreen.sampler,
-                settings_binding.clone(),
-                &reads[0],
-                &reads[1],
-                &reads[2],
-                &reads[3],
-            )),
-        );
-
-        let mut pass = ctx
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some(&format!("shadertoy_buffer_pass_{name}")),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &write,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations::default(),
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[view.1.index()]);
-        pass.draw(0..3, 0..1);
-        drop(pass);
-
-        p.channels.views[i] = write;
-    }
+    let pass = BufferPass {
+        device: &p.render_device,
+        pipeline_cache: &p.pipeline_cache,
+        fullscreen: &p.fullscreen,
+        ids,
+        mask,
+        uniforms: settings_binding,
+        offset: view.1.index(),
+        dummy: &dummy,
+    };
+    pass.draw(ctx.command_encoder(), &mut p.targets, &mut p.channels.views);
 }

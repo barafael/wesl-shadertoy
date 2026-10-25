@@ -27,7 +27,7 @@ pub struct Transport {
 impl Transport {
     /// Spawn `$WGSL_ANALYZER` (default: `wgsl-analyzer` from `PATH`) on a
     /// fresh workspace holding `files`.
-    pub fn start(files: &[(&str, &str)]) -> Result<Self, String> {
+    pub fn start(files: &[(String, &str)]) -> Result<Self, String> {
         let exe = std::env::var_os("WGSL_ANALYZER").unwrap_or_else(|| "wgsl-analyzer".into());
         let root =
             std::env::temp_dir().join(format!("wesl-shadertoy-analyzer-{}", std::process::id()));

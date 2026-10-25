@@ -14,16 +14,16 @@ Runs natively and in the browser as WASM.
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
-| Presets | `preset:` combobox — 21 shadertoy classics (Plasma, Star Nest, Seascape, Fluid, …); fresh sessions roll a random one |
+| Examples | `Examples` window — 23 examples (Plasma, Seascape, Fluid, two LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
-| Windows | `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
+| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
 | Debugger overlay | toolbar bug icon (or `--debugger` natively): crosshair and click ring, RGBA probe boxes for the pixels under the cursor and the last click, a swatch of the clicked pixel's color, mouse position, resolution, fps |
 
 The document auto-saves to `localStorage` (browser builds) on every change —
-edits, preset picks, opened files — and is restored on load, along with your
+edits, opened examples and files — and is restored on load, along with your
 settings. Compile errors appear in the bottom panel — the last good shader keeps
 running while you fix them, also when the GPU driver rejects a shader that
 passed validation.
@@ -119,6 +119,32 @@ read them with `textureLoad`, or nearest-sample them through the
 `i_sampler` global. They start out black and are cleared on every compile,
 on Reset and on resize.
 
+### LYGIA
+
+[LYGIA](https://lygia.xyz), Patricio Gonzalez Vivo's shader library, ships with
+the app as the WESL package `lygia`: noise, SDFs, color spaces and palettes,
+easing curves, lighting helpers and more, about 380 modules. Import what you
+need by path; only what you use ends up in the shader:
+
+```rust
+import package::shadertoy::i_time;
+import lygia::generative::snoise::snoise3;
+import lygia::color::palette::spectral::spectral;
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    let n = snoise3(vec3<f32>(frag_coord / 200.0, i_time()));
+    return vec4<f32>(spectral(0.5 + 0.5 * n), 1.0);
+}
+```
+
+Function names carry their overload as a suffix (`snoise2`, `snoise3`, …);
+browse the modules in [`vendor/lygia`](vendor/lygia) or on
+[lygia.xyz](https://lygia.xyz). LYGIA's 2D shapes are centered on (0.5, 0.5),
+and a few (like `heartSDF`) assume y points down, unlike `frag_coord`. The `Lygia Noise` and `Lygia Shapes` examples show
+it in use. LYGIA is licensed separately from this project, under the
+Prosperity Public License 3.0.0 or the Patron License: see
+[`vendor/lygia/VENDORED.md`](vendor/lygia/VENDORED.md).
+
 One dialect gotcha when porting snippets: `mod` is a reserved word in WESL (it
 declares a module), so write the builtin out as `x - y * floor(x / y)` instead
 of calling `mod(x, y)`.
@@ -135,9 +161,10 @@ the screen, and a broken edit never replaces a working shader.
 While you edit, the [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer)
 language server checks the code and the editor squiggles what it reports;
 the status bar shows the count. Its workspace mirrors the real compile:
-`shaders/shadertoy.wesl` is the hidden `package::shadertoy` module and the
-editor text is `shaders/user.wesl` (`package::user`), so imports and types
-resolve exactly as when compiling.
+`shaders/shadertoy.wesl` is the hidden `package::shadertoy` module, `lygia/`
+the bundled LYGIA (a path dependency in `wesl.toml`), and the editor text is
+`shaders/user.wesl` (`package::user`), so imports and types resolve exactly as
+when compiling.
 
 * **Browser:** the server runs in a Web Worker from
   [`wgsl-analyzer-web`](https://www.npmjs.com/package/wgsl-analyzer-web)
@@ -158,7 +185,8 @@ resolve exactly as when compiling.
 ```
 src/
   main.rs       app wiring, resources, per-frame uniforms, egui UI
-  compile.rs    WESL link + naga validate (the shader contract above)
+  compile.rs    WESL link + naga validate (the shader contract above), with
+                the bundled LYGIA as the `lygia` package
   tweak.rs      tweakable constants: find literal consts, rewrite them into
                 uniform-fed `var<private>`s, write tweaked values back
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
@@ -171,6 +199,9 @@ src/
                               channel clocks and buffers on the switch
     buffers.rs                the buffer_a..buffer_d passes (ping-pong
                               Rgba32Float targets behind i_channel_0..3)
+    previews.rs               the example browser's live thumbnails: each
+                              example's buffer and image passes into a small
+                              image of its own
     blur.rs                   frosted-glass backdrop: the finished frame,
                               downsampled 4x and Gaussian-blurred into an
                               image egui paints under windows and panels
@@ -181,12 +212,18 @@ src/
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
   editor.rs     the code editor: TextEdit with a custom layouter that paints
                 the highlighted job, line-number gutter, Tab/Shift-Tab
-  presets.rs    21 compile-checked shadertoy classic presets (presets/*.wgsl
-                for the longer ones)
+  examples.rs   the built-in examples (examples/*.wesl, embedded by build.rs,
+                which also parses each file's name/author/license header)
+  browser.rs    the Examples window: cards, filters, lazy compiles, and which
+                thumbnails to draw each frame
   analyzer/     wgsl-analyzer LSP client (live diagnostics)
     mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
     native.rs     the wgsl-analyzer executable over stdio
     web.rs        wgsl-analyzer-web in a Web Worker, via web/analyzer.js
+examples/       one .wesl file per example; the leading comment block names
+                and credits it (see src/examples.rs for the format)
+vendor/lygia/   the WESL modules of LYGIA at a pinned commit, refreshed by
+                vendor/update-lygia.sh; build.rs embeds them as a package
 web/
   analyzer.js               JS side of the web transport
   fetch-wgsl-analyzer.sh    fetches the pinned wgsl-analyzer-web build
@@ -215,8 +252,9 @@ integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 
 ```sh
 cargo run              # native (dynamic Bevy, fast rebuilds)
-cargo test             # compile pipeline, presets, highlighter, editor
-cargo run -- --render Plasma out.png [--debugger]  # headless PNG, no window
+cargo test             # compile pipeline, examples, highlighter, editor
+cargo run -- --render Plasma out.png [--time 3] [--debugger]  # headless PNG
+cargo run -- --example Fluid --examples  # start on an example, browser open
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
@@ -237,3 +275,8 @@ modified) from Bevy 0.20 under the same dual license — see its header. The
 debugger overlay in `src/debugger.rs` is ported from
 [eliotbo/bevy_shadertoy_wgsl](https://github.com/eliotbo/bevy_shadertoy_wgsl)
 (MIT OR Apache-2.0).
+
+Two parts carry their own licenses: each file in `examples/` names its author
+and license in its header (the shadertoy ports are mostly CC BY-NC-SA 3.0 or
+CC BY-NC 2.0), and `vendor/lygia/` is LYGIA under the Prosperity Public
+License 3.0.0 or the Patron License (see `vendor/lygia/VENDORED.md`).
