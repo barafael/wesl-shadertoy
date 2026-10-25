@@ -174,3 +174,84 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 "#
     .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Rust uniform struct and the WGSL `ShaderToyUniforms` struct are
+    /// maintained on both sides of FFI-bytes: every WGSL member must sit at
+    /// the offset where the Rust field of the same name is encoded, and the
+    /// sizes must agree. (The debugger overlay shares the WGSL struct through
+    /// `shadertoy_uniforms_wgsl!`, so this covers it too.)
+    #[test]
+    fn uniform_layout_matches_rust() {
+        // Every 4-byte slot gets a distinct value, so the encoded bytes tell
+        // which Rust field landed where.
+        let v = |a: f32| Vec4::new(a, a + 1.0, a + 2.0, a + 3.0);
+        let rust = ShaderToyUniform {
+            time: 1.0,
+            time_delta: 2.0,
+            frame: 3,
+            _pad: 4.0,
+            resolution: v(5.0),
+            mouse: v(9.0),
+            date: v(13.0),
+            sample_rate: 17.0,
+            frame_rate: 18.0,
+            overlay_top: 19.0,
+            overlay_bottom: 20.0,
+            channel_time: v(21.0),
+            channel_resolution: [v(25.0), v(29.0), v(33.0), v(37.0)],
+            tweaks: std::array::from_fn(|i| v(41.0 + 4.0 * i as f32)),
+        };
+        let bytes = uniform_bytes(&rust);
+        assert_eq!(bytes.len() as u64, ShaderToyUniform::min_size().get());
+        let word = |offset: u32| {
+            let o = offset as usize;
+            u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
+        };
+        // WGSL member name -> the first word its Rust namesake encodes.
+        let expected = [
+            ("i_time", 1.0f32.to_bits()),
+            ("i_time_delta", 2.0f32.to_bits()),
+            ("i_frame", 3),
+            ("_pad", 4.0f32.to_bits()),
+            ("i_resolution", 5.0f32.to_bits()),
+            ("i_mouse", 9.0f32.to_bits()),
+            ("i_date", 13.0f32.to_bits()),
+            ("i_sample_rate", 17.0f32.to_bits()),
+            ("i_frame_rate", 18.0f32.to_bits()),
+            ("_overlay_top", 19.0f32.to_bits()),
+            ("_overlay_bottom", 20.0f32.to_bits()),
+            ("i_channel_time", 21.0f32.to_bits()),
+            ("i_channel_resolution", 25.0f32.to_bits()),
+            ("i_tweaks", 41.0f32.to_bits()),
+        ];
+
+        let module = naga::front::wgsl::parse_str(crate::compile::SHADERTOY_MODULE)
+            .expect("shadertoy module parses");
+        let (handle, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("ShaderToyUniforms"))
+            .expect("ShaderToyUniforms present");
+        let naga::TypeInner::Struct { members, .. } = &ty.inner else {
+            panic!("ShaderToyUniforms is a struct");
+        };
+        let names: Vec<_> = members.iter().filter_map(|m| m.name.as_deref()).collect();
+        let expected_names: Vec<_> = expected.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, expected_names);
+        for (member, (name, first_word)) in members.iter().zip(expected) {
+            assert_eq!(
+                word(member.offset),
+                first_word,
+                "{name} at offset {}",
+                member.offset
+            );
+        }
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).unwrap();
+        assert_eq!(u64::from(layouter[handle].size), bytes.len() as u64);
+    }
+}

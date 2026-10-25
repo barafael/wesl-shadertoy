@@ -5,6 +5,11 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A shadertoy-style live shader editor for WESL, built on Bevy 0.20 and egui, running natively and in the browser via WASM."
 
+# The root package is the app; `crates/` holds tooling around it (see
+# README.md). Profiles below apply to every member.
+[workspace]
+members = [".", "crates/backend-diff"]
+
 [dependencies]
 # Bevy 0.20: WESL is the native shader language. Granular feature set: the
 # app is a fullscreen render pass + egui, so we skip the `2d`/`3d`/`ui`

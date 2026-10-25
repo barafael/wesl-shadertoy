@@ -39,10 +39,12 @@ use wesl::{CompileOptions, Compiler, Resolver};
 
 use crate::tweak::{self, Constant, Hint, MAX_TWEAKS};
 
-/// The WGSL uniform block, shared by [`SHADERTOY_MODULE`] and the debugger
-/// overlay ([`crate::debugger::DEBUGGER_WGSL`]) so the two cannot drift.
-/// Field order must match [`crate::render::ShaderToyUniform`]; the
-/// `uniform_layout_matches_rust` test checks every member's offset.
+/// The WGSL uniform block, shared by [`SHADERTOY_MODULE`] and the app's
+/// debugger overlay (`DEBUGGER_WGSL`) so the two cannot drift. Field order
+/// must match the app's `ShaderToyUniform`; its `uniform_layout_matches_rust`
+/// test checks every member's offset.
+#[macro_export]
+#[doc(hidden)]
 macro_rules! shadertoy_uniforms_wgsl {
     () => {
         r#"struct ShaderToyUniforms {
@@ -67,10 +69,10 @@ macro_rules! shadertoy_uniforms_wgsl {
 "#
     };
 }
-pub(crate) use shadertoy_uniforms_wgsl;
+pub use crate::shadertoy_uniforms_wgsl;
 
 /// The hidden `package::shadertoy` module: uniforms + accessors.
-pub(crate) const SHADERTOY_MODULE: &str = concat!(
+pub const SHADERTOY_MODULE: &str = concat!(
     r#"// The shadertoy environment, provided by wesl-shadertoy.
 // Uniforms live in the dynamic uniform buffer the fullscreen-material
 // pipeline binds at @group(0) @binding(2).
@@ -140,7 +142,7 @@ mod lygia {
 /// Every bundled LYGIA module as `(path relative to the package root,
 /// source)`, e.g. `("generative/snoise.wesl", …)`: the files the analyzer's
 /// workspace mirrors.
-pub(crate) fn lygia_files() -> Vec<(String, &'static str)> {
+pub fn lygia_files() -> Vec<(String, &'static str)> {
     fn walk(
         module: &wesl::package::StaticPackageModule,
         dir: &str,
@@ -542,87 +544,6 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 }
 "#;
         compile_user_shader(src).expect("should compile");
-    }
-
-    /// The Rust uniform struct and the WGSL `ShaderToyUniforms` struct are
-    /// maintained on both sides of FFI-bytes: every WGSL member must sit at
-    /// the offset where the Rust field of the same name is encoded, and the
-    /// sizes must agree. (The debugger overlay shares the WGSL struct through
-    /// `shadertoy_uniforms_wgsl!`, so this covers it too.)
-    #[test]
-    fn uniform_layout_matches_rust() {
-        use bevy::math::Vec4;
-        use bevy::render::render_resource::ShaderType;
-
-        use crate::render::ShaderToyUniform;
-
-        // Every 4-byte slot gets a distinct value, so the encoded bytes tell
-        // which Rust field landed where.
-        let v = |a: f32| Vec4::new(a, a + 1.0, a + 2.0, a + 3.0);
-        let rust = ShaderToyUniform {
-            time: 1.0,
-            time_delta: 2.0,
-            frame: 3,
-            _pad: 4.0,
-            resolution: v(5.0),
-            mouse: v(9.0),
-            date: v(13.0),
-            sample_rate: 17.0,
-            frame_rate: 18.0,
-            overlay_top: 19.0,
-            overlay_bottom: 20.0,
-            channel_time: v(21.0),
-            channel_resolution: [v(25.0), v(29.0), v(33.0), v(37.0)],
-            tweaks: std::array::from_fn(|i| v(41.0 + 4.0 * i as f32)),
-        };
-        let bytes = crate::render::uniform_bytes(&rust);
-        assert_eq!(bytes.len() as u64, ShaderToyUniform::min_size().get());
-        let word = |offset: u32| {
-            let o = offset as usize;
-            u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
-        };
-        // WGSL member name -> the first word its Rust namesake encodes.
-        let expected = [
-            ("i_time", 1.0f32.to_bits()),
-            ("i_time_delta", 2.0f32.to_bits()),
-            ("i_frame", 3),
-            ("_pad", 4.0f32.to_bits()),
-            ("i_resolution", 5.0f32.to_bits()),
-            ("i_mouse", 9.0f32.to_bits()),
-            ("i_date", 13.0f32.to_bits()),
-            ("i_sample_rate", 17.0f32.to_bits()),
-            ("i_frame_rate", 18.0f32.to_bits()),
-            ("_overlay_top", 19.0f32.to_bits()),
-            ("_overlay_bottom", 20.0f32.to_bits()),
-            ("i_channel_time", 21.0f32.to_bits()),
-            ("i_channel_resolution", 25.0f32.to_bits()),
-            ("i_tweaks", 41.0f32.to_bits()),
-        ];
-
-        let module =
-            naga::front::wgsl::parse_str(SHADERTOY_MODULE).expect("shadertoy module parses");
-        let (handle, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("ShaderToyUniforms"))
-            .expect("ShaderToyUniforms present");
-        let naga::TypeInner::Struct { members, .. } = &ty.inner else {
-            panic!("ShaderToyUniforms is a struct");
-        };
-        let names: Vec<_> = members.iter().filter_map(|m| m.name.as_deref()).collect();
-        let expected_names: Vec<_> = expected.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, expected_names);
-        for (member, (name, first_word)) in members.iter().zip(expected) {
-            assert_eq!(
-                word(member.offset),
-                first_word,
-                "{name} at offset {}",
-                member.offset
-            );
-        }
-        let mut layouter = naga::proc::Layouter::default();
-        layouter.update(module.to_ctx()).unwrap();
-        assert_eq!(u64::from(layouter[handle].size), bytes.len() as u64);
     }
 
     /// Resources the pipeline does not provide are a compile error, not a

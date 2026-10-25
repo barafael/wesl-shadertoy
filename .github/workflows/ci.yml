@@ -41,8 +41,10 @@ jobs:
           restore-keys: ${{ runner.os }}-check-
 
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # backend-diff renders only where two GPU adapters exist (it says so
+      # and skips otherwise); its naga translation checks always run.
+      - run: cargo test --workspace
 
   # The wasm build GitHub Pages serves.
   build:
