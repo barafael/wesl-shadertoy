@@ -1,4 +1,5 @@
-//! Live thumbnails: the example browser's cards and Evolve mode's variants.
+//! Live thumbnails: the example browser's cards, Evolve mode's variants and
+//! the Graph window's per-`let` thumbnails ([`crate::graph`]).
 //!
 //! The main world ([`crate::browser`]) compiles each example on first sight
 //! into a shader asset of its own and, every frame, lists the cards to draw
@@ -48,6 +49,8 @@ pub enum PreviewKey {
     Example(usize),
     /// An Evolve grid cell, row by row.
     Evolve(usize),
+    /// A Graph window thumbnail slot ([`crate::graph`]).
+    Graph(usize),
 }
 
 /// One thumbnail to draw this frame.

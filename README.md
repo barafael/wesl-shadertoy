@@ -20,6 +20,8 @@ Runs natively and in the browser as WASM.
 | Browse LYGIA | `LYGIA` window: search the ~380 bundled modules by path, function name or description, filter by directory; each entry shows the module's doc text and its WGSL declarations, an **import** button per declaration adds the `import lygia::…;` line to your code, **source** opens the module read-only |
 | Feature flags | `Flags` window: a checkbox per WESL `@if` flag your code and its LYGIA imports test, a value per `constants::` setting they read; changes recompile (see [Feature flags and constants](#feature-flags-and-constants)) |
 | Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Flags`, `LYGIA` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
+| Dataflow graph | `Graph` window (or `--graph` natively): the naga IR of `main_image` (or any other function of yours, buffer passes included) as a left-to-right node graph — `named lets` shows only `let`s, `var`s and returns, each with the formula it computes; `all expressions` one node per operation. Drag to pan, scroll to zoom, hover for the full formula. The `let`s of `main_image` carry live thumbnails of their value (scalars: orange positive, blue negative) |
+| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Graph` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
@@ -327,6 +329,10 @@ src/
     previews.rs               live thumbnails (the example browser's and
                               Evolve's variants): each job's buffer and
                               image passes into an image of its own
+
+    previews.rs               live thumbnails (example browser, Graph
+                              window): each shader's buffer and image passes
+                              into a small image of its own
     blur.rs                   frosted-glass backdrop: the finished frame,
                               downsampled 4x and Gaussian-blurred into an
                               image egui paints under windows and panels
@@ -346,6 +352,14 @@ src/
                 thumbnails to draw each frame
   evolve.rs     Evolve mode: mutating constants, the lineage, the 3×3 grid of
                 variants drawn as live thumbnails
+
+  graph/        the Graph window
+    mod.rs        state, canvas (pan/zoom/hover), per-`let` thumbnail
+                  variants drawn through render/previews.rs
+    extract.rs    naga IR -> nodes and edges, formulas rebuilt from the IR,
+                  WESL-mangled names mapped back
+    layout.rs     layered left-to-right layout: cycle breaking, longest-path
+                  columns, dummy nodes, barycenter crossing reduction
   analyzer/     wgsl-analyzer LSP client (live diagnostics)
     mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
     native.rs     the wgsl-analyzer executable over stdio
@@ -400,6 +414,8 @@ cargo test             # compile pipeline, examples, highlighter, editor
 cargo run -- --render Plasma out.png [--time 3] [--debugger] [--heat [--heat-max 256]]  # headless PNG
 cargo run -- --example Fluid --examples  # start on an example, browser open
 cargo run -- --example "UI Melt" --ui-texture  # start with the shader eating the UI
+
+cargo run -- --example Plasma --graph    # start with the Graph window open
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 cargo test -p backend-diff                # every example on Vulkan vs GL + naga writers
 cargo run -p backend-diff -- --fuzz 200   # the same as a table, plus fuzz shaders

@@ -15,6 +15,7 @@ mod debugger;
 mod editor;
 mod evolve;
 mod flags;
+mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod heatmap;
@@ -98,6 +99,7 @@ fn main() {
         .init_resource::<heatmap::Heat>()
         .init_resource::<library::Library>()
         .init_resource::<flags::FlagsPanel>()
+        .init_resource::<graph::GraphView>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .add_plugins(ui_texture::UiTexturePlugin)
@@ -113,6 +115,7 @@ fn main() {
                 autosave,
                 browser::update_previews,
                 evolve::update_previews.after(browser::update_previews),
+                graph::update_thumbnails.after(browser::update_previews),
             ),
         )
         .add_systems(EguiPrimaryContextPass, ui)
@@ -239,6 +242,7 @@ struct UiWindows {
     lygia: bool,
     /// WESL feature flags and `constants::` values ([`flags`]).
     flags: bool,
+    graph: bool,
     settings: bool,
     about: bool,
     errors_expanded: bool,
@@ -254,6 +258,7 @@ impl Default for UiWindows {
             constants: false,
             lygia: false,
             flags: false,
+            graph: false,
             settings: false,
             about: false,
             errors_expanded: true,
@@ -334,6 +339,7 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     app.state.debugger = cli_flag("--debugger");
     app.wins.examples = cli_flag("--examples");
     app.heat.on = cli_flag("--heat");
+    app.wins.graph = cli_flag("--graph");
     if let Some(text) = cli_shader() {
         app.doc.text = text;
     } else {
@@ -679,6 +685,7 @@ struct UiParams<'w, 's> {
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     ui_texture: ResMut<'w, ui_texture::UiTexture>,
     heat: ResMut<'w, heatmap::Heat>,
+    graph: ResMut<'w, graph::GraphView>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
 }
@@ -819,6 +826,8 @@ fn ui(mut p: UiParams) {
                 .on_hover_text("WESL feature flags and constants of the shader and its imports");
             ui.toggle_value(&mut p.wins.lygia, "LYGIA")
                 .on_hover_text("Browse the bundled LYGIA modules and import from them");
+            ui.toggle_value(&mut p.wins.graph, "Graph")
+                .on_hover_text("The shader's dataflow as a node graph");
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui_texture::toolbar_toggle(ui, &mut p.ui_texture, &p.current.wgsl);
@@ -950,6 +959,23 @@ fn ui(mut p: UiParams) {
                 .default_size([560.0, 520.0])
                 .open(&mut p.wins.lygia),
             |ui| library::show(ui, &mut p.library, &mut p.doc.text),
+        );
+    }
+
+    // --- graph window ---------------------------------------------------------
+    if p.wins.graph {
+        show_window(
+            ctx,
+            glass,
+            "graph_window",
+            egui::Window::new("Graph")
+                .default_pos([680.0, 60.0])
+                .default_size([760.0, 520.0])
+                .open(&mut p.wins.graph),
+            |ui| {
+                let (wgsl, generation) = (&p.current.wgsl, p.current.generation);
+                graph::show(ui, &mut p.graph, wgsl, generation, &p.preview_feedback);
+            },
         );
     }
 
@@ -1501,8 +1527,9 @@ fn cli_example() -> Option<&'static examples::Example> {
 
 /// Native-only: whether `flag` was passed. `--debugger` starts with the
 /// in-shader debugger overlay on (same as the toolbar bug icon),
-/// `--examples` with the Examples window open and `--heat` in heat mode
-/// (the flame icon), so scripted live tests can show them.
+/// `--examples` with the Examples window open, `--graph` with the Graph
+/// window open and `--heat` in heat mode (the flame icon), so scripted live
+/// tests can show them.
 fn cli_flag(flag: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
