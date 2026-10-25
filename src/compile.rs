@@ -158,6 +158,16 @@ pub(crate) fn lygia_files() -> Vec<(String, &'static str)> {
     files
 }
 
+/// The source of the bundled LYGIA module at `path` (`::`-separated below
+/// the package root, e.g. `generative::snoise`).
+pub(crate) fn lygia_source(path: &str) -> Option<&'static str> {
+    let mut module = lygia::LYGIA.root;
+    for name in path.split("::") {
+        module = module.submodules.iter().find(|m| m.name == name).copied()?;
+    }
+    (!module.source.is_empty()).then_some(module.source)
+}
+
 /// Everything a compile can import: the app's in-memory `package::` modules
 /// (`main`, `shadertoy`, `user`) and the external packages, i.e. `lygia::`.
 struct Modules<'a> {

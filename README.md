@@ -16,7 +16,8 @@ Runs natively and in the browser as WASM.
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
 | Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
-| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
+| Browse LYGIA | `LYGIA` window: search the ~380 bundled modules by path, function name or description, filter by directory; each entry shows the module's doc text and its WGSL declarations, an **import** button per declaration adds the `import lygia::…;` line to your code, **source** opens the module read-only |
+| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `LYGIA` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
@@ -138,8 +139,18 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 ```
 
 Function names carry their overload as a suffix (`snoise2`, `snoise3`, …);
-browse the modules in [`vendor/lygia`](vendor/lygia) or on
-[lygia.xyz](https://lygia.xyz). LYGIA's 2D shapes are centered on (0.5, 0.5),
+browse the modules in the **LYGIA** window, in [`vendor/lygia`](vendor/lygia)
+or on [lygia.xyz](https://lygia.xyz). The window is built at compile time
+from each module's doc block (description, contributors, `use:` lines,
+license, notes on its flags) plus the declarations the file actually makes:
+the `use:` lines are often GLSL-flavoured and out of date, so the WGSL
+signatures are what it lists. Its **import** button adds
+`import lygia::path::to::module::name;` after your last import (or extends a
+one-line import of the same module, `import lygia::m::{a, b};`), and does
+nothing if the name is imported already. It edits the document in place,
+like the Constants window's write-back, so autosave picks it up.
+
+LYGIA's 2D shapes are centered on (0.5, 0.5),
 and a few (like `heartSDF`) assume y points down, unlike `frag_coord`. Some
 tonemappers (`tonemapFilmic3`, `tonemapUnreal3`) bake in gamma 2.2, which the
 sRGB output then applies a second time. Its `lighting::raymarch` helpers are
@@ -196,6 +207,10 @@ src/
                 the bundled LYGIA as the `lygia` package
   tweak.rs      tweakable constants: find literal consts, rewrite them into
                 uniform-fed `var<private>`s, write tweaked values back
+  library.rs    the LYGIA window: the module index build.rs generates,
+                search, and the import button's edit
+  wesl_scan.rs  lexical scans of WESL text (import trees, `@if` flags,
+                `constants::` names), shared with build.rs
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
   headless.rs   `--render`: windowless wgpu renderer writing a PNG (native)
@@ -231,6 +246,7 @@ examples/       one .wesl file per example; the leading comment block names
                 and credits it (see src/examples.rs for the format)
 vendor/lygia/   the WESL modules of LYGIA at a pinned commit, refreshed by
                 vendor/update-lygia.sh; build.rs embeds them as a package
+                and indexes their doc blocks and declarations
 web/
   analyzer.js               JS side of the web transport
   fetch-wgsl-analyzer.sh    fetches the pinned wgsl-analyzer-web build

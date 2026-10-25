@@ -18,10 +18,12 @@ mod examples;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod highlight;
+mod library;
 mod persist;
 mod render;
 mod theme;
 mod tweak;
+mod wesl_scan;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,6 +89,7 @@ fn main() {
         .init_resource::<editor::HighlightCache>()
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
+        .init_resource::<library::Library>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
@@ -221,6 +224,8 @@ struct UiWindows {
     editor: bool,
     wgsl: bool,
     constants: bool,
+    /// The LYGIA module index ([`library`]).
+    lygia: bool,
     settings: bool,
     about: bool,
     errors_expanded: bool,
@@ -234,6 +239,7 @@ impl Default for UiWindows {
             editor: true,
             wgsl: false,
             constants: false,
+            lygia: false,
             settings: false,
             about: false,
             errors_expanded: true,
@@ -650,6 +656,7 @@ struct UiParams<'w, 's> {
     blur: ResMut<'w, render::blur::Blur>,
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
+    library: ResMut<'w, library::Library>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
@@ -778,6 +785,8 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
             ui.toggle_value(&mut p.wins.constants, "Constants")
                 .on_hover_text("Tweak the shader's constants live");
+            ui.toggle_value(&mut p.wins.lygia, "LYGIA")
+                .on_hover_text("Browse the bundled LYGIA modules and import from them");
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
@@ -862,6 +871,20 @@ fn ui(mut p: UiParams) {
             }
         }
         tweaks.dirty = 0;
+    }
+
+    // --- LYGIA window ---------------------------------------------------------
+    if p.wins.lygia {
+        show_window(
+            ctx,
+            glass,
+            "lygia_window",
+            egui::Window::new("LYGIA")
+                .default_pos([680.0, 60.0])
+                .default_size([560.0, 520.0])
+                .open(&mut p.wins.lygia),
+            |ui| library::show(ui, &mut p.library, &mut p.doc.text),
+        );
     }
 
     // --- examples window (after the others: on top when they open together) -----------------------------------------------------
