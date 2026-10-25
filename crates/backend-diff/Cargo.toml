@@ -1,0 +1,27 @@
+[package]
+name = "backend-diff"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Renders wesl-shadertoy shaders through every wgpu backend on the machine and diffs the pixels, with naga translation checks and a small shader fuzzer."
+publish = false
+
+[dependencies]
+# The app's library half: the WESL compiler and the bundled examples, so the
+# shaders under test are composed exactly as the app composes them.
+wesl-shadertoy = { path = "../.." }
+# Same majors as the app (Bevy 0.20's renderer). Backends are picked per
+# adapter at run time; the default features cover Vulkan and GL on Linux.
+wgpu = "30"
+# The translation check writes every backend's output, so it needs the
+# writers wgpu only enables per platform. Test crate only: the app's naga
+# keeps just `wgsl-in` (features unify only when both are built together).
+naga = { version = "30", features = [
+    "wgsl-in",
+    "glsl-out",
+    "msl-out",
+    "hlsl-out",
+    "spv-out",
+] }
+pollster = "0.4"
+png = "0.17"

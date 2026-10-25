@@ -296,6 +296,8 @@ when compiling.
 ```
 src/
   main.rs       app wiring, resources, per-frame uniforms, egui UI
+  lib.rs        the Bevy-free modules below (compile, tweak, examples) as a
+                library, for tools such as crates/backend-diff
   compile.rs    WESL link + naga validate (the shader contract above), with
                 the bundled LYGIA as the `lygia` package
   tweak.rs      tweakable constants: find literal consts, rewrite them into
@@ -353,6 +355,15 @@ examples/       one .wesl file per example; the leading comment block names
 vendor/lygia/   the WESL modules of LYGIA at a pinned commit, refreshed by
                 vendor/update-lygia.sh; build.rs embeds them as a package
                 and indexes their doc blocks and declarations
+
+crates/
+  backend-diff/ test crate (not part of the app or its wasm build):
+                renders shaders on every wgpu adapter and diffs the pixels
+    gpu.rs        offscreen buffer + image passes on one adapter
+    image.rs      per-pixel diff, tolerances, PNG output
+    translate.rs  naga's GLSL ES 3.00 / MSL / HLSL / SPIR-V writers, checked
+                  by glslangValidator / spirv-val when installed
+    fuzz.rs       seeded generator of well-typed main_image shaders
 web/
   analyzer.js               JS side of the web transport
   fetch-wgsl-analyzer.sh    fetches the pinned wgsl-analyzer-web build
@@ -390,6 +401,8 @@ cargo run -- --render Plasma out.png [--time 3] [--debugger] [--heat [--heat-max
 cargo run -- --example Fluid --examples  # start on an example, browser open
 cargo run -- --example "UI Melt" --ui-texture  # start with the shader eating the UI
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
+cargo test -p backend-diff                # every example on Vulkan vs GL + naga writers
+cargo run -p backend-diff -- --fuzz 200   # the same as a table, plus fuzz shaders
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
 
@@ -398,9 +411,23 @@ Release wasm is built with `trunk build --release` (trunk ≥ 0.21 for the
 `data-wasm-opt-params` flag — Rust emits bulk-memory ops that trunk's bundled
 wasm-opt needs told about).
 
+The repository is a Cargo workspace: the app is the root package, and
+`crates/backend-diff` is a test harness for naga and wesl. It composes each
+shader exactly as the app does, renders it (buffer passes included) on every
+wgpu adapter the machine offers — Vulkan, and GL through EGL, which runs
+naga's GLSL ES output like WebGL2 does — and diffs each render against the
+Vulkan one in the sRGB bytes the screen shows: a pixel differs when a channel
+is off by more than 8/255, and a case differs when over 1% of its pixels do.
+Differing cases leave both renders, an amplified diff and the shader in
+`target/backend-diff/`. The rendering tests skip with a note when there are
+not two adapters; the naga translation tests need no GPU. Elevated, Fire,
+Seascape and Voronoi are expected to differ: their `fract(sin(dot(p, K)) *
+43758.5453)` hash turns a last-bit difference in `dot` (which drivers may
+fuse into an FMA in either operand order) into a different random value.
+
 CI and the GitHub Pages deployment live in `.github/workflows/ci.yml`
-(fmt, clippy and tests on the native build; the Pages build uses trunk
-v0.22.0 with `--public-url /<repo>/`).
+(fmt, clippy and tests on the native build of the whole workspace; the Pages
+build uses trunk v0.22.0 with `--public-url /<repo>/`).
 
 ## License
 

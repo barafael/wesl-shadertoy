@@ -186,7 +186,7 @@ pub(crate) struct Token {
 }
 
 /// Tokens of `src`, plus the line comments (span of the text after `//`).
-/// Shared with [`crate::heatmap`], which rewrites loops the same way.
+/// Shared with [`crate::heat`], which rewrites loops the same way.
 pub(crate) fn lex(src: &str) -> (Vec<Token>, Vec<Range<usize>>) {
     let b = src.as_bytes();
     let (mut tokens, mut comments) = (Vec::new(), Vec::new());

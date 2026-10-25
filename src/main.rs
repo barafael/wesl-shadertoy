@@ -11,11 +11,9 @@
 
 mod analyzer;
 mod browser;
-mod compile;
 mod debugger;
 mod editor;
 mod evolve;
-mod examples;
 mod flags;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
@@ -25,9 +23,12 @@ mod library;
 mod persist;
 mod render;
 mod theme;
-mod tweak;
 mod ui_texture;
 mod wesl_scan;
+
+// The compiler, the tweak rewrite and the examples live in the library
+// (`src/lib.rs`); re-exported here so the app keeps its `crate::` paths.
+use wesl_shadertoy::{compile, examples, tweak};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
