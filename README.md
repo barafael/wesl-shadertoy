@@ -17,6 +17,7 @@ Runs natively and in the browser as WASM.
 | Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
 | Evolve | toolbar `Evolve`: the canvas becomes a 3×3 grid, the current constants in the middle and eight mutations around them, all running live (hover one to drive its `iMouse`). Click a variant to breed from it (the centre rolls eight new ones), **Ctrl/Cmd+Z** or the undo button walks back the lineage, the slider sets how far mutations stray. **Keep** writes the centre's constants into the code; **Discard** or **Escape** leaves it unchanged |
+| Drag the picture *(experimental, native only)* | toolbar hand, or **Alt+drag** on the canvas: grab a spot of the image and drag it; the float constant that moves that spot best along the drag follows the pointer (with time frozen), and the code changes on release (see [Dragging the picture](#dragging-the-picture-experimental)) |
 | Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
@@ -79,6 +80,30 @@ window lists them. Up to 32 per shader.
 some of them by a random step scaled to their range. Annotated ranges are never
 left, colors stay within 0..1, unannotated numbers keep their sign, and integer
 constants mutate rarely, since they tend to change a shader's structure.
+
+#### Dragging the picture (experimental)
+
+A prototype, native builds only (the web build shows the toggle disabled).
+On a press in Drag mode a background thread renders the shader at 192 px
+wide at the frozen time, once as is and twice per float constant (or
+vector component; integers and colors are left out) nudged by ±1.5% of its
+range. Lucas–Kanade optical flow on a patch around the grab point (with a
+brightness gain and offset, so color changes don't pass for motion) gives
+how far the spot moves per constant: a 2×N Jacobian. Once the drag has a
+direction, the constant that best moves the spot along it is picked and
+steered so the spot follows the pointer (or, with **Shift** held, a damped
+least-squares blend of all of them). Whenever the thread is free it finds
+the spot again (block matching against the press-time frame) and
+re-estimates the Jacobian there, so the model's errors don't pile up.
+Ranges are respected like in Evolve. Works well where a shape's edge moves
+with a constant (Metaballs, Sunset's horizon, Lygia Shapes in the direction
+its spin allows); smooth, non-rigid patterns like Plasma are hit and miss.
+`--render-drag` runs the same estimate and solve headlessly and checks, by
+block matching on full-size renders, that the spot really moved:
+
+```sh
+cargo run -- --render-drag Metaballs 130 80 -20 0 [--time 3] [--steps 4] [--mix] [--out shot]
+```
 
 Available uniforms (import from `package::shadertoy`):
 
@@ -206,6 +231,8 @@ src/
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
   headless.rs   `--render`: windowless wgpu renderer writing a PNG (native)
+  drag.rs       drag the picture (experimental, native): finite-difference
+                renders, patch optical flow, Jacobian solve, `--render-drag`
   render/
     mod.rs                    ShaderToyUniform/Fragment components + plugin
     active.rs                 which shader is on screen: switches once the
@@ -270,6 +297,8 @@ integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 cargo run              # native (dynamic Bevy, fast rebuilds)
 cargo test             # compile pipeline, examples, highlighter, editor
 cargo run -- --render Plasma out.png [--time 3] [--debugger]  # headless PNG
+cargo run -- --render-drag Metaballs 130 80 -20 0  # drag-the-picture check
+cargo run -- --example Metaballs --drag  # start in Drag mode
 cargo run -- --example Fluid --examples  # start on an example, browser open
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 trunk serve            # browser build on http://127.0.0.1:8080

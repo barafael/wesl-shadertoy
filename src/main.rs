@@ -13,6 +13,7 @@ mod analyzer;
 mod browser;
 mod compile;
 mod debugger;
+mod drag;
 mod editor;
 mod evolve;
 mod examples;
@@ -57,6 +58,10 @@ fn main() {
             headless::run_render_cli(&args);
             return;
         }
+        if args.iter().any(|a| a == "--render-drag") {
+            drag::run_cli(&args);
+            return;
+        }
     }
     App::new()
         .add_plugins(
@@ -89,6 +94,7 @@ fn main() {
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
         .init_resource::<evolve::Evolve>()
+        .init_resource::<drag::DragPicture>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
@@ -104,7 +110,7 @@ fn main() {
                 evolve::update_previews.after(browser::update_previews),
             ),
         )
-        .add_systems(EguiPrimaryContextPass, ui)
+        .add_systems(EguiPrimaryContextPass, (ui, drag::update.after(ui)))
         .run();
 }
 
@@ -402,6 +408,7 @@ struct UniformParams<'w, 's> {
     playback: ResMut<'w, Playback>,
     debugger_on: ResMut<'w, debugger::DebuggerOn>,
     tweaks: Res<'w, Tweaks>,
+    drag: Res<'w, drag::DragPicture>,
 }
 
 /// Advance the shadertoy clock, count frames, track iMouse and viewport size.
@@ -447,7 +454,9 @@ fn update_uniforms(mut p: UniformParams) {
             let px = pos * ppp;
             Vec2::new(px.x, resolution.y - px.y)
         });
-        track_mouse(&mut p.state, pos, pressed && on_canvas, held);
+        // Drag mode (or Alt) takes canvas presses for itself.
+        let press = pressed && on_canvas && !p.drag.claims_press(ctx);
+        track_mouse(&mut p.state, pos, press, held);
 
         // Canvas rows under the toolbar and status bar, for the debugger
         // overlay's layout.
@@ -654,6 +663,7 @@ struct UiParams<'w, 's> {
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
     evolve: ResMut<'w, evolve::Evolve>,
+    drag: ResMut<'w, drag::DragPicture>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
@@ -785,6 +795,7 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.evolve.on, "Evolve").on_hover_text(
                 "Breed the shader's constants: pick from nine variants (Escape leaves)",
             );
+            drag::toggle(ui, &mut p.drag);
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
