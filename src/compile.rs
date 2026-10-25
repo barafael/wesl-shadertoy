@@ -34,9 +34,10 @@ use std::str::FromStr;
 use wesl::error::ResolveError;
 use wesl::mangler::{EscapeMangler, Mangler};
 use wesl::resolver::{PackageResolver, VirtualResolver};
-use wesl::syntax::ModulePath;
+use wesl::syntax::{ModulePath, PathOrigin};
 use wesl::{CompileOptions, Compiler, Resolver};
 
+use crate::flags::Pragmas;
 use crate::heatmap;
 use crate::tweak::{self, Constant, Hint, MAX_TWEAKS};
 
@@ -175,18 +176,33 @@ pub(crate) fn lygia_files() -> Vec<(String, &'static str)> {
     files
 }
 
+/// The source of the bundled LYGIA module at `path` (`::`-separated below
+/// the package root, e.g. `generative::snoise`).
+pub(crate) fn lygia_source(path: &str) -> Option<&'static str> {
+    let mut module = lygia::LYGIA.root;
+    for name in path.split("::") {
+        module = module.submodules.iter().find(|m| m.name == name).copied()?;
+    }
+    (!module.source.is_empty()).then_some(module.source)
+}
+
 /// Everything a compile can import: the app's in-memory `package::` modules
-/// (`main`, `shadertoy`, `user`) and the external packages, i.e. `lygia::`.
+/// (`main`, `shadertoy`, `user`), the external packages, i.e. `lygia::`,
+/// and WESL's virtual `constants::` module.
 struct Modules<'a> {
     local: VirtualResolver<'a>,
     packages: PackageResolver,
+    /// The `constants` module's source (see [`Pragmas`]).
+    constants: String,
 }
 
 impl<'a> Modules<'a> {
-    /// `shadertoy` plus `user` (and whatever `extra` modules) under `package::`.
+    /// `shadertoy` plus `user` (and whatever `extra` modules) under
+    /// `package::`, and the constants `pragmas` set.
     fn new(
         user: Cow<'a, str>,
         extra: impl IntoIterator<Item = (&'static str, Cow<'a, str>)>,
+        pragmas: &Pragmas,
     ) -> Self {
         let mut local = VirtualResolver::new();
         let modules = [("shadertoy", SHADERTOY_MODULE.into()), ("user", user)];
@@ -195,13 +211,28 @@ impl<'a> Modules<'a> {
         }
         let mut packages = PackageResolver::new();
         packages.add_package(&lygia::LYGIA);
-        Self { local, packages }
+        let constants = pragmas.constants_module();
+        Self {
+            local,
+            packages,
+            constants,
+        }
     }
+}
+
+/// Whether `path` is in the `constants` module. Imported from inside a
+/// package it may arrive as `lygia/constants`; every package shares the
+/// one module, as with wesl's own `StandardResolver`.
+fn is_constants(path: &ModulePath) -> bool {
+    matches!(&path.origin, PathOrigin::Package(name)
+        if name == "constants" || name.ends_with("/constants"))
 }
 
 impl Resolver for Modules<'_> {
     fn resolve_source<'b>(&'b self, path: &ModulePath) -> Result<Cow<'b, str>, ResolveError> {
-        if path.origin.is_package() {
+        if is_constants(path) {
+            Ok(Cow::Borrowed(self.constants.as_str()))
+        } else if path.origin.is_package() {
             self.packages.resolve_source(path)
         } else {
             self.local.resolve_source(path)
@@ -209,7 +240,12 @@ impl Resolver for Modules<'_> {
     }
 
     fn canonical_path(&self, path: &ModulePath) -> ModulePath {
-        if path.origin.is_package() {
+        if is_constants(path) {
+            ModulePath::new(
+                PathOrigin::Package("constants".to_string()),
+                path.components.clone(),
+            )
+        } else if path.origin.is_package() {
             self.packages.canonical_path(path)
         } else {
             path.clone()
@@ -219,10 +255,12 @@ impl Resolver for Modules<'_> {
 
 /// WESL's defaults, minus visibility checks: LYGIA marks nothing `public`
 /// (its own tooling does not enforce visibility), and with them on, wesl
-/// refuses every import from it.
-fn compile_options() -> CompileOptions {
+/// refuses every import from it. The feature flags are the ones `pragmas`
+/// turn on.
+fn compile_options(pragmas: &Pragmas) -> CompileOptions {
     CompileOptions {
         visibility: false,
+        features: pragmas.features(),
         ..Default::default()
     }
 }
@@ -431,13 +469,15 @@ fn compile_variant(user_source: &str, heat: bool) -> Result<CompiledShader, Comp
 
 /// Compile the user source with `tweaks` made live (see [`tweak::instrument`])
 /// and, with `heat` on, its loops counted (see [`heatmap::instrument`]) into
-/// a validated WGSL module.
+/// a validated WGSL module, under the flags and constants its pragma lines
+/// set ([`crate::flags`]).
 fn compile_instrumented(
     user_source: &str,
     buffers: u8,
     tweaks: &[Constant],
     heat: bool,
 ) -> Result<String, CompileError> {
+    let pragmas = Pragmas::parse(user_source);
     let mut user = tweak::instrument(user_source, tweaks);
     if heat {
         user = heatmap::instrument(&user);
@@ -445,8 +485,9 @@ fn compile_instrumented(
     let resolver = Modules::new(
         user.into(),
         [("main", main_module_for(buffers, heat).into())],
+        &pragmas,
     );
-    let compiler = Compiler::new_with_resolver(compile_options(), resolver);
+    let compiler = Compiler::new_with_resolver(compile_options(&pragmas), resolver);
     let result = compiler
         .compile_module(&package_path("main"))
         .map_err(|e| CompileError::Wesl(e.to_string()))?;
@@ -507,7 +548,8 @@ fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
 /// Compile `package::user` on its own and report which buffer passes it
 /// defines, by looking for `fn buffer_a`..`buffer_d` in the output.
 fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
-    let resolver = Modules::new(user_source.into(), []);
+    let pragmas = Pragmas::parse(user_source);
+    let resolver = Modules::new(user_source.into(), [], &pragmas);
 
     // `keep_main` disables stripping *within* package::user, so unreferenced
     // `buffer_*` functions survive to be detected (the real compile in
@@ -515,7 +557,7 @@ fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
     // from the generated `package::main` entry points there).
     let options = CompileOptions {
         keep_main: true,
-        ..compile_options()
+        ..compile_options(&pragmas)
     };
     let compiler = Compiler::new_with_resolver(options, resolver);
     let result = compiler
@@ -834,6 +876,69 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
                        fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(nope()); }\n";
         let msg = compile_user_shader(missing).unwrap_err().to_string();
         assert!(msg.contains("nope"), "{msg}");
+    }
+
+    /// A `// wesl-flags:` line switches a LYGIA module's `@if` branch, and
+    /// user code can test flags of its own.
+    #[test]
+    fn flags_select_lygia_code() {
+        let src = r#"
+import lygia::color::space::rgb2yuv::rgb2yuv;
+
+@if(BRIGHT)
+const GAIN: f32 = 2.5; // tweak: off
+@else
+const GAIN: f32 = 1.5; // tweak: off
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(rgb2yuv(vec3<f32>(frag_coord.x * 0.001)) * GAIN, 1.0);
+}
+"#;
+        let hdtv = compile_user_shader(src)
+            .expect("compiles without flags")
+            .wgsl;
+        let flagged = format!("// wesl-flags: YUV_SDTV, BRIGHT\n{src}");
+        let sdtv = compile_user_shader(&flagged)
+            .expect("compiles with flags")
+            .wgsl;
+        assert_ne!(hdtv, sdtv);
+        // BT.709 luma weights without the flag, BT.601 with it.
+        assert!(hdtv.contains("0.2126") && !hdtv.contains("0.299"), "{hdtv}");
+        assert!(sdtv.contains("0.299") && !sdtv.contains("0.2126"), "{sdtv}");
+        assert!(hdtv.contains("1.5") && !hdtv.contains("2.5"), "{hdtv}");
+        assert!(sdtv.contains("2.5") && !sdtv.contains("1.5"), "{sdtv}");
+    }
+
+    /// `// wesl-const:` feeds the `constants::` module, and turns on the
+    /// same-named flag that guards its import in LYGIA.
+    #[test]
+    fn constants_reach_lygia() {
+        let src = r#"
+import package::shadertoy::i_frame;
+import lygia::distort::marble::marbleBake1;
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(f32(marbleBake1(f32(i_frame()))));
+}
+"#;
+        let default = compile_user_shader(src).expect("compiles").wgsl;
+        assert!(default.contains("60.0"), "{default}");
+        let set = format!("// wesl-const: MARBLE_PERIOD = 90.0\n{src}");
+        let wgsl = compile_user_shader(&set)
+            .expect("compiles with the constant")
+            .wgsl;
+        assert!(wgsl.contains("90.0") && !wgsl.contains("60.0"), "{wgsl}");
+
+        // The user's own code can read constants too, of any WGSL type.
+        let own = "// wesl-const: TINT = vec3f(0.25, 0.5, 1.0)\n\
+                   import constants::TINT;\n\
+                   fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(TINT, 1.0); }\n";
+        let wgsl = compile_user_shader(own).expect("compiles").wgsl;
+        assert!(wgsl.contains("0.25"), "{wgsl}");
+        // Without a value the import fails, and says what is missing.
+        let missing = own.lines().skip(1).collect::<Vec<_>>().join("\n");
+        let msg = compile_user_shader(&missing).unwrap_err().to_string();
+        assert!(msg.contains("TINT"), "{msg}");
     }
 
     #[test]

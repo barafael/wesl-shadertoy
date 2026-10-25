@@ -16,15 +16,18 @@ mod debugger;
 mod editor;
 mod evolve;
 mod examples;
+mod flags;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod heatmap;
 mod highlight;
+mod library;
 mod persist;
 mod render;
 mod theme;
 mod tweak;
 mod ui_texture;
+mod wesl_scan;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -92,6 +95,8 @@ fn main() {
         .init_resource::<browser::Browser>()
         .init_resource::<evolve::Evolve>()
         .init_resource::<heatmap::Heat>()
+        .init_resource::<library::Library>()
+        .init_resource::<flags::FlagsPanel>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .add_plugins(ui_texture::UiTexturePlugin)
@@ -229,6 +234,10 @@ struct UiWindows {
     editor: bool,
     wgsl: bool,
     constants: bool,
+    /// The LYGIA module index ([`library`]).
+    lygia: bool,
+    /// WESL feature flags and `constants::` values ([`flags`]).
+    flags: bool,
     settings: bool,
     about: bool,
     errors_expanded: bool,
@@ -242,6 +251,8 @@ impl Default for UiWindows {
             editor: true,
             wgsl: false,
             constants: false,
+            lygia: false,
+            flags: false,
             settings: false,
             about: false,
             errors_expanded: true,
@@ -662,6 +673,8 @@ struct UiParams<'w, 's> {
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
     evolve: ResMut<'w, evolve::Evolve>,
+    library: ResMut<'w, library::Library>,
+    flag_panel: ResMut<'w, flags::FlagsPanel>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     ui_texture: ResMut<'w, ui_texture::UiTexture>,
     heat: ResMut<'w, heatmap::Heat>,
@@ -801,6 +814,10 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.evolve.on, "Evolve").on_hover_text(
                 "Breed the shader's constants: pick from nine variants (Escape leaves)",
             );
+            ui.toggle_value(&mut p.wins.flags, "Flags")
+                .on_hover_text("WESL feature flags and constants of the shader and its imports");
+            ui.toggle_value(&mut p.wins.lygia, "LYGIA")
+                .on_hover_text("Browse the bundled LYGIA modules and import from them");
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui_texture::toolbar_toggle(ui, &mut p.ui_texture, &p.current.wgsl);
@@ -902,6 +919,37 @@ fn ui(mut p: UiParams) {
             }
         }
         tweaks.dirty = 0;
+    }
+
+    // --- flags window ---------------------------------------------------------
+    if p.wins.flags {
+        let mut changed = false;
+        show_window(
+            ctx,
+            glass,
+            "flags_window",
+            egui::Window::new("Flags")
+                .default_pos([680.0, 380.0])
+                .default_size([420.0, 260.0])
+                .open(&mut p.wins.flags),
+            |ui| changed = flags::show(ui, &mut p.flag_panel, &mut p.doc.text),
+        );
+        // Flags change the code itself: recompile.
+        p.run.0 |= changed;
+    }
+
+    // --- LYGIA window ---------------------------------------------------------
+    if p.wins.lygia {
+        show_window(
+            ctx,
+            glass,
+            "lygia_window",
+            egui::Window::new("LYGIA")
+                .default_pos([680.0, 60.0])
+                .default_size([560.0, 520.0])
+                .open(&mut p.wins.lygia),
+            |ui| library::show(ui, &mut p.library, &mut p.doc.text),
+        );
     }
 
     // --- examples window (after the others: on top when they open together) -----------------------------------------------------

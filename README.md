@@ -17,7 +17,9 @@ Runs natively and in the browser as WASM.
 | Examples | `Examples` window — 41 examples (a seven-part tutorial, Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails, the tutorial and other beginner examples first; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
 | Evolve | toolbar `Evolve`: the canvas becomes a 3×3 grid, the current constants in the middle and eight mutations around them, all running live (hover one to drive its `iMouse`). Click a variant to breed from it (the centre rolls eight new ones), **Ctrl/Cmd+Z** or the undo button walks back the lineage, the slider sets how far mutations stray. **Keep** writes the centre's constants into the code; **Discard** or **Escape** leaves it unchanged |
-| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
+| Browse LYGIA | `LYGIA` window: search the ~380 bundled modules by path, function name or description, filter by directory; each entry shows the module's doc text and its WGSL declarations, an **import** button per declaration adds the `import lygia::…;` line to your code, **source** opens the module read-only |
+| Feature flags | `Flags` window: a checkbox per WESL `@if` flag your code and its LYGIA imports test, a value per `constants::` setting they read; changes recompile (see [Feature flags and constants](#feature-flags-and-constants)) |
+| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Flags`, `LYGIA` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
@@ -96,16 +98,6 @@ some of them by a random step scaled to their range. Annotated ranges are never
 left, colors stay within 0..1, unannotated numbers keep their sign, and integer
 constants mutate rarely, since they tend to change a shader's structure.
 
-### Cost heatmap
-
-The flame icon recompiles the shader with every `loop`, `for` and `while`
-body counting itself, and shows the count per pixel instead of the image.
-Raymarchers light up where they work hardest — silhouettes, grazing angles,
-fog — which is where a bounding volume, a lower step count or an earlier
-exit pays off. Helper functions count too, and nested loops multiply. Only
-the editor's own loops are counted (not LYGIA's), only the image pass is
-shown (buffer passes keep running as usual), and constants stay tweakable.
-
 Available uniforms (import from `package::shadertoy`):
 
 | Function | Shadertoy equivalent | Meaning |
@@ -125,6 +117,16 @@ Available uniforms (import from `package::shadertoy`):
 `frag_coord` is in pixels with the origin **bottom-left**, like shadertoy's
 `fragCoord` (and `i_mouse()`); the wrapper flips WGSL's top-left
 `@builtin(position)` for you.
+
+### Cost heatmap
+
+The flame icon recompiles the shader with every `loop`, `for` and `while`
+body counting itself, and shows the count per pixel instead of the image.
+Raymarchers light up where they work hardest — silhouettes, grazing angles,
+fog — which is where a bounding volume, a lower step count or an earlier
+exit pays off. Helper functions count too, and nested loops multiply. Only
+the editor's own loops are counted (not LYGIA's), only the image pass is
+shown (buffer passes keep running as usual), and constants stay tweakable.
 
 ### Buffers (multipass)
 
@@ -199,8 +201,18 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 ```
 
 Function names carry their overload as a suffix (`snoise2`, `snoise3`, …);
-browse the modules in [`vendor/lygia`](vendor/lygia) or on
-[lygia.xyz](https://lygia.xyz). LYGIA's 2D shapes are centered on (0.5, 0.5),
+browse the modules in the **LYGIA** window, in [`vendor/lygia`](vendor/lygia)
+or on [lygia.xyz](https://lygia.xyz). The window is built at compile time
+from each module's doc block (description, contributors, `use:` lines,
+license, notes on its flags) plus the declarations the file actually makes:
+the `use:` lines are often GLSL-flavoured and out of date, so the WGSL
+signatures are what it lists. Its **import** button adds
+`import lygia::path::to::module::name;` after your last import (or extends a
+one-line import of the same module, `import lygia::m::{a, b};`), and does
+nothing if the name is imported already. It edits the document in place,
+like the Constants window's write-back, so autosave picks it up.
+
+LYGIA's 2D shapes are centered on (0.5, 0.5),
 and a few (like `heartSDF`) assume y points down, unlike `frag_coord`. Some
 tonemappers (`tonemapFilmic3`, `tonemapUnreal3`) bake in gamma 2.2, which the
 sRGB output then applies a second time. Its `lighting::raymarch` helpers are
@@ -213,6 +225,36 @@ wgsl-analyzer still rejects `filter` (a WGSL reserved word) as a module name,
 which WESL allows, so it is shown `lygia::filtre::…` behind the scenes. LYGIA is licensed separately from this project, under the
 Prosperity Public License 3.0.0 or the Patron License: see
 [`vendor/lygia/VENDORED.md`](vendor/lygia/VENDORED.md).
+
+### Feature flags and constants
+
+WESL compiles code under `@if(FLAG)` only while `FLAG` is on, and reads
+settings from its virtual `constants::` module. Many LYGIA modules use them:
+`CENTER_2D` moves the center of the 2D SDFs, `YUV_SDTV` switches
+`rgb2yuv` from BT.709 to BT.601, `MIXOKLAB_SRGB` mixes in sRGB, and
+`distort::marble` reads its period from `constants::MARBLE_PERIOD`. The
+**Flags** window lists every flag and constant your code and the LYGIA
+modules it imports (directly or through other modules) test, with the
+modules and the doc notes behind each. Flags change which code exists, so
+unlike tweaks they recompile. They are kept in your code as comment lines,
+so saved and shared shaders compile the same way:
+
+```rust
+// wesl-flags: CENTER_2D, YUV_SDTV
+// wesl-const: CENTER_2D = vec2f(0.5, 0.25)
+// wesl-const: MARBLE_PERIOD = 90.0
+```
+
+A constant's value is any WGSL expression (`const NAME = value;` in the
+`constants` module), and setting it also turns on the flag of the same
+name: LYGIA guards `import constants::MARBLE_PERIOD;` with
+`@if(MARBLE_PERIOD)`. Your own code can test flags (`@if(BRIGHT)`) and
+import constants too. wgsl-analyzer knows nothing about these lines, and
+it treats every `@if` branch as present: flags inside LYGIA do not bother
+it (it only checks your code), but in your own code a declaration made once
+per branch (`@if(X) const K = 1.0; @else const K = 2.0;`) shows as a
+"duplicate identifier", and `import constants::…` as a missing package. The
+compile itself is right in both cases.
 
 One dialect gotcha when porting snippets: `mod` is a reserved word in WESL (it
 declares a module), so write the builtin out as `x - y * floor(x / y)` instead
@@ -260,6 +302,14 @@ src/
                 uniform-fed `var<private>`s, write tweaked values back
   heatmap.rs    cost heatmap: count loop iterations in a `var<private>`,
                 the heat entry point and palette, the legend
+
+  flags.rs      the Flags window: `// wesl-flags:` / `// wesl-const:` lines
+                -> WESL features and the `constants::` module, and which
+                flags a shader's (transitive) LYGIA imports test
+  library.rs    the LYGIA window: the module index build.rs generates,
+                search, and the import button's edit
+  wesl_scan.rs  lexical scans of WESL text (import trees, `@if` flags,
+                `constants::` names), shared with build.rs
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
   ui_texture.rs the UI texture mode's switch: toolbar toggle (only for
@@ -302,6 +352,7 @@ examples/       one .wesl file per example; the leading comment block names
                 and credits it (see src/examples.rs for the format)
 vendor/lygia/   the WESL modules of LYGIA at a pinned commit, refreshed by
                 vendor/update-lygia.sh; build.rs embeds them as a package
+                and indexes their doc blocks and declarations
 web/
   analyzer.js               JS side of the web transport
   fetch-wgsl-analyzer.sh    fetches the pinned wgsl-analyzer-web build
