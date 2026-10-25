@@ -174,19 +174,20 @@ fn float_literal(v: f32) -> String {
 // --- scanning ----------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Ident,
     Number,
     Punct(u8),
 }
 
-struct Token {
-    tok: Tok,
-    span: Range<usize>,
+pub(crate) struct Token {
+    pub(crate) tok: Tok,
+    pub(crate) span: Range<usize>,
 }
 
 /// Tokens of `src`, plus the line comments (span of the text after `//`).
-fn lex(src: &str) -> (Vec<Token>, Vec<Range<usize>>) {
+/// Shared with [`crate::heatmap`], which rewrites loops the same way.
+pub(crate) fn lex(src: &str) -> (Vec<Token>, Vec<Range<usize>>) {
     let b = src.as_bytes();
     let (mut tokens, mut comments) = (Vec::new(), Vec::new());
     let mut i = 0;

@@ -22,6 +22,7 @@ Runs natively and in the browser as WASM.
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
 | The shader eats the editor | toolbar droplet icon (enabled while the shader reads `i_ui`, e.g. the `UI Melt` example): the rendered UI goes into the shader as a texture and the shader's output is what you see, so it can ripple, smear or melt the editor you type into. Clicks and typing still land on the undistorted UI. **F2** always switches it off; it is never saved, and it pauses the frosted glass and the debugger overlay (see [The UI as a texture](#the-ui-as-a-texture)) |
+| Cost heatmap | toolbar flame icon (or `--heat` natively): the image becomes a thermal map of loop iterations per pixel, black (none) through red to pale yellow (the legend's max, 256 by default, dragged live in the canvas corner) — see [Cost heatmap](#cost-heatmap) |
 | Debugger overlay | toolbar bug icon (or `--debugger` natively): crosshair and click ring, RGBA probe boxes for the pixels under the cursor and the last click, a swatch of the clicked pixel's color, mouse position, resolution, fps |
 
 The document auto-saves to `localStorage` (browser builds) on every change —
@@ -94,6 +95,16 @@ window lists them. Up to 32 per shader.
 some of them by a random step scaled to their range. Annotated ranges are never
 left, colors stay within 0..1, unannotated numbers keep their sign, and integer
 constants mutate rarely, since they tend to change a shader's structure.
+
+### Cost heatmap
+
+The flame icon recompiles the shader with every `loop`, `for` and `while`
+body counting itself, and shows the count per pixel instead of the image.
+Raymarchers light up where they work hardest — silhouettes, grazing angles,
+fog — which is where a bounding volume, a lower step count or an earlier
+exit pays off. Helper functions count too, and nested loops multiply. Only
+the editor's own loops are counted (not LYGIA's), only the image pass is
+shown (buffer passes keep running as usual), and constants stay tweakable.
 
 Available uniforms (import from `package::shadertoy`):
 
@@ -247,6 +258,8 @@ src/
                 the bundled LYGIA as the `lygia` package
   tweak.rs      tweakable constants: find literal consts, rewrite them into
                 uniform-fed `var<private>`s, write tweaked values back
+  heatmap.rs    cost heatmap: count loop iterations in a `var<private>`,
+                the heat entry point and palette, the legend
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
   ui_texture.rs the UI texture mode's switch: toolbar toggle (only for
@@ -322,7 +335,7 @@ integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 ```sh
 cargo run              # native (dynamic Bevy, fast rebuilds)
 cargo test             # compile pipeline, examples, highlighter, editor
-cargo run -- --render Plasma out.png [--time 3] [--debugger]  # headless PNG
+cargo run -- --render Plasma out.png [--time 3] [--debugger] [--heat [--heat-max 256]]  # headless PNG
 cargo run -- --example Fluid --examples  # start on an example, browser open
 cargo run -- --example "UI Melt" --ui-texture  # start with the shader eating the UI
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server

@@ -18,6 +18,7 @@ mod evolve;
 mod examples;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
+mod heatmap;
 mod highlight;
 mod persist;
 mod render;
@@ -90,6 +91,7 @@ fn main() {
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
         .init_resource::<evolve::Evolve>()
+        .init_resource::<heatmap::Heat>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .add_plugins(ui_texture::UiTexturePlugin)
@@ -101,6 +103,7 @@ fn main() {
                 install_fonts,
                 (update_uniforms, compile_and_apply, poll_render_feedback).chain(),
                 run_analyzer,
+                heatmap::upload,
                 autosave,
                 browser::update_previews,
                 evolve::update_previews.after(browser::update_previews),
@@ -302,6 +305,7 @@ struct StartupParams<'w> {
     run: ResMut<'w, RunRequest>,
     state: ResMut<'w, ShaderToyState>,
     wins: ResMut<'w, UiWindows>,
+    heat: ResMut<'w, heatmap::Heat>,
 }
 
 fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: StartupParams) {
@@ -317,6 +321,7 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     // the fresh-start setting is on.
     app.state.debugger = cli_flag("--debugger");
     app.wins.examples = cli_flag("--examples");
+    app.heat.on = cli_flag("--heat");
     if let Some(text) = cli_shader() {
         app.doc.text = text;
     } else {
@@ -488,6 +493,7 @@ struct CompileParams<'w, 's> {
     fragment: Single<'w, 's, &'static mut ShaderToyFragment>,
     feedback: Res<'w, ShaderFeedback>,
     tweaks: ResMut<'w, Tweaks>,
+    heat: Res<'w, heatmap::Heat>,
 }
 
 /// Compile the editor text and, on success, hot-swap the running shader.
@@ -501,7 +507,7 @@ fn compile_and_apply(mut p: CompileParams) {
     p.status.note = None;
 
     let started = Instant::now();
-    match compile::compile_user_shader(&p.doc.text) {
+    match compile::compile_user_shader_with(&p.doc.text, p.heat.on) {
         Ok(compiled) => {
             // Replace the slot that is not on screen. Repeated compiles
             // before the first lands keep overwriting the same pending slot.
@@ -658,6 +664,7 @@ struct UiParams<'w, 's> {
     evolve: ResMut<'w, evolve::Evolve>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     ui_texture: ResMut<'w, ui_texture::UiTexture>,
+    heat: ResMut<'w, heatmap::Heat>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
 }
@@ -797,6 +804,13 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui_texture::toolbar_toggle(ui, &mut p.ui_texture, &p.current.wgsl);
+            if ui
+                .toggle_value(&mut p.heat.on, icon(lucide_icons::Icon::Flame))
+                .on_hover_text("Cost heatmap: loop iterations per pixel")
+                .changed()
+            {
+                p.run.0 = true;
+            }
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
                 .on_hover_text("Settings");
             ui.toggle_value(&mut p.wins.about, "?")
@@ -823,6 +837,7 @@ fn ui(mut p: UiParams) {
         p.current.generation,
         &p.preview_feedback,
     );
+    heatmap::legend(ctx, p.state.canvas, &mut p.heat);
 
     // --- editor window -------------------------------------------------------
     if p.wins.editor {
@@ -1436,9 +1451,9 @@ fn cli_example() -> Option<&'static examples::Example> {
 }
 
 /// Native-only: whether `flag` was passed. `--debugger` starts with the
-/// in-shader debugger overlay on (same as the toolbar bug icon) and
-/// `--examples` with the Examples window open, so scripted live tests can
-/// show them.
+/// in-shader debugger overlay on (same as the toolbar bug icon),
+/// `--examples` with the Examples window open and `--heat` in heat mode
+/// (the flame icon), so scripted live tests can show them.
 fn cli_flag(flag: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
