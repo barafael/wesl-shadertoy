@@ -160,7 +160,8 @@ sRGB output then applies a second time. Its `lighting::raymarch` helpers are
 still stubs in the WESL port, so bring your own marcher. The twelve
 `Lygia …` examples show it in use, from noise, palettes, tilings and easing
 to marbling (`distort::marble` across two buffers), post-processing filters
-over a buffer, and a raymarched Cook-Torrance material study. The editor's
+over a buffer, and a raymarched Cook-Torrance material study; Perlin,
+Voronoi and Fire take their noise from it too. The editor's
 wgsl-analyzer still rejects `filter` (a WGSL reserved word) as a module name,
 which WESL allows, so it is shown `lygia::filtre::…` behind the scenes. LYGIA is licensed separately from this project, under the
 Prosperity Public License 3.0.0 or the Patron License: see

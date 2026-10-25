@@ -2,8 +2,12 @@
 // author: wesl-shadertoy
 // license: MIT OR Apache-2.0
 // tags: 2d, noise
+// Each cell's site and color come from LYGIA's `random22` hash
+// (https://lygia.xyz); the sites drift, so the cell search stays ours
+// (LYGIA's `worley22` has static sites and returns distances only).
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_time;
+import lygia::generative::random::random22;
 
 const SPEED: f32 = 0.6;
 const CELL_SCALE: f32 = 4.0; // cells per screen height
@@ -13,13 +17,6 @@ const SEAM_OUTER: f32 = 0.45; // tweak: 0..1
 const SEAM_DARKNESS: f32 = 0.8; // tweak: 0..1
 const HUE_FREQ: f32 = 12.0; // how fast the color changes from cell to cell
 const PALETTE_PHASE: vec3<f32> = vec3<f32>(0.5, 2.0, 3.5); // tweak: 0..6.3
-
-fn hash2(p: vec2<f32>) -> vec2<f32> {
-    return fract(
-        sin(vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3))))
-            * 43758.5453,
-    );
-}
 
 fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let res = i_resolution().xy;
@@ -35,7 +32,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     for (var j = -1; j <= 1; j = j + 1) {
         for (var i = -1; i <= 1; i = i + 1) {
             let o = vec2<f32>(f32(i), f32(j));
-            let h = hash2(ip + o);
+            let h = random22(ip + o);
             let pt = o + 0.5 + 0.5 * sin(t + 6.28318 * h) - fp;
             let dd = dot(pt, pt);
             if (dd < d) {

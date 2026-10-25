@@ -2,11 +2,13 @@
 // author: wesl-shadertoy
 // license: MIT OR Apache-2.0
 // tags: 2d, noise
+// The noise is LYGIA's simplex `snoise2` (https://lygia.xyz).
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_time;
+import lygia::generative::snoise::snoise2;
 
 const RISE_SPEED: f32 = 0.9;
-const NOISE_SCALE: f32 = 3.5;
+const NOISE_SCALE: f32 = 2.0;
 const OCTAVES: i32 = 5; // tweak: 1..8
 // Screen height (from the center) where the flames have died out.
 const FLAME_TOP: f32 = 0.5; // tweak: -0.5..1
@@ -18,27 +20,14 @@ const FLAME_COLOR: vec3<f32> = vec3<f32>(0.9, 0.15, 0.0);
 const GLOW_COLOR: vec3<f32> = vec3<f32>(1.0, 0.6, 0.05);
 const CORE_COLOR: vec3<f32> = vec3<f32>(1.0, 1.0, 0.6);
 
-fn hash(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
-}
-
-fn noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    return mix(
-        mix(hash(i), hash(i + vec2<f32>(1.0, 0.0)), u.x),
-        mix(hash(i + vec2<f32>(0.0, 1.0)), hash(i + vec2<f32>(1.0, 1.0)), u.x),
-        u.y,
-    );
-}
-
 fn fbm(p_in: vec2<f32>) -> f32 {
     var v = 0.0;
     var a = 0.5;
     var p = p_in;
     for (var i = 0; i < OCTAVES; i = i + 1) {
-        v = v + a * noise(p);
+        // snoise2 is -1..1; squeeze it into 0..1 around 0.5, softly, the
+        // way the value noise before it varied.
+        v = v + a * (0.5 + 0.35 * snoise2(p));
         p = p * 2.0 + vec2<f32>(13.0, 7.0);
         a = a * 0.5;
     }
