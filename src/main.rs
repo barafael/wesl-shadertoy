@@ -15,6 +15,7 @@ mod compile;
 mod debugger;
 mod editor;
 mod examples;
+mod flags;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod highlight;
@@ -90,6 +91,7 @@ fn main() {
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
         .init_resource::<library::Library>()
+        .init_resource::<flags::FlagsPanel>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
@@ -226,6 +228,8 @@ struct UiWindows {
     constants: bool,
     /// The LYGIA module index ([`library`]).
     lygia: bool,
+    /// WESL feature flags and `constants::` values ([`flags`]).
+    flags: bool,
     settings: bool,
     about: bool,
     errors_expanded: bool,
@@ -240,6 +244,7 @@ impl Default for UiWindows {
             wgsl: false,
             constants: false,
             lygia: false,
+            flags: false,
             settings: false,
             about: false,
             errors_expanded: true,
@@ -657,6 +662,7 @@ struct UiParams<'w, 's> {
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
     library: ResMut<'w, library::Library>,
+    flag_panel: ResMut<'w, flags::FlagsPanel>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
@@ -785,6 +791,8 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
             ui.toggle_value(&mut p.wins.constants, "Constants")
                 .on_hover_text("Tweak the shader's constants live");
+            ui.toggle_value(&mut p.wins.flags, "Flags")
+                .on_hover_text("WESL feature flags and constants of the shader and its imports");
             ui.toggle_value(&mut p.wins.lygia, "LYGIA")
                 .on_hover_text("Browse the bundled LYGIA modules and import from them");
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
@@ -871,6 +879,23 @@ fn ui(mut p: UiParams) {
             }
         }
         tweaks.dirty = 0;
+    }
+
+    // --- flags window ---------------------------------------------------------
+    if p.wins.flags {
+        let mut changed = false;
+        show_window(
+            ctx,
+            glass,
+            "flags_window",
+            egui::Window::new("Flags")
+                .default_pos([680.0, 380.0])
+                .default_size([420.0, 260.0])
+                .open(&mut p.wins.flags),
+            |ui| changed = flags::show(ui, &mut p.flag_panel, &mut p.doc.text),
+        );
+        // Flags change the code itself: recompile.
+        p.run.0 |= changed;
     }
 
     // --- LYGIA window ---------------------------------------------------------

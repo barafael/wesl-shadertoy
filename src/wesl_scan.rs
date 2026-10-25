@@ -169,8 +169,6 @@ fn import_tree(
 
 /// Unique feature flags tested by the `@if(…)` / `@elif(…)` attributes of
 /// `src`, in order of first appearance.
-// Only build.rs scans flags so far.
-#[allow(dead_code)]
 pub fn flag_names(src: &str) -> Vec<String> {
     let blanked = blank_comments(src);
     let toks = tokens(&blanked);
@@ -201,8 +199,6 @@ pub fn flag_names(src: &str) -> Vec<String> {
 
 /// Unique names `src` reads from the `constants::` virtual module, in order
 /// of first appearance.
-// Only build.rs scans constants so far.
-#[allow(dead_code)]
 pub fn constant_names(src: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for path in package_paths(src, "constants") {
