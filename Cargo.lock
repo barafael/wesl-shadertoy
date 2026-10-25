@@ -6200,10 +6200,12 @@ name = "wesl-shadertoy"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "base64",
  "bevy",
  "bevy_egui",
  "js-sys",
  "lucide-icons",
+ "miniz_oxide 0.8.9",
  "naga",
  "png 0.17.16",
  "pollster",
