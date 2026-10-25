@@ -17,7 +17,7 @@ use bevy_egui::{EguiContexts, egui};
 use crate::examples::{self, Example};
 use crate::render::ShaderToyUniform;
 use crate::render::previews::{
-    PREVIEW_FORMAT, PREVIEW_SIZE, PreviewFeedback, PreviewJob, PreviewJobs,
+    PREVIEW_FORMAT, PREVIEW_SIZE, PreviewFeedback, PreviewJob, PreviewJobs, PreviewKey,
 };
 use crate::tweak::MAX_TWEAKS;
 
@@ -172,8 +172,10 @@ pub fn update_previews(
         };
         card.last_drawn = now;
         jobs.0.push(PreviewJob {
-            card: i,
+            card: PreviewKey::Example(i),
             image: image.id(),
+            size: PREVIEW_SIZE,
+            generation: 0,
             shader: compiled.shader.clone(),
             buffers: compiled.buffers,
             uniform,
@@ -340,7 +342,7 @@ fn thumbnail(ui: &egui::Ui, b: &Browser, i: usize, rect: egui::Rect, feedback: &
                 crate::theme::ERR_COLOR,
             );
         }
-        (Some((_, texture)), _) if feedback.drawn(i) => {
+        (Some((_, texture)), _) if feedback.drawn(PreviewKey::Example(i)) => {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(*texture, rect, uv, egui::Color32::WHITE);
         }

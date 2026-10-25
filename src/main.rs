@@ -14,6 +14,7 @@ mod browser;
 mod compile;
 mod debugger;
 mod editor;
+mod evolve;
 mod examples;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
@@ -87,6 +88,7 @@ fn main() {
         .init_resource::<editor::HighlightCache>()
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
+        .init_resource::<evolve::Evolve>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
@@ -99,6 +101,7 @@ fn main() {
                 run_analyzer,
                 autosave,
                 browser::update_previews,
+                evolve::update_previews.after(browser::update_previews),
             ),
         )
         .add_systems(EguiPrimaryContextPass, ui)
@@ -650,6 +653,7 @@ struct UiParams<'w, 's> {
     blur: ResMut<'w, render::blur::Blur>,
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
+    evolve: ResMut<'w, evolve::Evolve>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
@@ -778,6 +782,9 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
             ui.toggle_value(&mut p.wins.constants, "Constants")
                 .on_hover_text("Tweak the shader's constants live");
+            ui.toggle_value(&mut p.evolve.on, "Evolve").on_hover_text(
+                "Breed the shader's constants: pick from nine variants (Escape leaves)",
+            );
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
@@ -798,6 +805,14 @@ fn ui(mut p: UiParams) {
 
     // --- canvas: what the panels leave free shows the shader ----------------
     p.state.canvas = root_ui.available_rect_before_wrap();
+    evolve::show(
+        ctx,
+        &mut p.evolve,
+        &mut p.tweaks,
+        p.state.canvas,
+        p.current.generation,
+        &p.preview_feedback,
+    );
 
     // --- editor window -------------------------------------------------------
     if p.wins.editor {

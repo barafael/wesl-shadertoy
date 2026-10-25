@@ -1,12 +1,13 @@
-//! Live thumbnails for the example browser.
+//! Live thumbnails: the example browser's cards and Evolve mode's variants.
 //!
 //! The main world ([`crate::browser`]) compiles each example on first sight
 //! into a shader asset of its own and, every frame, lists the cards to draw
 //! as [`PreviewJobs`]: the hovered card plus a few of the visible ones in
-//! turn. Here each job runs its example's buffer passes (A→D, with their own
-//! ping-pong targets per card) and its image pass into the card's
-//! [`PREVIEW_SIZE`] image, which egui shows. The pipelines come from the same
-//! caches as the main shader's, keyed by the example's shader handle.
+//! turn. [`crate::evolve`] adds its nine variants of the editor's shader.
+//! Here each job runs its shader's buffer passes (A→D, with their own
+//! ping-pong targets per card) and its image pass into the card's image,
+//! which egui shows. The pipelines come from the same caches as the main
+//! shader's, keyed by the shader handle.
 
 use std::sync::{Arc, Mutex};
 
@@ -39,12 +40,26 @@ pub const PREVIEW_SIZE: UVec2 = UVec2::new(320, 180);
 /// Thumbnail format: what the view target and egui images use.
 pub const PREVIEW_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
+/// Who a thumbnail belongs to; each keeps its own frame counter and
+/// buffer targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PreviewKey {
+    /// A browser card: an index into [`crate::examples::ALL`].
+    Example(usize),
+    /// An Evolve grid cell, row by row.
+    Evolve(usize),
+}
+
 /// One thumbnail to draw this frame.
 #[derive(Clone)]
 pub struct PreviewJob {
-    /// Index into [`crate::examples::ALL`].
-    pub card: usize,
+    pub card: PreviewKey,
     pub image: AssetId<Image>,
+    /// The image's size in pixels ([`PREVIEW_SIZE`] for browser cards).
+    pub size: UVec2,
+    /// Changing it restarts the card's `i_frame` and buffers (the browser's
+    /// shaders never change; Evolve's follows the editor's compiles).
+    pub generation: u32,
     pub shader: Handle<Shader>,
     /// Bit per buffer pass the example defines.
     pub buffers: u8,
@@ -60,17 +75,17 @@ pub struct PreviewJobs(pub Vec<PreviewJob>);
 /// Cards whose thumbnail has been drawn at least once, so the browser can
 /// stop showing them as loading. One `Arc` lives in both worlds.
 #[derive(Resource, Clone, Default)]
-pub struct PreviewFeedback(pub Arc<Mutex<HashSet<usize>>>);
+pub struct PreviewFeedback(pub Arc<Mutex<HashSet<PreviewKey>>>);
 
 impl PreviewFeedback {
-    pub fn drawn(&self, card: usize) -> bool {
+    pub fn drawn(&self, card: PreviewKey) -> bool {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&card)
     }
 
-    fn mark(&self, card: usize) {
+    fn mark(&self, card: PreviewKey) {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -81,7 +96,7 @@ impl PreviewFeedback {
 /// Render-world state per card: its frame counter and buffer targets.
 #[derive(Resource, Default)]
 pub struct PreviewState {
-    cards: HashMap<usize, Card>,
+    cards: HashMap<PreviewKey, Card>,
     uniforms: DynamicUniformBuffer<ShaderToyUniform>,
 }
 
@@ -89,6 +104,8 @@ pub struct PreviewState {
 struct Card {
     /// `i_frame`: thumbnails drawn so far.
     frame: u32,
+    /// The job's [`PreviewJob::generation`] that `frame` counts for.
+    generation: u32,
     targets: BufferTargets,
     channels: Option<[TextureView; 4]>,
 }
@@ -149,6 +166,10 @@ pub fn preview_pass(
             continue;
         }
         let card = state.cards.entry(job.card).or_default();
+        if card.generation != job.generation {
+            card.generation = job.generation;
+            card.frame = 0;
+        }
         let mut uniform = job.uniform;
         uniform.frame = card.frame;
         let offset = state.uniforms.push(&uniform);
@@ -180,9 +201,10 @@ pub fn preview_pass(
             .channels
             .get_or_insert_with(|| std::array::from_fn(|_| dummy.clone()));
         if r.job.buffers != 0 {
-            // Fresh targets on the first frame; the owner never changes.
+            // Fresh targets on the first frame, on resize and with a new
+            // generation.
             card.targets
-                .reset_if_stale(PREVIEW_SIZE, (r.job.card as u32, 0));
+                .reset_if_stale(r.job.size, (r.job.generation, 0));
             card.targets.advance();
             BufferPass {
                 device: &p.device,

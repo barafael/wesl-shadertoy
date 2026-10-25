@@ -16,6 +16,7 @@ Runs natively and in the browser as WASM.
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
 | Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
+| Evolve | toolbar `Evolve`: the canvas becomes a 3×3 grid, the current constants in the middle and eight mutations around them, all running live (hover one to drive its `iMouse`). Click a variant to breed from it (the centre rolls eight new ones), **Ctrl/Cmd+Z** or the undo button walks back the lineage, the slider sets how far mutations stray. **Keep** writes the centre's constants into the code; **Discard** or **Escape** leaves it unchanged |
 | Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
@@ -72,6 +73,12 @@ an `i32`, `u32` or `f32` at each use. Names containing `color`/`col`/`tint`
 get a color picker on their own. Constants WGSL needs as true constants —
 array sizes, other constants' values, `switch` cases — stay fixed, and the
 window lists them. Up to 32 per shader.
+
+**Evolve** mode mutates the same constants, after
+[Picbreeder](https://en.wikipedia.org/wiki/Picbreeder): each variant moves
+some of them by a random step scaled to their range. Annotated ranges are never
+left, colors stay within 0..1, unannotated numbers keep their sign, and integer
+constants mutate rarely, since they tend to change a shader's structure.
 
 Available uniforms (import from `package::shadertoy`):
 
@@ -206,9 +213,9 @@ src/
                               channel clocks and buffers on the switch
     buffers.rs                the buffer_a..buffer_d passes (ping-pong
                               Rgba32Float targets behind i_channel_0..3)
-    previews.rs               the example browser's live thumbnails: each
-                              example's buffer and image passes into a small
-                              image of its own
+    previews.rs               live thumbnails (the example browser's and
+                              Evolve's variants): each job's buffer and
+                              image passes into an image of its own
     blur.rs                   frosted-glass backdrop: the finished frame,
                               downsampled 4x and Gaussian-blurred into an
                               image egui paints under windows and panels
@@ -223,6 +230,8 @@ src/
                 which also parses each file's name/author/license header)
   browser.rs    the Examples window: cards, filters, lazy compiles, and which
                 thumbnails to draw each frame
+  evolve.rs     Evolve mode: mutating constants, the lineage, the 3×3 grid of
+                variants drawn as live thumbnails
   analyzer/     wgsl-analyzer LSP client (live diagnostics)
     mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
     native.rs     the wgsl-analyzer executable over stdio
