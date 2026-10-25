@@ -4,6 +4,21 @@ import package::shadertoy::i_time;
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_mouse;
 
+// Divides i_time: higher is a slower day.
+const TIME_SCALE: f32 = 3.0; // tweak: 0.5..12
+// Sunlight strength.
+const LIGHT_INTENSITY: vec3<f32> = vec3<f32>(40.); // tweak: 0..100
+// Rayleigh scattering coefficients (what makes the sky blue).
+const BETA_RAY: vec3<f32> = vec3<f32>(0.0000055, 0.000013, 0.0000224);
+// Mie scattering coefficient (haze around the sun).
+const BETA_MIE: vec3<f32> = vec3<f32>(0.000021);
+// Mie anisotropy: how forward the haze scatters.
+const MIE_G: f32 = 0.7; // tweak: 0..0.99
+const GROUND_COLOR: vec3<f32> = vec3<f32>(0., 0.25, 0.05); // tweak: color
+// Ray march steps along the view ray and towards the sun.
+const STEPS_PRIMARY: i32 = 12; // tweak: 1..32
+const STEPS_LIGHT: i32 = 4; // tweak: 1..16
+
 fn calculate_scattering(start: vec3<f32>, dir: vec3<f32>, max_dist: f32, scene_color: vec3<f32>, light_dir: vec3<f32>, light_intensity: vec3<f32>, planet_position: vec3<f32>, planet_radius: f32, atmo_radius: f32, beta_ray: vec3<f32>, beta_mie: vec3<f32>, beta_absorption: vec3<f32>, beta_ambient: vec3<f32>, g: f32, height_ray: f32, height_mie: f32, height_absorption: f32, absorption_falloff: f32, steps_i: i32, steps_l: i32) -> vec3<f32> {
     var start_var = start;
     start_var = start_var - (planet_position);
@@ -86,7 +101,7 @@ fn ray_sphere_intersect(start: vec3<f32>, dir: vec3<f32>, radius: f32) -> vec2<f
 fn skylight(sample_pos: vec3<f32>, surface_normal: vec3<f32>, light_dir: vec3<f32>, background_col: vec3<f32>) -> vec3<f32> {
     var surface_normal_var = surface_normal;
     surface_normal_var = normalize(mix(surface_normal_var, light_dir, 0.6));
-    return calculate_scattering(sample_pos, surface_normal_var, 3. * 6471000., background_col, light_dir, vec3<f32>(40.), vec3<f32>(0.), 6371000., 6471000., vec3<f32>(0.0000055, 0.000013, 0.0000224), vec3<f32>(0.000021), vec3<f32>(0.0000204, 0.0000497, 0.00000195), vec3<f32>(0.), 0.7, 8000., 1200., 30000., 4000., 4, 4);
+    return calculate_scattering(sample_pos, surface_normal_var, 3. * 6471000., background_col, light_dir, LIGHT_INTENSITY, vec3<f32>(0.), 6371000., 6471000., BETA_RAY, BETA_MIE, vec3<f32>(0.0000204, 0.0000497, 0.00000195), vec3<f32>(0.), MIE_G, 8000., 1200., 30000., 4000., 4, 4);
 }
 
 fn render_scene(pos: vec3<f32>, dir: vec3<f32>, light_dir: vec3<f32>) -> vec4<f32> {
@@ -107,7 +122,7 @@ fn render_scene(pos: vec3<f32>, dir: vec3<f32>, light_dir: vec3<f32>) -> vec4<f3
         let sample_pos: vec3<f32> = pos + dir * planet_intersect.x - vec3<f32>(0.);
         let surface_normal: vec3<f32> = normalize(sample_pos);
         var colorxyz = color.xyz;
-    colorxyz = vec3<f32>(0., 0.25, 0.05);
+    colorxyz = GROUND_COLOR;
     color.x = colorxyz.x;
     color.y = colorxyz.y;
     color.z = colorxyz.z;
@@ -123,7 +138,7 @@ fn render_scene(pos: vec3<f32>, dir: vec3<f32>, light_dir: vec3<f32>) -> vec4<f3
     color.y = colorxyz_2.y;
     color.z = colorxyz_2.z;
         var colorxyz_3 = color.xyz;
-    colorxyz_3 = color.xyz + (clamp(skylight(sample_pos, surface_normal, light_dir, vec3<f32>(0.)) * vec3<f32>(0., 0.25, 0.05), vec3<f32>(0.), vec3<f32>(1.)));
+    colorxyz_3 = color.xyz + (clamp(skylight(sample_pos, surface_normal, light_dir, vec3<f32>(0.)) * GROUND_COLOR, vec3<f32>(0.), vec3<f32>(1.)));
     color.x = colorxyz_3.x;
     color.y = colorxyz_3.y;
     color.z = colorxyz_3.z;
@@ -138,7 +153,7 @@ fn get_camera_vector(resolution: vec2<f32>, coord: vec2<f32>) -> vec3<f32> {
 }
 
 fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
-    let time = i_time() / 3.0;
+    let time = i_time() / TIME_SCALE;
 
     let camera_vector: vec3<f32> = get_camera_vector(i_resolution().xy, frag_coord);
     let offset: f32 = (1. - cos(time / 2.)) * 6471000.;
@@ -151,7 +166,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     };
     let scene: vec4<f32> = render_scene(camera_position, camera_vector, light_dir);
     var col: vec3<f32> = vec3<f32>(0.);
-    col = col + (calculate_scattering(camera_position, camera_vector, scene.w, scene.xyz, light_dir, vec3<f32>(40.), vec3<f32>(0.), 6371000., 6471000., vec3<f32>(0.0000055, 0.000013, 0.0000224), vec3<f32>(0.000021), vec3<f32>(0.0000204, 0.0000497, 0.00000195), vec3<f32>(0.), 0.7, 8000., 1200., 30000., 4000., 12, 4));
+    col = col + (calculate_scattering(camera_position, camera_vector, scene.w, scene.xyz, light_dir, LIGHT_INTENSITY, vec3<f32>(0.), 6371000., 6471000., BETA_RAY, BETA_MIE, vec3<f32>(0.0000204, 0.0000497, 0.00000195), vec3<f32>(0.), MIE_G, 8000., 1200., 30000., 4000., STEPS_PRIMARY, STEPS_LIGHT));
     col = 1. - exp(-col);
 
     return vec4<f32>((col), 1.);

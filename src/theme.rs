@@ -1,19 +1,12 @@
-//! Gruvbox theming: egui `Visuals` plus the editor's syntax palette.
+//! Gruvbox dark theming: egui `Visuals` plus the editor's syntax palette.
 //!
 //! Colors are the official Gruvbox palette (github.com/morhetz/gruvbox):
-//! warm retro-groove tones, dark `#282828` / light `#fbf1c7`. The look is
+//! warm retro-groove tones on a `#282828` background. The look is
 //! deliberately flat — every corner radius and shadow is zero.
 
 use bevy_egui::egui::{self, Color32, CornerRadius, Id, Shadow, Stroke, Visuals};
 
-/// Which Gruvbox flavor the UI is painted in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Theme {
-    Dark,
-    Light,
-}
-
-/// Token colors for the editor and the WGSL viewer (one set per theme).
+/// Token colors for the editor and the WGSL viewer.
 #[derive(Clone, Copy)]
 pub struct Syntax {
     pub comment: Color32,
@@ -53,150 +46,46 @@ mod d {
     pub const SELECT: u32 = 0x45_8588;
 }
 
-/// Gruvbox light: same names, light backgrounds, *neutral* accent row.
-mod l {
-    pub const BG0_SOFT: u32 = 0xf9_f5d7;
-    pub const BG0: u32 = 0xfb_f1c7;
-    pub const BG1: u32 = 0xeb_dbb2;
-    pub const BG2: u32 = 0xd5_c4a1;
-    pub const BG3: u32 = 0xbd_ae93;
-    pub const BG4: u32 = 0xa8_9984;
-    pub const FG0: u32 = 0x28_2828;
-    pub const FG1: u32 = 0x3c_3836;
-    pub const FG2: u32 = 0x50_4945;
-    pub const GRAY: u32 = 0x92_8374;
-    pub const RED: u32 = 0x9d_0006;
-    pub const GREEN: u32 = 0x79_740e;
-    pub const YELLOW: u32 = 0xb5_7614;
-    pub const BLUE: u32 = 0x07_6678;
-    pub const PURPLE: u32 = 0x8f_3f71;
-    pub const AQUA: u32 = 0x42_7b58;
-    pub const ORANGE: u32 = 0xaf_3b06;
-    pub const SELECT: u32 = 0x83_a598;
-}
+pub const SYNTAX: Syntax = Syntax {
+    comment: rgb(d::GRAY),
+    string: rgb(d::GREEN),
+    number: rgb(d::PURPLE),
+    keyword: rgb(d::RED),
+    import: rgb(d::AQUA),
+    ty: rgb(d::YELLOW),
+    builtin: rgb(d::BLUE),
+    attribute: rgb(d::ORANGE),
+};
 
-impl Theme {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Theme::Dark => "dark",
-            Theme::Light => "light",
-        }
-    }
+/// Green for "compiled ok".
+pub const OK_COLOR: Color32 = rgb(d::GREEN);
 
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "dark" => Some(Theme::Dark),
-            "light" => Some(Theme::Light),
-            _ => None,
-        }
-    }
+/// Red for "compile failed".
+pub const ERR_COLOR: Color32 = rgb(d::RED);
 
-    /// Follow the OS (`prefers-color-scheme`) in the browser; dark natively.
-    pub fn from_system() -> Self {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let light = web_sys::window()
-                .and_then(|w| w.match_media("(prefers-color-scheme: light)").ok())
-                .flatten()
-                .is_some_and(|m| m.matches());
-            if light { Theme::Light } else { Theme::Dark }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        Theme::Dark
-    }
-
-    pub fn syntax(self) -> Syntax {
-        match self {
-            Theme::Dark => Syntax {
-                comment: rgb(d::GRAY),
-                string: rgb(d::GREEN),
-                number: rgb(d::PURPLE),
-                keyword: rgb(d::RED),
-                import: rgb(d::AQUA),
-                ty: rgb(d::YELLOW),
-                builtin: rgb(d::BLUE),
-                attribute: rgb(d::ORANGE),
-            },
-            Theme::Light => Syntax {
-                comment: rgb(l::GRAY),
-                string: rgb(l::GREEN),
-                number: rgb(l::PURPLE),
-                keyword: rgb(l::RED),
-                import: rgb(l::AQUA),
-                ty: rgb(l::YELLOW),
-                builtin: rgb(l::BLUE),
-                attribute: rgb(l::ORANGE),
-            },
-        }
-    }
-
-    /// Green for "compiled ok", red for "compile failed".
-    pub fn ok_color(self) -> Color32 {
-        rgb(match self {
-            Theme::Dark => d::GREEN,
-            Theme::Light => l::GREEN,
-        })
-    }
-
-    pub fn err_color(self) -> Color32 {
-        rgb(match self {
-            Theme::Dark => d::RED,
-            Theme::Light => l::RED,
-        })
-    }
-
-    pub fn visuals(self) -> Visuals {
-        match self {
-            Theme::Dark => {
-                let mut v = Visuals::dark();
-                v.panel_fill = rgb(d::BG0);
-                v.window_fill = rgb(d::BG0);
-                v.window_stroke = Stroke::new(1.0, rgb(d::BG2));
-                v.faint_bg_color = rgb(d::BG1);
-                v.extreme_bg_color = rgb(d::BG0_HARD);
-                v.code_bg_color = rgb(d::BG1);
-                v.warn_fg_color = rgb(d::ORANGE);
-                v.error_fg_color = rgb(d::RED);
-                v.hyperlink_color = rgb(d::BLUE);
-                v.weak_text_color = Some(rgb(d::FG4));
-                v.selection.bg_fill = rgb(d::SELECT);
-                v.selection.stroke = Stroke::new(1.0, rgb(d::FG0));
-                apply_widgets(
-                    &mut v,
-                    W::new(d::BG1, d::BG1, d::BG3, d::FG1),
-                    W::new(d::BG2, d::BG1, d::BG4, d::FG2),
-                    W::new(d::BG3, d::BG2, d::FG4, d::FG0),
-                    W::new(d::BG4, d::BG3, d::FG2, d::FG0),
-                );
-                apply_flat(&mut v);
-                v
-            }
-            Theme::Light => {
-                let mut v = Visuals::light();
-                v.panel_fill = rgb(l::BG0);
-                v.window_fill = rgb(l::BG0);
-                v.window_stroke = Stroke::new(1.0, rgb(l::BG3));
-                v.faint_bg_color = rgb(l::BG1);
-                v.extreme_bg_color = rgb(l::BG0_SOFT);
-                v.code_bg_color = rgb(l::BG1);
-                v.warn_fg_color = rgb(l::ORANGE);
-                v.error_fg_color = rgb(l::RED);
-                v.hyperlink_color = rgb(l::BLUE);
-                v.weak_text_color = Some(rgb(l::BG4));
-                v.selection.bg_fill = rgb(l::SELECT);
-                v.selection.stroke = Stroke::new(1.0, rgb(l::FG0));
-                apply_widgets(
-                    &mut v,
-                    W::new(l::BG1, l::BG1, l::BG3, l::FG1),
-                    W::new(l::BG2, l::BG1, l::BG4, l::FG2),
-                    W::new(l::BG3, l::BG2, l::FG2, l::FG0),
-                    W::new(l::BG4, l::BG3, l::FG1, l::FG0),
-                );
-                apply_flat(&mut v);
-                v
-            }
-        }
-    }
+pub fn visuals() -> Visuals {
+    let mut v = Visuals::dark();
+    v.panel_fill = rgb(d::BG0);
+    v.window_fill = rgb(d::BG0);
+    v.window_stroke = Stroke::new(1.0, rgb(d::BG2));
+    v.faint_bg_color = rgb(d::BG1);
+    v.extreme_bg_color = rgb(d::BG0_HARD);
+    v.code_bg_color = rgb(d::BG1);
+    v.warn_fg_color = rgb(d::ORANGE);
+    v.error_fg_color = rgb(d::RED);
+    v.hyperlink_color = rgb(d::BLUE);
+    v.weak_text_color = Some(rgb(d::FG4));
+    v.selection.bg_fill = rgb(d::SELECT);
+    v.selection.stroke = Stroke::new(1.0, rgb(d::FG0));
+    apply_widgets(
+        &mut v,
+        W::new(d::BG1, d::BG1, d::BG3, d::FG1),
+        W::new(d::BG2, d::BG1, d::BG4, d::FG2),
+        W::new(d::BG3, d::BG2, d::FG4, d::FG0),
+        W::new(d::BG4, d::BG3, d::FG2, d::FG0),
+    );
+    apply_flat(&mut v);
+    v
 }
 
 /// One widget-state color set (see `egui::WidgetVisuals`).
@@ -232,6 +121,13 @@ fn apply_widgets(v: &mut Visuals, non: W, inact: W, hov: W, act: W) {
         dst.bg_stroke = Stroke::new(1.0, rgb(src.bg_stroke));
         dst.fg_stroke = Stroke::new(1.0, rgb(src.fg_stroke));
         dst.corner_radius = CornerRadius::ZERO;
+        // Same in every state, and equal to the stroke width: egui pads a
+        // frameless button (an unselected toggle at rest) by `padding +
+        // expansion - stroke` but a framed one by `padding`, so anything else
+        // makes toggles grow on hover and shove the rest of the toolbar.
+        // Being the same in every state, it also keeps checkboxes and
+        // button outlines from swelling under the pointer.
+        dst.expansion = dst.bg_stroke.width;
     }
 }
 
@@ -243,22 +139,48 @@ fn apply_flat(v: &mut Visuals) {
     v.popup_shadow = Shadow::NONE;
 }
 
-#[derive(Clone, PartialEq)]
-struct Applied(Theme);
-
-/// (Re)apply `theme` to the egui context, but only when it changed.
-pub fn apply(ctx: &egui::Context, theme: Theme) {
+/// Apply the theme to the egui context, once (later calls are no-ops).
+pub fn apply(ctx: &egui::Context) {
     let id = Id::new("wesl_shadertoy_theme");
-    if ctx.data(|d| d.get_temp::<Applied>(id)) == Some(Applied(theme)) {
+    if ctx.data(|d| d.get_temp::<bool>(id)).is_some() {
         return;
     }
-    ctx.data_mut(|d| d.insert_temp(id, Applied(theme)));
-    // egui 0.36 keeps a style per dark/light slot: paint the matching slot
-    // with gruvbox and make it the active theme.
-    let egui_theme = match theme {
-        Theme::Dark => egui::Theme::Dark,
-        Theme::Light => egui::Theme::Light,
-    };
-    ctx.set_visuals_of(egui_theme, theme.visuals());
-    ctx.set_theme(egui_theme);
+    ctx.data_mut(|d| d.insert_temp(id, true));
+    // egui 0.36 keeps a style per dark/light slot: paint the dark slot with
+    // gruvbox and make it the active one (egui may follow a light OS theme).
+    ctx.set_visuals_of(egui::Theme::Dark, visuals());
+    ctx.set_theme(egui::Theme::Dark);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A toggle keeps its size when hovered, so the toolbar does not shift.
+    #[test]
+    fn hover_does_not_resize_toggles() {
+        let ctx = egui::Context::default();
+        let rect_with = |pointer: Option<egui::Pos2>| {
+            let mut rect = egui::Rect::NOTHING;
+            for _ in 0..3 {
+                let events = pointer.map(egui::Event::PointerMoved).into_iter().collect();
+                let input = egui::RawInput {
+                    events,
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| {
+                    apply(ui.ctx());
+                    ui.horizontal(|ui| {
+                        rect = ui.toggle_value(&mut false, "WGSL").rect;
+                        let _ = ui.button("?");
+                    });
+                })
+                .drop_without_applying_deltas();
+            }
+            rect
+        };
+        let at_rest = rect_with(None);
+        let hovered = rect_with(Some(at_rest.center()));
+        assert_eq!(at_rest, hovered);
+    }
 }

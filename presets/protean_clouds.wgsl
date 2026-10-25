@@ -4,6 +4,21 @@ import package::shadertoy::i_time;
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_mouse;
 
+// Forward flight speed.
+const FLY_SPEED: f32 = 3.; // tweak: 0..10
+// How far the camera path swings sideways.
+const PATH_SWAY: f32 = 0.85; // tweak: 0..3
+// Ray march steps through the clouds.
+const MARCH_STEPS: i32 = 130; // tweak: 10..250
+// Cloud density multiplier.
+const DENSITY: f32 = 1.12; // tweak: 0..3
+// Phase of the sine palette that colors the clouds.
+const PALETTE_PHASE: vec3<f32> = vec3<f32>(5., 0.4, 0.2); // tweak: 0..6.28
+const FOG_COLOR: vec4<f32> = vec4<f32>(0.06, 0.11, 0.11, 0.1);
+// Per-channel gamma of the final grade.
+const GRADE_GAMMA: vec3<f32> = vec3<f32>(0.55, 0.65, 0.6); // tweak: 0.2..1.5
+const GRADE_TINT: vec3<f32> = vec3<f32>(1., 0.97, 0.9);
+
 fn rot(a: f32) -> mat2x2<f32> {
     let c: f32 = cos(a);
     let s: f32 = sin(a);
@@ -67,17 +82,17 @@ fn render(ro: vec3<f32>, rd: vec3<f32>, time: f32) -> vec4<f32> {
     var t: f32 = 1.5;
     var fogT: f32 = 0.;
 
-    for (var i: i32 = 0; i < 130; i = i + 1) {
+    for (var i: i32 = 0; i < MARCH_STEPS; i = i + 1) {
         if (rez.a > 0.99) {
             break;
         }
         let pos: vec3<f32> = ro + t * rd;
         let mpv: vec2<f32> = map(pos);
-        let den: f32 = clamp(mpv.x - 0.3, 0., 1.) * 1.12;
+        let den: f32 = clamp(mpv.x - 0.3, 0., 1.) * DENSITY;
         let dn: f32 = clamp(mpv.x + 2., 0., 3.);
         var col: vec4<f32> = vec4<f32>(0.);
         if (mpv.x > 0.6) {
-            col = vec4<f32>(sin(vec3<f32>(5., 0.4, 0.2) + mpv.y * 0.1 + sin(pos.z * 0.4) * 0.5 + 1.8) * 0.5 + 0.5, 0.08);
+            col = vec4<f32>(sin(PALETTE_PHASE + mpv.y * 0.1 + sin(pos.z * 0.4) * 0.5 + 1.8) * 0.5 + 0.5, 0.08);
             col = col * (den * den * den);
             var colrgb = col.rgb;
             colrgb = col.rgb * (linstep(4., -2.5, mpv.x) * 2.3);
@@ -94,7 +109,7 @@ fn render(ro: vec3<f32>, rd: vec3<f32>, time: f32) -> vec4<f32> {
         }
         let fogC: f32 = exp(t * 0.2 - 2.2);
         var colrgba = col.rgba;
-        colrgba = col.rgba + (vec4<f32>(0.06, 0.11, 0.11, 0.1) * clamp(fogC - fogT, 0., 1.));
+        colrgba = col.rgba + (FOG_COLOR * clamp(fogC - fogT, 0., 1.));
         col.r = colrgba.r;
         col.g = colrgba.g;
         col.b = colrgba.b;
@@ -127,10 +142,10 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let q: vec2<f32> = frag_coord.xy / i_resolution().xy;
     let p: vec2<f32> = (frag_coord - 0.5 * i_resolution().xy) / i_resolution().y;
     bsMo = (i_mouse().xy - 0.5 * i_resolution().xy) / i_resolution().y;
-    let time: f32 = i_time() * 3.;
+    let time: f32 = i_time() * FLY_SPEED;
     var ro: vec3<f32> = vec3<f32>(0., 0., time);
     ro = ro + (vec3<f32>(sin(i_time()) * 0.5, sin(i_time() * 1.) * 0., 0.));
-    let dspAmp: f32 = 0.85;
+    let dspAmp: f32 = PATH_SWAY;
     var roxy = ro.xy;
     roxy = ro.xy + (disp(ro.z) * dspAmp);
     ro.x = roxy.x;
@@ -150,7 +165,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let scn: vec4<f32> = render(ro, rd, time);
     var col: vec3<f32> = scn.rgb;
     col = iLerp(col.bgr, col.rgb, clamp(1. - prm1, 0.05, 1.));
-    col = pow(col, vec3<f32>(0.55, 0.65, 0.6)) * vec3<f32>(1., 0.97, 0.9);
+    col = pow(col, GRADE_GAMMA) * GRADE_TINT;
     col = col * (pow(16. * q.x * q.y * (1. - q.x) * (1. - q.y), 0.12) * 0.7 + 0.3);
     return vec4<f32>(col, 1.);
 }

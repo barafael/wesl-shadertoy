@@ -10,6 +10,19 @@ import package::shadertoy::i_frame;
 import package::shadertoy::i_mouse;
 import package::shadertoy::i_resolution;
 
+const SOLVER_STEPS: i32 = 2; // tweak: 1..6
+// How much pressure survives each frame.
+const PRESSURE_DECAY: f32 = 0.95; // tweak: 0.8..0.999
+// Mouse stirring: brush radius (px) and top speed of the injected velocity.
+const STIR_RADIUS: f32 = 5.; // tweak: 1..30
+const STIR_MAX_SPEED: f32 = 20.; // tweak: 0..40
+// Radius (px) of the initial puff of dye.
+const PUFF_RADIUS: f32 = 20.; // tweak: 0..100
+// How darkly the dye shades the white background.
+const DYE_CONTRAST: f32 = 3.; // tweak: 0..6
+// Frequencies of the sine bands: speed, pressure, dye slope.
+const BAND_FREQ: vec3<f32> = vec3<f32>(100., -5., 368.); // tweak: -400..400
+
 // Distance from p to the segment a..b.
 fn lnln(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return length(p - a - (b - a) * clamp(dot(p - a, b - a) / dot(b - a, b - a), 0., 1.));
@@ -49,7 +62,7 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     var p = vec4<f32>(0.);
     var g = vec2<f32>(0.);
 
-    for (var i: i32 = 0; i < 2; i = i + 1) {
+    for (var i: i32 = 0; i < SOLVER_STEPS; i = i + 1) {
         U = U - u.xy;
         A = A - a.xy;
         B = B - b.xy;
@@ -69,11 +82,11 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     var Q = u;
     let N = 0.25 * (a + b + c + d);
     Q = mix(Q, N, vec4<f32>(0., 0., 1., 0.));
-    let Qxy = Q.xy - (g / 10. / f32(2.));
+    let Qxy = Q.xy - (g / 10. / f32(SOLVER_STEPS));
     Q.x = Qxy.x;
     Q.y = Qxy.y;
     Q.z = Q.z + ((p.x + p.y + p.z + p.w) / 10.);
-    Q.z = Q.z * 0.95;
+    Q.z = Q.z * PRESSURE_DECAY;
 
     let mouse = textureLoad(i_channel_3, vec2<i32>(0.5 * R), 0);
     let q = lnln(U, mouse.xy, mouse.zw);
@@ -82,14 +95,14 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
 
     if (mouse.z > 0. && l > 0.) {
         let stirred =
-            mix(Q.xyw, vec3<f32>(-normalize(m) * min(l, 20.) / 25., 1.), max(0., 5. - q) / 25.);
+            mix(Q.xyw, vec3<f32>(-normalize(m) * min(l, STIR_MAX_SPEED) / 25., 1.), max(0., STIR_RADIUS - q) / 25.);
         Q.x = stirred.x;
         Q.y = stirred.y;
         Q.w = stirred.z;
     }
 
     // A puff of dye to start with, so the shader is alive without input.
-    if (i_frame() < 140u && length(U - 0.5 * R) < 20.) {
+    if (i_frame() < 140u && length(U - 0.5 * R) < PUFF_RADIUS) {
         Q.x = 0.;
         Q.y = 0.1;
         Q.w = 1.;
@@ -126,7 +139,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     var me = t(U);
     me.z = me.z - 1.;
-    var C = 1. - 3. * me.wwww;
+    var C = 1. - DYE_CONTRAST * me.wwww;
 
     let d = vec3<f32>(
         t(U + vec2<f32>(1., 0.)).w - t(U - vec2<f32>(1., 0.)).w,
@@ -137,7 +150,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let shaded = C.xyz
         - max(
             vec3<f32>(0.),
-            sin(vec3<f32>(100. * length(me.xy), -5. * me.z, 368. * d.y) * me.w),
+            sin(BAND_FREQ * vec3<f32>(length(me.xy), me.z, d.y) * me.w),
         );
     C.x = shaded.x;
     C.y = shaded.y;

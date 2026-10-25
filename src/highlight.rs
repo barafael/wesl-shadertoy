@@ -3,8 +3,8 @@
 //!
 //! This is the "syntax highlighting" layer: the editor widget renders this
 //! job through `TextEdit`'s layouter, so highlighting and editing share the
-//! exact same glyph layout. Token colors come from the active
-//! [`crate::theme::Theme`]'s [`Syntax`] palette.
+//! exact same glyph layout. Token colors come from the
+//! [`Syntax`] palette in [`crate::theme::SYNTAX`].
 
 use bevy_egui::egui::Color32;
 use bevy_egui::egui::FontId;

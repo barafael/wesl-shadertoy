@@ -13,17 +13,18 @@ Runs natively and in the browser as WASM.
 | --- | --- |
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
-| Pause / resume the clock, reset, speed | toolbar (reset also restarts `i_frame` and clears the buffers) |
+| Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
 | Presets | `preset:` combobox — 21 shadertoy classics (Plasma, Star Nest, Seascape, Fluid, …); fresh sessions roll a random one |
-| Windows | `Code`, `WGSL` (composed output) toggles; `⚙` settings (Gruvbox dark/light), `?` about |
+| Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
+| Windows | `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
-| Debugger overlay | toolbar bug icon (or `--debugger` natively): crosshair and click ring, RGBA probe boxes for the pixels under the cursor and the last click, mouse position, resolution, fps |
+| Debugger overlay | toolbar bug icon (or `--debugger` natively): crosshair and click ring, RGBA probe boxes for the pixels under the cursor and the last click, a swatch of the clicked pixel's color, mouse position, resolution, fps |
 
 The document auto-saves to `localStorage` (browser builds) on every change —
 edits, preset picks, opened files — and is restored on load, along with your
-theme. Compile errors appear in the bottom panel — the last good shader keeps
+settings. Compile errors appear in the bottom panel — the last good shader keeps
 running while you fix them, also when the GPU driver rejects a shader that
 passed validation.
 
@@ -50,6 +51,27 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(col, 1.0);
 }
 ```
+
+### Tweakable constants
+
+Every module-level `const` whose value is a literal — a number or a `vecN` of
+numbers — gets a control in the **Constants** window. Dragging updates the
+running shader through a uniform, without recompiling, so buffer simulations
+keep their state; the new value is written into your code when you let go.
+A comment after the constant fine-tunes it:
+
+```rust
+const SEA_HEIGHT: f32 = 0.6;                        // slider over 0..1.2 (twice the value)
+const STEPS: i32 = 8; // tweak: 1..32               // slider over 1..32
+const WATER: vec3<f32> = vec3<f32>(0.5, 0.5, 0.4); // tweak: color
+const PI: f32 = 3.14159; // tweak: off             // left out of the window
+```
+
+Give integer constants a type (`const N: i32 = 8;`): an untyped `8` could be
+an `i32`, `u32` or `f32` at each use. Names containing `color`/`col`/`tint`
+get a color picker on their own. Constants WGSL needs as true constants —
+array sizes, other constants' values, `switch` cases — stay fixed, and the
+window lists them. Up to 32 per shader.
 
 Available uniforms (import from `package::shadertoy`):
 
@@ -137,8 +159,10 @@ resolve exactly as when compiling.
 src/
   main.rs       app wiring, resources, per-frame uniforms, egui UI
   compile.rs    WESL link + naga validate (the shader contract above)
+  tweak.rs      tweakable constants: find literal consts, rewrite them into
+                uniform-fed `var<private>`s, write tweaked values back
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
-  theme.rs      Gruvbox egui Visuals + per-theme syntax palettes (dark/light)
+  theme.rs      Gruvbox dark egui Visuals + the syntax palette
   headless.rs   `--render`: windowless wgpu renderer writing a PNG (native)
   render/
     mod.rs                    ShaderToyUniform/Fragment components + plugin
@@ -147,6 +171,9 @@ src/
                               channel clocks and buffers on the switch
     buffers.rs                the buffer_a..buffer_d passes (ping-pong
                               Rgba32Float targets behind i_channel_0..3)
+    blur.rs                   frosted-glass backdrop: the finished frame,
+                              downsampled 4x and Gaussian-blurred into an
+                              image egui paints under windows and panels
     fullscreen_material.rs    vendored from Bevy 0.20, modified to take its
                               fragment shader per view at runtime
   debugger.rs   debugger overlay (ported from bevy_shadertoy_wgsl): blit pass,

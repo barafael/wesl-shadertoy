@@ -21,11 +21,24 @@ import package::shadertoy::i_channel_2;
 import package::shadertoy::i_mouse;
 import package::shadertoy::i_resolution;
 
-const PI: f32 = 3.14159265;
-const dt: f32 = 2.5;
-const border_h: f32 = 5.;
-const h: f32 = 1.;
-const fluid_rho: f32 = 0.5;
+const PI: f32 = 3.14159265; // tweak: off
+// Time step. Particles move up to dt texels per frame and are gathered from
+// a 5x5 neighbourhood, so much more than ~3 tears the fluid apart.
+const dt: f32 = 2.5; // tweak: 0.5..3
+// Width of the wall's contact zone (sim) and dark rim (image).
+const border_h: f32 = 5.; // tweak: 1..10
+// Finite-difference step for the wall normal.
+const h: f32 = 1.; // tweak: 0.5..2
+// Rest density: what the jets inject and what pressure pushes toward.
+const fluid_rho: f32 = 0.5; // tweak: 0.2..1
+
+const GRAVITY: f32 = 0.0004; // tweak: 0..0.002
+const MOUSE_FORCE: f32 = 0.001; // tweak: 0..0.005
+// The two paint jets: radius (px) and launch speed (speed is capped at 1).
+const JET_RADIUS: f32 = 20.; // tweak: 5..40
+const JET_SPEED: f32 = 0.5; // tweak: 0..1
+const PAINT_COLOR_A: vec3<f32> = vec3<f32>(1., 0.5, 0.); // tweak: color
+const PAINT_COLOR_B: vec3<f32> = vec3<f32>(0.1, 0.4, 1.); // tweak: color
 
 fn Dir(ang: f32) -> vec2<f32> {
     return vec2<f32>(cos(ang), sin(ang));
@@ -181,12 +194,12 @@ fn Simulation(PIn: particle, pos: vec2<f32>, mouse: vec4<f32>, R: vec2<f32>) -> 
         }
     }
 
-    F = F + (P.M.x * vec2<f32>(0., -0.0004));
+    F = F + (P.M.x * vec2<f32>(0., -GRAVITY));
 
     if (mouse.z > 0.) {
         let dm = (mouse.xy - mouse.zw) / 10.;
         let d = distance(mouse.xy, P.X) / 20.;
-        F = F + (0.001 * dm * exp(-d * d));
+        F = F + (MOUSE_FORCE * dm * exp(-d * d));
     }
     P.V = P.V + (F * dt / P.M.x);
 
@@ -220,15 +233,15 @@ fn buffer_b(frag_coord: vec2<f32>) -> vec4<f32> {
     // Two paint jets near the top, spraying downward; M.y is the dye.
     // (timeMult is a constant 1.0 in the reference, so the spray angles are
     // fixed: sin(0.4 * 2.0 * 1.0) = sin(0.8).)
-    if (length(P.X - R * vec2<f32>(0.55, 0.9)) < 20.) {
+    if (length(P.X - R * vec2<f32>(0.55, 0.9)) < JET_RADIUS) {
         P.X = pos;
-        P.V = 0.5 * Dir(-PI * 0.75 + 0.3 * sin(0.8));
+        P.V = JET_SPEED * Dir(-PI * 0.75 + 0.3 * sin(0.8));
         P.M = mix(P.M, vec2<f32>(fluid_rho, 1.), 0.4);
     }
 
-    if (length(P.X - R * vec2<f32>(0.45, 0.9)) < 20.) {
+    if (length(P.X - R * vec2<f32>(0.45, 0.9)) < JET_RADIUS) {
         P.X = pos;
-        P.V = 0.5 * Dir(PI * 0.25 - PI * 0.5 + 0.3 * sin(0.8));
+        P.V = JET_SPEED * Dir(PI * 0.25 - PI * 0.5 + 0.3 * sin(0.8));
         P.M = mix(P.M, vec2<f32>(fluid_rho, 0.5), 0.4);
     }
 
@@ -275,9 +288,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     let a = pow(smoothstep(fluid_rho * 0., fluid_rho * 2., rho.z), 0.1);
     let b = exp(-1.7 * smoothstep(fluid_rho * 1., fluid_rho * 7.5, rho.z));
-    let col0 = vec3<f32>(1., 0.5, 0.);
-    let col1 = vec3<f32>(0.1, 0.4, 1.);
-    let fcol = mixN(col0, col1, tanh(3. * (rho.w - 0.7)) * 0.5 + 0.5);
+    let fcol = mixN(PAINT_COLOR_A, PAINT_COLOR_B, tanh(3. * (rho.w - 0.7)) * 0.5 + 0.5);
 
     var col = vec4<f32>(3.);
     col = vec4<f32>(mixN(col.xyz, fcol * (1.5 * b + specular * 5.), a), col.w);

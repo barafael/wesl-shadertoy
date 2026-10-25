@@ -5,17 +5,22 @@ import package::shadertoy::i_time;
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_mouse;
 
-const NUM_STEPS: i32 = 8;
-const PI: f32 = 3.141592;
-const EPSILON: f32 = 0.001;
-const ITER_GEOMETRY: i32 = 3;
-const ITER_FRAGMENT: i32 = 5;
-const SEA_HEIGHT: f32 = 0.6;
-const SEA_CHOPPY: f32 = 4.;
-const SEA_SPEED: f32 = 0.8;
-const SEA_FREQ: f32 = 0.16;
-const SEA_BASE: vec3<f32> = vec3<f32>(0., 0.09, 0.18);
+const NUM_STEPS: i32 = 8; // tweak: 1..32
+const PI: f32 = 3.141592; // tweak: off
+// Unused, kept from the original.
+const EPSILON: f32 = 0.001; // tweak: off
+const ITER_GEOMETRY: i32 = 3; // tweak: 1..8
+const ITER_FRAGMENT: i32 = 5; // tweak: 1..12
+const SEA_HEIGHT: f32 = 0.6; // tweak: 0..2
+const SEA_CHOPPY: f32 = 4.; // tweak: 0..10
+const SEA_SPEED: f32 = 0.8; // tweak: 0..4
+const SEA_FREQ: f32 = 0.16; // tweak: 0..0.5
+const SEA_BASE: vec3<f32> = vec3<f32>(0., 0.09, 0.18); // tweak: color
 const SEA_WATER_COLOR: vec3<f32> = vec3<f32>(0.48, 0.54, 0.36);
+// Camera speed along the sea.
+const TIME_SCALE: f32 = 0.3; // tweak: 0..2
+// Direction towards the sun (normalized in use).
+const LIGHT_DIR: vec3<f32> = vec3<f32>(0., 1., 0.8); // tweak: -1..1
 const octave_m: mat2x2<f32> = mat2x2<f32>(vec2<f32>(1.6, 1.2), vec2<f32>(-1.2, 1.6));
 
 fn fromEuler(ang: vec3<f32>) -> mat3x3<f32> {
@@ -173,12 +178,12 @@ fn getPixel(coord: vec2<f32>, time: f32) -> vec3<f32> {
     heightMapTracing(ori, dir, &p);
     let dist: vec3<f32> = p - ori;
     let n: vec3<f32> = getNormal(p, dot(dist, dist) * (0.1 / i_resolution().x));
-    let light: vec3<f32> = normalize(vec3<f32>(0., 1., 0.8));
+    let light: vec3<f32> = normalize(LIGHT_DIR);
     return mix(getSkyColor(dir), getSeaColor(p, n, light, dir, dist), pow(smoothstep(0., -0.02, dir.y), 0.2));
 }
 
 fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
-    let time: f32 = i_time() * 0.3 + i_mouse().x * 0.01;
+    let time: f32 = i_time() * TIME_SCALE + i_mouse().x * 0.01;
 
     // var color: vec3<f32> = vec3<f32>(0.);
 

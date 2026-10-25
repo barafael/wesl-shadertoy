@@ -20,6 +20,7 @@ mod persist;
 mod presets;
 mod render;
 mod theme;
+mod tweak;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,11 +37,10 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy::render::error_handler::{ErrorType, RenderError, RenderErrorHandler, RenderErrorPolicy};
 use render::active::{ActiveShader, Playback, RejectedGeneration, ShaderFeedback};
 use render::{ShaderToyFragment, ShaderToyRenderPlugin, ShaderToyUniform};
-use theme::Theme;
 
-/// Seconds of typing quiet before an auto-run compile fires (so a burst of
-/// keystrokes compiles once, not once per character).
-const AUTO_RUN_DELAY: f64 = 0.25;
+/// Strongest frosted-glass blur the settings allow (sigma, in points):
+/// beyond it the shader washes out into one flat colour behind the UI.
+const MAX_BLUR: f32 = 24.0;
 
 /// Value reported by `i_sample_rate()`. shadertoy reports the audio sample
 /// rate; there is no audio here, so we report the conventional 44.1 kHz.
@@ -80,6 +80,7 @@ fn main() {
         .init_resource::<ShaderToyState>()
         .init_resource::<CurrentShader>()
         .init_resource::<CompileStatus>()
+        .init_resource::<Tweaks>()
         .init_resource::<RunRequest>()
         .init_resource::<UiWindows>()
         .init_resource::<editor::HighlightCache>()
@@ -111,18 +112,13 @@ struct ShaderDoc {
 #[derive(Resource)]
 struct ShaderToyState {
     time: f32,
-    paused: bool,
+    /// Clock speed from the toolbar slider; 0 pauses.
     speed: f32,
     mouse: Vec4,
     mouse_held: bool,
     fps: f32,
     /// In-shader debugger overlay on/off (toolbar bug icon).
     debugger: bool,
-    auto_run: bool,
-    /// egui time of the last edit while auto-run is on; the `ui` system
-    /// raises a run request once [`AUTO_RUN_DELAY`] seconds go by without a
-    /// new edit (debounce, so typing does not compile per keystroke).
-    pending_run: Option<f64>,
     last_preset: &'static str,
     /// The viewport area the panels leave free (egui points), recorded by
     /// [`ui`] each frame; iMouse only counts presses there.
@@ -133,14 +129,11 @@ impl Default for ShaderToyState {
     fn default() -> Self {
         Self {
             time: 0.0,
-            paused: false,
             speed: 1.0,
             mouse: Vec4::ZERO,
             mouse_held: false,
             fps: 0.0,
             debugger: false,
-            auto_run: false,
-            pending_run: None,
             last_preset: "Plasma",
             canvas: egui::Rect::NOTHING,
         }
@@ -185,6 +178,32 @@ struct CompileStatus {
     note: Option<(String, bool)>,
 }
 
+/// The on-screen shader's live-tweakable constants ([`tweak`]) and their
+/// current values, edited in the Constants window.
+#[derive(Resource)]
+struct Tweaks {
+    /// From the latest successful compile; slot = index.
+    constants: Vec<tweak::Constant>,
+    /// Current value per slot, uploaded every frame as `i_tweaks`.
+    values: [Vec4; tweak::MAX_TWEAKS],
+    /// Literal constants that have to stay constants (see
+    /// [`compile::CompiledShader::fixed`]).
+    fixed: Vec<String>,
+    /// Bit per slot changed since its value was last written into the source.
+    dirty: u32,
+}
+
+impl Default for Tweaks {
+    fn default() -> Self {
+        Self {
+            constants: Vec::new(),
+            values: [Vec4::ZERO; tweak::MAX_TWEAKS],
+            fixed: Vec::new(),
+            dirty: 0,
+        }
+    }
+}
+
 /// Set by the Run button / Ctrl+Enter, consumed by [`compile_and_apply`].
 #[derive(Resource, Default)]
 struct RunRequest(bool);
@@ -193,6 +212,7 @@ struct RunRequest(bool);
 struct UiWindows {
     editor: bool,
     wgsl: bool,
+    constants: bool,
     settings: bool,
     about: bool,
     errors_expanded: bool,
@@ -203,6 +223,7 @@ impl Default for UiWindows {
         Self {
             editor: true,
             wgsl: false,
+            constants: false,
             settings: false,
             about: false,
             errors_expanded: true,
@@ -214,29 +235,29 @@ impl Default for UiWindows {
 /// `localStorage` on the web; in-memory only in native builds.
 #[derive(Resource)]
 struct Settings {
-    theme: Theme,
     random_preset: bool,
     /// Live diagnostics from wgsl-analyzer while editing.
     analyzer: bool,
+    /// Frosted glass: how blurred the shader shows through windows and
+    /// panels, as the blur's sigma in points; 0 is off (opaque UI).
+    blur: f32,
 }
 
 impl Settings {
-    /// Used when nothing is saved yet: OS theme, random preset and live
-    /// diagnostics on.
+    /// Used when nothing is saved yet: random preset, live diagnostics and
+    /// frosted glass on.
     fn fallback() -> Self {
         Self {
-            theme: Theme::from_system(),
             random_preset: true,
             analyzer: true,
+            blur: 12.0,
         }
     }
 
     fn encode(&self) -> String {
         format!(
-            "theme={};random={};analyzer={}",
-            self.theme.as_str(),
-            self.random_preset as u8,
-            self.analyzer as u8
+            "random={};analyzer={};blur_px={}",
+            self.random_preset as u8, self.analyzer as u8, self.blur
         )
     }
 
@@ -244,13 +265,13 @@ impl Settings {
         let mut out = Self::fallback();
         for part in s.split(';') {
             match part.split_once('=') {
-                Some(("theme", t)) => {
-                    if let Some(theme) = Theme::parse(t) {
-                        out.theme = theme;
-                    }
-                }
                 Some(("random", r)) => out.random_preset = r == "1",
                 Some(("analyzer", a)) => out.analyzer = a == "1",
+                Some(("blur_px", b)) => {
+                    if let Ok(b) = b.parse::<f32>() {
+                        out.blur = b.clamp(0.0, MAX_BLUR);
+                    }
+                }
                 _ => {}
             }
         }
@@ -367,20 +388,18 @@ struct UniformParams<'w, 's> {
     uniforms: Single<'w, 's, &'static mut ShaderToyUniform>,
     playback: ResMut<'w, Playback>,
     debugger_on: ResMut<'w, debugger::DebuggerOn>,
+    tweaks: Res<'w, Tweaks>,
 }
 
 /// Advance the shadertoy clock, count frames, track iMouse and viewport size.
 fn update_uniforms(mut p: UniformParams) {
     // Clamp so a backgrounded tab does not teleport the clock on resume.
     let dt = p.time.delta_secs().min(0.1);
-    let step = if p.state.paused {
-        0.0
-    } else {
-        dt * p.state.speed
-    };
+    let step = dt * p.state.speed;
     p.state.time += step;
-    if p.playback.paused != p.state.paused {
-        p.playback.paused = p.state.paused;
+    let paused = p.state.speed == 0.0;
+    if p.playback.paused != paused {
+        p.playback.paused = paused;
     }
     if dt > 0.0 {
         p.state.fps = if p.state.fps == 0.0 {
@@ -433,6 +452,10 @@ fn update_uniforms(mut p: UniformParams) {
     p.uniforms.date = date_uniforms();
     p.uniforms.sample_rate = SAMPLE_RATE_HZ;
     p.uniforms.frame_rate = p.state.fps;
+    // Indexed by the latest compile's slots; the shader still on screen
+    // until that one's pipelines are built may misread them for a frame or
+    // two if the list of constants changed.
+    p.uniforms.tweaks = p.tweaks.values;
     p.debugger_on
         .set_if_neq(debugger::DebuggerOn(p.state.debugger));
     // i_frame and the buffer channels' clocks and sizes belong to the shader
@@ -449,6 +472,7 @@ struct CompileParams<'w, 's> {
     current: ResMut<'w, CurrentShader>,
     fragment: Single<'w, 's, &'static mut ShaderToyFragment>,
     feedback: Res<'w, ShaderFeedback>,
+    tweaks: ResMut<'w, Tweaks>,
 }
 
 /// Compile the editor text and, on success, hot-swap the running shader.
@@ -480,6 +504,14 @@ fn compile_and_apply(mut p: CompileParams) {
                 .expect("slot handles stay valid");
             p.current.generation += 1;
             p.current.wgsl = compiled.wgsl;
+            // Start from the values in the source (which already hold any
+            // tweak that was written back).
+            for (slot, c) in compiled.tweaks.iter().enumerate() {
+                p.tweaks.values[slot] = Vec4::from_array(c.value);
+            }
+            p.tweaks.constants = compiled.tweaks;
+            p.tweaks.fixed = compiled.fixed;
+            p.tweaks.dirty = 0;
             // The render world switches to it (and restarts i_frame, the
             // channel clocks and the buffers) once its pipelines are built.
             **p.fragment = ShaderToyFragment {
@@ -605,6 +637,10 @@ struct UiParams<'w, 's> {
     highlight: ResMut<'w, editor::HighlightCache>,
     analyzer: Res<'w, analyzer::Analyzer>,
     playback: ResMut<'w, Playback>,
+    blur: ResMut<'w, render::blur::Blur>,
+    tweaks: ResMut<'w, Tweaks>,
+    /// egui's id for the blurred image, registered on the first frame.
+    blur_texture: Local<'s, Option<egui::TextureId>>,
 }
 
 /// Keep wgsl-analyzer (live diagnostics) in sync with the document and the
@@ -619,10 +655,24 @@ fn run_analyzer(
 
 /// All egui UI: toolbar, editor window, error panel, WGSL viewer.
 fn ui(mut p: UiParams) {
+    // Register the blurred backdrop with egui once: resizing replaces the
+    // image behind the same handle, so the id stays valid.
+    let blur_texture = *p.blur_texture.get_or_insert_with(|| {
+        p.contexts
+            .add_image(bevy_egui::EguiTextureHandle::Weak(p.blur.image.id()))
+    });
     let Ok(ctx) = p.contexts.ctx_mut() else {
         return;
     };
-    theme::apply(ctx, p.settings.theme);
+    theme::apply(ctx);
+    let sigma = p.settings.blur * ctx.pixels_per_point();
+    if p.blur.sigma != sigma {
+        p.blur.sigma = sigma;
+    }
+    let glass = (p.settings.blur > 0.0).then(|| Glass {
+        texture: blur_texture,
+        screen: ctx.viewport_rect(),
+    });
 
     // Global shortcuts: Ctrl/Cmd+Enter compiles, Ctrl/Cmd+S saves,
     // Ctrl/Cmd+O opens. (index.html suppresses the browser's own S/O dialogs.)
@@ -636,7 +686,6 @@ fn ui(mut p: UiParams) {
     });
     if run {
         p.run.0 = true;
-        p.state.pending_run = None;
     }
     if save {
         p.status.note = match persist::save_now(&p.doc.text) {
@@ -682,7 +731,7 @@ fn ui(mut p: UiParams) {
     );
 
     // --- toolbar -----------------------------------------------------------
-    egui::Panel::top("toolbar").show(&mut root_ui, |ui| {
+    show_panel(&mut root_ui, glass, egui::Panel::top("toolbar"), |ui| {
         ui.horizontal(|ui| {
             if ui
                 .button("Compile WESL Shader")
@@ -690,15 +739,7 @@ fn ui(mut p: UiParams) {
                 .clicked()
             {
                 p.run.0 = true;
-                p.state.pending_run = None;
             }
-            let pause_label = if p.state.paused {
-                icon(lucide_icons::Icon::Pause)
-            } else {
-                icon(lucide_icons::Icon::Play)
-            };
-            ui.toggle_value(&mut p.state.paused, pause_label)
-                .on_hover_text("Pause / resume the clock");
             if ui
                 .button(icon(lucide_icons::Icon::RotateCcw))
                 .on_hover_text("Reset time, frame counter and buffers")
@@ -711,7 +752,8 @@ fn ui(mut p: UiParams) {
                 egui::Slider::new(&mut p.state.speed, 0.0..=4.0)
                     .text("speed")
                     .max_decimals(2),
-            );
+            )
+            .on_hover_text("Clock speed; 0 pauses");
             // Fixed-width slots: digit changes must not reflow the toolbar.
             readout(ui, format!("t = {:.1}s", p.state.time), 84.0);
             readout(ui, format!("{:.0} fps", p.state.fps), 48.0);
@@ -728,17 +770,16 @@ fn ui(mut p: UiParams) {
                         {
                             p.doc.text = preset.code.to_string();
                             p.state.last_preset = preset.name;
-                            p.state.pending_run = None;
                             p.run.0 = true;
                         }
                     }
                 });
 
-            ui.checkbox(&mut p.state.auto_run, "auto-run");
-
             ui.separator();
             ui.toggle_value(&mut p.wins.editor, "Code");
             ui.toggle_value(&mut p.wins.wgsl, "WGSL");
+            ui.toggle_value(&mut p.wins.constants, "Constants")
+                .on_hover_text("Tweak the shader's constants live");
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
             ui.toggle_value(&mut p.wins.settings, icon(lucide_icons::Icon::Settings))
@@ -746,134 +787,101 @@ fn ui(mut p: UiParams) {
             ui.toggle_value(&mut p.wins.about, "?")
                 .on_hover_text("About");
         });
-        // Block canvas clicks through empty toolbar space.
-        ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
     });
 
     // --- status / error panel ----------------------------------------------
-    egui::Panel::bottom("status").show(&mut root_ui, |ui| {
-        ui.horizontal(|ui| {
-            if let Some(err) = &p.status.error {
-                let summary = err.lines().next().unwrap_or("error").to_string();
-                if ui
-                    .selectable_label(
-                        p.wins.errors_expanded,
-                        format!("{} compile failed", icon(lucide_icons::Icon::CircleX)),
-                    )
-                    .on_hover_text("The previous shader keeps running")
-                    .clicked()
-                {
-                    p.wins.errors_expanded = !p.wins.errors_expanded;
-                }
-                ui.label(egui::RichText::new(summary).color(p.settings.theme.err_color()));
-            } else if let Some((note, ok)) = &p.status.note {
-                let color = if *ok {
-                    p.settings.theme.ok_color()
-                } else {
-                    p.settings.theme.err_color()
-                };
-                ui.label(egui::RichText::new(note.clone()).color(color));
-            } else if let Some(ms) = p.status.last_ms {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} compiled in {ms:.1} ms",
-                        icon(lucide_icons::Icon::Check)
-                    ))
-                    .color(p.settings.theme.ok_color()),
-                );
-            } else {
-                ui.label("not compiled yet");
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                analyzer_readout(ui, &p.analyzer, p.settings.theme);
-            });
-        });
-        if p.wins.errors_expanded
-            && let Some(err) = &p.status.error
-        {
-            ui.push_id("error_text", |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(140.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut err.as_str())
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
-            });
-        }
-        // Block canvas clicks through empty status-bar space.
-        ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
-    });
+    status_bar(
+        &mut root_ui,
+        glass,
+        &p.status,
+        &mut p.wins.errors_expanded,
+        &p.analyzer,
+    );
 
     // --- canvas: what the panels leave free shows the shader ----------------
     p.state.canvas = root_ui.available_rect_before_wrap();
 
     // --- editor window -------------------------------------------------------
     if p.wins.editor {
-        egui::Window::new("Code — package::user")
-            .id(egui::Id::new("code_window"))
-            .default_pos([12.0, 44.0])
-            .default_size([640.0, 460.0])
-            .open(&mut p.wins.editor)
-            .show(ctx, |ui| {
-                let theme = p.settings.theme;
-                let out = editor::show_code_editor(
+        show_window(
+            ctx,
+            glass,
+            "code_window",
+            egui::Window::new("Code — package::user")
+                .default_pos([12.0, 44.0])
+                .default_size([640.0, 460.0])
+                .open(&mut p.wins.editor),
+            |ui| {
+                editor::show_code_editor(
                     ui,
                     &mut p.doc.text,
-                    theme,
                     &mut p.highlight,
                     p.analyzer.diagnostics(),
                 );
-                if out.changed && p.state.auto_run {
-                    // Debounced: the compile fires AUTO_RUN_DELAY after the
-                    // last keystroke, not once per character.
-                    p.state.pending_run = Some(ctx.input(|i| i.time));
-                }
-            });
-    }
-
-    // --- debounced auto-run --------------------------------------------------
-    if let Some(at) = p.state.pending_run
-        && ctx.input(|i| i.time) - at >= AUTO_RUN_DELAY
-    {
-        p.state.pending_run = None;
-        p.run.0 = true;
+            },
+        );
     }
 
     // --- generated WGSL viewer -----------------------------------------------
     if p.wins.wgsl {
-        egui::Window::new("Generated WGSL — package::main")
-            .id(egui::Id::new("wgsl_window"))
-            .default_pos([680.0, 60.0])
-            .default_size([520.0, 480.0])
-            .open(&mut p.wins.wgsl)
-            .show(ctx, |ui| {
-                let theme = p.settings.theme;
-                editor::show_code_view(ui, &p.current.wgsl, theme, &mut p.highlight);
-            });
+        show_window(
+            ctx,
+            glass,
+            "wgsl_window",
+            egui::Window::new("Generated WGSL — package::main")
+                .default_pos([680.0, 60.0])
+                .default_size([520.0, 480.0])
+                .open(&mut p.wins.wgsl),
+            |ui| {
+                editor::show_code_view(ui, &p.current.wgsl, &mut p.highlight);
+            },
+        );
+    }
+
+    // --- constants window ----------------------------------------------------
+    if p.wins.constants {
+        show_window(
+            ctx,
+            glass,
+            "constants_window",
+            egui::Window::new("Constants")
+                .default_pos([680.0, 60.0])
+                .default_size([340.0, 300.0])
+                .open(&mut p.wins.constants),
+            |ui| constants_ui(ui, &mut p.tweaks),
+        );
+    }
+    // Write tweaks into the source once the pointer lets go, so a drag
+    // edits the text once, not every frame.
+    if p.tweaks.dirty != 0 && !ctx.input(|i| i.pointer.any_down()) {
+        let tweaks = &mut *p.tweaks;
+        for (slot, c) in tweaks.constants.iter().enumerate() {
+            if tweaks.dirty & (1 << slot) != 0
+                && !tweak::write_back(&mut p.doc.text, c, tweaks.values[slot].to_array())
+            {
+                let note = format!("{} is no longer in the code; compile to refresh", c.name);
+                p.status.note = Some((note, false));
+            }
+        }
+        tweaks.dirty = 0;
     }
 
     // --- settings window -----------------------------------------------------
     if p.wins.settings {
-        egui::Window::new("Settings")
-            .id(egui::Id::new("settings_window"))
-            .default_pos([12.0, 60.0])
-            .default_size([300.0, 150.0])
-            .open(&mut p.wins.settings)
-            .show(ctx, |ui| {
+        show_window(
+            ctx,
+            glass,
+            "settings_window",
+            egui::Window::new("Settings")
+                .default_pos([12.0, 60.0])
+                .default_size([300.0, 150.0])
+                .open(&mut p.wins.settings),
+            |ui| {
                 let before = (
-                    p.settings.theme,
                     p.settings.random_preset,
                     p.settings.analyzer,
+                    p.settings.blur,
                 );
-                ui.horizontal(|ui| {
-                    ui.label("theme:");
-                    ui.radio_value(&mut p.settings.theme, Theme::Dark, "gruvbox dark");
-                    ui.radio_value(&mut p.settings.theme, Theme::Light, "gruvbox light");
-                });
                 ui.checkbox(
                     &mut p.settings.random_preset,
                     "random preset on fresh start",
@@ -882,27 +890,40 @@ fn ui(mut p: UiParams) {
                 if let analyzer::Status::Unavailable(why) = p.analyzer.status() {
                     ui.label(egui::RichText::new(why).small().weak());
                 }
+                ui.add(
+                    egui::Slider::new(&mut p.settings.blur, 0.0..=MAX_BLUR)
+                        .text("frosted glass blur")
+                        .suffix(" px")
+                        .max_decimals(0),
+                )
+                .on_hover_text(
+                    "How far the shader behind the UI is blurred (Gaussian sigma); 0 turns the glass off",
+                );
                 ui.separator();
                 ui.weak("Ctrl+S saves · Ctrl+O opens a .wesl file");
                 let after = (
-                    p.settings.theme,
                     p.settings.random_preset,
                     p.settings.analyzer,
+                    p.settings.blur,
                 );
                 if after != before {
                     persist::save_settings(&p.settings.encode());
                 }
-            });
+            },
+        );
     }
 
     // --- about window ----------------------------------------------------------
     if p.wins.about {
-        egui::Window::new("About wesl-shadertoy")
-            .id(egui::Id::new("about_window"))
-            .default_pos([12.0, 60.0])
-            .default_size([380.0, 330.0])
-            .open(&mut p.wins.about)
-            .show(ctx, |ui| {
+        show_window(
+            ctx,
+            glass,
+            "about_window",
+            egui::Window::new("About wesl-shadertoy")
+                .default_pos([12.0, 60.0])
+                .default_size([380.0, 330.0])
+                .open(&mut p.wins.about),
+            |ui| {
                 ui.label(
                     "A classic shadertoy-style live shader playground for WESL: one \
                      animated fullscreen fragment shader, one code editor.",
@@ -927,13 +948,269 @@ fn ui(mut p: UiParams) {
                      · Gruvbox colors by morhetz · presets ported from shadertoy \
                      classics and public-domain snippets.",
                 );
+            },
+        );
+    }
+}
+
+/// Frosted glass: the blurred shader image ([`render::blur`]) painted under
+/// a window or panel, with the theme's fill made translucent on top.
+#[derive(Clone, Copy)]
+struct Glass {
+    texture: egui::TextureId,
+    /// The viewport the blurred image covers (egui points).
+    screen: egui::Rect,
+}
+
+impl Glass {
+    /// How much of the theme's fill covers the blurred backdrop. Less makes
+    /// comments and weak text unreadable over bright shaders.
+    const OPACITY: f32 = 0.9;
+
+    fn shape(self, rect: egui::Rect, fill: egui::Color32) -> egui::Shape {
+        let to_uv = |p: egui::Pos2| ((p - self.screen.min) / self.screen.size()).to_pos2();
+        let uv = egui::Rect::from_min_max(to_uv(rect.min), to_uv(rect.max));
+        egui::Shape::Vec(vec![
+            egui::Shape::image(self.texture, rect, uv, egui::Color32::WHITE),
+            egui::Shape::rect_filled(rect, 0.0, fill.gamma_multiply(Self::OPACITY)),
+        ])
+    }
+}
+
+/// Show `window` under the id `id`, on frosted `glass` if given: its own
+/// fill turns transparent and the glass is painted first in its layer,
+/// sized to the window once it is laid out.
+fn show_window(
+    ctx: &egui::Context,
+    glass: Option<Glass>,
+    id: &str,
+    window: egui::Window,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let id = egui::Id::new(id);
+    let window = window.id(id);
+    let Some(glass) = glass else {
+        window.show(ctx, add_contents);
+        return;
+    };
+    let fill = ctx.global_style().visuals.window_fill;
+    let frame = egui::Frame::window(&ctx.global_style()).fill(egui::Color32::TRANSPARENT);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, id));
+    let backdrop = painter.add(egui::Shape::Noop);
+    if let Some(shown) = window.frame(frame).show(ctx, add_contents) {
+        painter.set(backdrop, glass.shape(shown.response.rect, fill));
+    }
+}
+
+/// [`show_window`] for a panel of the root `ui`.
+fn show_panel(
+    ui: &mut egui::Ui,
+    glass: Option<Glass>,
+    panel: egui::Panel,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let Some(glass) = glass else {
+        panel.show(ui, add_contents);
+        return;
+    };
+    let fill = ui.visuals().panel_fill;
+    let frame = egui::Frame::side_top_panel(ui.style()).fill(egui::Color32::TRANSPARENT);
+    let backdrop = ui.painter().add(egui::Shape::Noop);
+    let shown = panel.frame(frame).show(ui, add_contents);
+    ui.painter()
+        .set(backdrop, glass.shape(shown.response.rect, fill));
+}
+
+/// The status bar: compile result or note on the left, wgsl-analyzer on the
+/// right, and below them the full compile error while it is expanded.
+///
+/// Canvas clicks through empty bar space are already ignored: the canvas
+/// rect excludes the panels. Two panel ids, so each keeps its own size: the
+/// status line always fits its one row, while the expanded error panel is
+/// resizable and remembers the height it was dragged to.
+fn status_bar(
+    root_ui: &mut egui::Ui,
+    glass: Option<Glass>,
+    status: &CompileStatus,
+    errors_expanded: &mut bool,
+    analyzer: &analyzer::Analyzer,
+) {
+    let expanded_error = status.error.as_deref().filter(|_| *errors_expanded);
+    let panel = match expanded_error {
+        Some(_) => egui::Panel::bottom("status_errors")
+            .resizable(true)
+            .default_size(220.0)
+            .min_size(80.0),
+        None => egui::Panel::bottom("status").resizable(false),
+    };
+    show_panel(root_ui, glass, panel, |ui| {
+        ui.horizontal(|ui| {
+            if let Some(err) = &status.error {
+                let summary = err.lines().next().unwrap_or("error");
+                if ui
+                    .selectable_label(
+                        *errors_expanded,
+                        format!("{} compile failed", icon(lucide_icons::Icon::CircleX)),
+                    )
+                    .on_hover_text("The previous shader keeps running")
+                    .clicked()
+                {
+                    *errors_expanded = !*errors_expanded;
+                }
+                ui.label(egui::RichText::new(summary).color(theme::ERR_COLOR));
+            } else if let Some((note, ok)) = &status.note {
+                let color = if *ok {
+                    theme::OK_COLOR
+                } else {
+                    theme::ERR_COLOR
+                };
+                ui.label(egui::RichText::new(note.clone()).color(color));
+            } else if let Some(ms) = status.last_ms {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} compiled in {ms:.1} ms",
+                        icon(lucide_icons::Icon::Check)
+                    ))
+                    .color(theme::OK_COLOR),
+                );
+            } else {
+                ui.label("not compiled yet");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                analyzer_readout(ui, analyzer);
             });
+        });
+        if let Some(mut err) = expanded_error {
+            ui.push_id("error_text", |ui| {
+                // Fills the panel, so dragging its edge resizes the text.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut err)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .min_size(ui.available_size()),
+                        );
+                    });
+            });
+        }
+    });
+}
+
+/// The Constants window: a control per live-tweakable constant. Edits go
+/// straight to [`Tweaks::values`] (uploaded as uniforms, so the shader
+/// follows without a recompile) and mark the slot dirty for write-back.
+fn constants_ui(ui: &mut egui::Ui, tweaks: &mut Tweaks) {
+    if tweaks.constants.is_empty() {
+        ui.label(
+            "No tweakable constants. Module-level constants with literal values \
+             show up here after a compile, e.g.",
+        );
+        ui.code("const SPEED: f32 = 1.0;");
+    } else {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("constants_grid")
+                .num_columns(3)
+                .striped(true)
+                .show(ui, |ui| {
+                    for (slot, c) in tweaks.constants.iter().enumerate() {
+                        ui.monospace(&c.name);
+                        let value = &mut tweaks.values[slot];
+                        let before = *value;
+                        constant_control(ui, c, value);
+                        let default = Vec4::from_array(c.value);
+                        if ui
+                            .add_enabled(
+                                *value != default,
+                                egui::Button::new(icon(lucide_icons::Icon::RotateCcw)),
+                            )
+                            .on_hover_text("Back to the value it was compiled with")
+                            .clicked()
+                        {
+                            *value = default;
+                        }
+                        if *value != before {
+                            tweaks.dirty |= 1 << slot;
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+    ui.separator();
+    if !tweaks.fixed.is_empty() {
+        ui.weak(format!(
+            "Fixed (WGSL needs them as true constants): {}",
+            tweaks.fixed.join(", ")
+        ));
+    }
+    ui.weak(
+        "Changes apply live and are written into the code on release. \
+         Annotate a constant with `// tweak: 0..2`, `// tweak: color` or \
+         `// tweak: off`.",
+    );
+}
+
+/// The control for one constant: a slider for numbers, a color picker for
+/// colors, one drag field per component for other vectors.
+fn constant_control(ui: &mut egui::Ui, c: &tweak::Constant, value: &mut Vec4) {
+    use tweak::Kind;
+    match c.kind {
+        Kind::F32 => {
+            let (lo, hi) = c.range(c.value[0]);
+            ui.add(egui::Slider::new(&mut value.x, lo..=hi).clamping(egui::SliderClamping::Never));
+        }
+        Kind::I32 | Kind::U32 => {
+            let (lo, hi) = c.range(c.value[0]);
+            let mut n = value.x.round() as i64;
+            let slider = egui::Slider::new(&mut n, lo as i64..=hi as i64)
+                .clamping(egui::SliderClamping::Never);
+            if ui.add(slider).changed() {
+                let min = if c.kind == Kind::U32 { 0 } else { i64::MIN };
+                value.x = n.max(min) as f32;
+            }
+        }
+        // egui's color button round-trips the color through its own
+        // representation every frame, nudging it by float noise: only a
+        // real edit may change the value (and mark it for write-back).
+        Kind::Vec(3) if c.is_color() => {
+            let mut rgb = value.truncate().to_array();
+            ui.color_edit_button_rgb(&mut rgb);
+            let picked = Vec3::from_array(rgb).extend(0.0);
+            if !picked.abs_diff_eq(*value, 1e-4) {
+                *value = picked;
+            }
+        }
+        Kind::Vec(4) if c.is_color() => {
+            let mut rgba = value.to_array();
+            ui.color_edit_button_rgba_unmultiplied(&mut rgba);
+            let picked = Vec4::from_array(rgba);
+            if !picked.abs_diff_eq(*value, 1e-4) {
+                *value = picked;
+            }
+        }
+        Kind::Vec(n) => {
+            ui.horizontal(|ui| {
+                for i in 0..n as usize {
+                    let mut field = egui::DragValue::new(&mut value[i]);
+                    field = match c.hint {
+                        // An annotated range: drag across it in ~200 px.
+                        tweak::Hint::Range(lo, hi) => {
+                            field.range(lo..=hi).speed(((hi - lo) / 200.0) as f64)
+                        }
+                        _ => field.speed((c.value[i].abs().max(0.1) * 0.01) as f64),
+                    };
+                    ui.add(field);
+                }
+            });
+        }
     }
 }
 
 /// wgsl-analyzer's state at the right end of the status bar: problem counts
 /// while it runs, otherwise why not (the details are in the hover text).
-fn analyzer_readout(ui: &mut egui::Ui, analyzer: &analyzer::Analyzer, theme: Theme) {
+fn analyzer_readout(ui: &mut egui::Ui, analyzer: &analyzer::Analyzer) {
     use analyzer::{Severity, Status};
     // Starting / unavailable is not the shader's fault: weak, not red.
     let weak = ui.visuals().weak_text_color();
@@ -952,11 +1229,11 @@ fn analyzer_readout(ui: &mut egui::Ui, analyzer: &analyzer::Analyzer, theme: The
             match (count(Severity::Error), count(Severity::Warning)) {
                 (Some(e), Some(w)) => {
                     let text = format!("{}, {}", plural(e, "error"), plural(w, "warning"));
-                    (text, theme.err_color(), hover)
+                    (text, theme::ERR_COLOR, hover)
                 }
-                (Some(e), None) => (plural(e, "error"), theme.err_color(), hover),
+                (Some(e), None) => (plural(e, "error"), theme::ERR_COLOR, hover),
                 (None, Some(w)) => (plural(w, "warning"), ui.visuals().warn_fg_color, hover),
-                (None, None) => (icon(lucide_icons::Icon::Check), theme.ok_color(), hover),
+                (None, None) => (icon(lucide_icons::Icon::Check), theme::OK_COLOR, hover),
             }
         }
     };
@@ -1012,7 +1289,6 @@ fn open_into(
 ) {
     doc.text = text;
     state.last_preset = "file";
-    state.pending_run = None;
     run.0 = true;
     status.note = Some((format!("opened {name}"), true));
 }
@@ -1189,6 +1465,47 @@ mod tests {
         assert!(ctx.input(|i| i.pointer.interact_pos().is_some()));
     }
 
+    /// The status bar grows to show an expanded compile error and shrinks
+    /// back to its one row once the error is fixed (it used to keep the
+    /// error's height, and grew too little to show the error).
+    #[test]
+    fn status_bar_fits_its_content() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let analyzer = analyzer::Analyzer::default();
+        let mut expanded = true;
+        // The height the bar takes from the bottom of the screen.
+        let mut bar_height = |status: &CompileStatus| {
+            let mut canvas = egui::Rect::NOTHING;
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| {
+                    status_bar(ui, None, status, &mut expanded, &analyzer);
+                    canvas = ui.available_rect_before_wrap();
+                })
+                .drop_without_applying_deltas();
+            }
+            screen.max.y - canvas.max.y
+        };
+
+        let ok = CompileStatus {
+            last_ms: Some(1.0),
+            ..default()
+        };
+        let row = bar_height(&ok);
+        assert!(row < 40.0, "status line is {row} tall");
+        let failed = CompileStatus {
+            error: Some((1..=12).map(|i| format!("line {i}\n")).collect()),
+            ..default()
+        };
+        let open = bar_height(&failed);
+        assert!(open >= 200.0, "expanded error is only {open} tall");
+        assert_eq!(bar_height(&ok), row, "the bar shrinks back after a fix");
+    }
+
     #[test]
     fn imouse_press_drag_release() {
         let mut s = ShaderToyState::default();
@@ -1219,8 +1536,6 @@ mod tests {
             .drop_without_applying_deltas();
         let font_id = egui::FontId::proportional(14.0);
         for icon in [
-            lucide_icons::Icon::Play,
-            lucide_icons::Icon::Pause,
             lucide_icons::Icon::RotateCcw,
             lucide_icons::Icon::Bug,
             lucide_icons::Icon::Settings,

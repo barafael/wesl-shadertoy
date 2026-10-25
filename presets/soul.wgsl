@@ -4,6 +4,16 @@
 import package::shadertoy::i_time;
 import package::shadertoy::i_resolution;
 
+const BACKGROUND_COLOR: vec3<f32> = vec3<f32>(0.2235, 0.3804, 0.5882);
+const EYEBROW_COLOR: vec3<f32> = vec3<f32>(0.3451, 0.2314, 0.5255);
+const GLASS_COLOR: vec3<f32> = vec3<f32>(0.2);
+// The warm light from the right on the ghost's body.
+const RIM_LIGHT_COLOR: vec3<f32> = vec3<f32>(0.8941, 0.2039, 0.0824);
+// How much each step inside the ghost adds: lower is more see-through.
+const GHOST_DENSITY: f32 = 0.05; // tweak: 0.005..0.3
+const CAMERA_POS: vec3<f32> = vec3<f32>(-5., 0., -8.); // tweak: -12..12
+const MARCH_STEPS: i32 = 30; // tweak: 1..100
+
 struct Volume {
     dist: f32,
     mate: i32,
@@ -17,11 +27,11 @@ fn select2(a: Volume, b: Volume) -> Volume {
     return b;
 }
 
-const mat_eye_globe: i32 = 1;
-const mat_pupils: i32 = 2;
-const mat_eyebrows: i32 = 3;
-const mat_iris: i32 = 4;
-const mat_glass: i32 = 5;
+const mat_eye_globe: i32 = 1; // tweak: off (material id)
+const mat_pupils: i32 = 2; // tweak: off (material id)
+const mat_eyebrows: i32 = 3; // tweak: off (material id)
+const mat_iris: i32 = 4; // tweak: off (material id)
+const mat_glass: i32 = 5; // tweak: off (material id)
 fn rot(a: f32) -> mat2x2<f32> {
     let c: f32 = cos(a);
     var s: f32 = sin(a);
@@ -117,7 +127,7 @@ fn map2(pos_in: vec3<f32>) -> Volume {
 
     var ghost: Volume = Volume(0., 0, 0., 0.);
     ghost.mate = 0;
-    ghost.density = 0.05;
+    ghost.density = GHOST_DENSITY;
     ghost.space = 0.12;
 
     var opaque: Volume = Volume(0., 0, 0., 0.);
@@ -231,13 +241,13 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     color = vec4<f32>(0., 0., 0., 0.);
     let uv: vec2<f32> = coordinate / i_resolution().xy;
     let p: vec2<f32> = 2. * (coordinate - 0.5 * i_resolution().xy) / i_resolution().y;
-    var pos: vec3<f32> = vec3<f32>(-5., 0., -8.);
+    var pos: vec3<f32> = CAMERA_POS;
     var z: vec3<f32> = normalize(vec3<f32>(0., -0.3, 0.) - pos);
     var x: vec3<f32> = normalize(cross(z, vec3<f32>(0., 1., 0.)));
     var y: vec3<f32> = normalize(cross(x, z));
     let ray: vec3<f32> = normalize(z * 3. + x * p.x + y * p.y);
     var colorrgb = color.rgb;
-    colorrgb = color.rgb + (vec3<f32>(0.2235, 0.3804, 0.5882) * uv.y);
+    colorrgb = color.rgb + (BACKGROUND_COLOR * uv.y);
     color.r = colorrgb.x;
     color.g = colorrgb.y;
     color.b = colorrgb.z;
@@ -246,7 +256,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     var normal: vec3<f32> = vec3<f32>(0., 1., 0.);
     var ao: f32 = 1.;
     let rng: f32 = hash12(coordinate + i_time());
-    var count: i32 = 30;
+    var count: i32 = MARCH_STEPS;
 
     for (var index: i32 = 0; index < count; index += 1) {
         var volume: Volume = map2(pos);
@@ -279,11 +289,11 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
                 // break;
             }
             else if (volume.mate == mat_eyebrows) {
-                col = col + (vec3<f32>(0.3451, 0.2314, 0.5255));
+                col = col + (EYEBROW_COLOR);
                 // break;
             }
             else if (volume.mate == mat_glass) {
-                col = col + (vec3<f32>(0.2));
+                col = col + (GLASS_COLOR);
                 // break;
             }
             else {
@@ -292,7 +302,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
                 let frontlight: vec3<f32> = normalize(vec3<f32>(-1., 1., -2.));
                 let blue: vec3<f32> = vec3<f32>(0., 0., 1.) * pow(dot(normal, leftlight) * 0.5 + 0.5, 0.2);
                 let green: vec3<f32> = vec3<f32>(0., 1., 0.) * pow(dot(normal, frontlight) * 0.5 + 0.5, 2.);
-                let red: vec3<f32> = vec3<f32>(0.8941, 0.2039, 0.0824) * pow(dot(normal, rightlight) * 0.5 + 0.5, 0.5);
+                let red: vec3<f32> = RIM_LIGHT_COLOR * pow(dot(normal, rightlight) * 0.5 + 0.5, 0.5);
                 col = col + (blue + green + red);
                 col = col * (ao * 0.5 + 0.3);
                 // break;

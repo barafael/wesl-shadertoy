@@ -12,12 +12,21 @@ import package::shadertoy::i_resolution;
 import package::shadertoy::i_time;
 import package::shadertoy::i_time_delta;
 
-const speed: f32 = 0.01;
-const scale: f32 = 0.1;
-const falloff: f32 = 3.;
-const fade: f32 = 0.4;
-const strength: f32 = 1.;
-const range: f32 = 5.;
+const speed: f32 = 0.01; // tweak: 0..0.1
+const scale: f32 = 0.1; // tweak: 0..1
+const falloff: f32 = 3.; // tweak: 1..6
+const fade: f32 = 0.4; // tweak: 0..2
+const strength: f32 = 1.; // tweak: 0..5
+const range: f32 = 5.; // tweak: 0..15
+
+// The emitter: its radius, and the circle it wanders when the mouse is up.
+const EMITTER_RADIUS: f32 = 0.1; // tweak: 0.01..0.4
+const ORBIT_RADIUS: f32 = 0.3; // tweak: 0..0.8
+const ORBIT_SPEED: f32 = 2.; // tweak: 0..6
+// Shading: normal sample distance (px), highlight sharpness, rainbow phases.
+const GLOW_RANGE: f32 = 3.; // tweak: 0.5..10
+const SPECULAR_POWER: f32 = 20.; // tweak: 1..100
+const RAINBOW_PHASE: vec3<f32> = vec3<f32>(1., 2., 3.); // tweak: 0..6.3
 
 fn random3(c: vec3<f32>) -> vec3<f32> {
     var j = 4096. * sin(dot(c, vec3<f32>(17., 59.4, 15.)));
@@ -30,8 +39,8 @@ fn random3(c: vec3<f32>) -> vec3<f32> {
     return r - 0.5;
 }
 
-const F3: f32 = 0.3333333;
-const G3: f32 = 0.1666667;
+const F3: f32 = 0.3333333; // tweak: off
+const G3: f32 = 0.1666667; // tweak: off
 
 fn simplex3d(p: vec3<f32>) -> f32 {
     let s = floor(p + dot(p, vec3<f32>(F3)));
@@ -94,13 +103,13 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     // The emitter follows the mouse, or wanders in a circle by itself.
     let m = i_mouse();
     let mouse = (m.xy - R / 2.) / R.y;
-    let t = i_time() * 2.;
+    let t = i_time() * ORBIT_SPEED;
     if (m.z > 0.5) {
         uv = uv - mouse;
     } else {
-        uv = uv - vec2<f32>(cos(t), sin(t)) * 0.3;
+        uv = uv - vec2<f32>(cos(t), sin(t)) * ORBIT_RADIUS;
     }
-    var paint = smoothstep(0.1, 0., length(uv));
+    var paint = smoothstep(EMITTER_RADIUS, 0., length(uv));
 
     uv = frag_coord / R;
     let data = field(uv);
@@ -131,8 +140,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let dither = fract(sin(dot(frag_coord, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 
     let gray = field(uv).x;
-    let glow_range = 3.;
-    let unit = vec3<f32>(glow_range / R, 0.);
+    let unit = vec3<f32>(GLOW_RANGE / R, 0.);
     let normal = normalize(
         vec3<f32>(
             field(uv + unit.xz).r - field(uv - unit.xz).r,
@@ -143,10 +151,10 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     var color = vec3<f32>(0.3) * (1. - abs(dot(normal, vec3<f32>(0., 0., 1.))));
     let dir = normalize(vec3<f32>(0., 1., 2.));
-    let specular = pow(dot(normal, dir) * 0.5 + 0.5, 20.);
+    let specular = pow(dot(normal, dir) * 0.5 + 0.5, SPECULAR_POWER);
     color = color + vec3<f32>(0.5) * smoothstep(0.2, 1., specular);
     let tint =
-        0.5 + 0.5 * cos(vec3<f32>(1., 2., 3.) + dot(normal, dir) * 4. - uv.y * 3. - 3.);
+        0.5 + 0.5 * cos(RAINBOW_PHASE + dot(normal, dir) * 4. - uv.y * 3. - 3.);
     color = color + tint * smoothstep(0.15, 0., gray);
     color = color - dither * 0.1;
 

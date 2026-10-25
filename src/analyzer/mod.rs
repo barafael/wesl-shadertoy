@@ -158,6 +158,40 @@ impl Analyzer {
     }
 }
 
+/// Move `diagnostics` (char ranges into `old`) through the edit that turned
+/// `old` into `new`: one replaced span, found as the common prefix and suffix.
+/// Marks after the span shift by the length change; a mark edge inside it
+/// snaps to the span's edge, and a mark the edit swallowed whole is dropped.
+fn remap(diagnostics: &mut Vec<Diagnostic>, old: &str, new: &str) {
+    let (old, new): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let max_suffix = old.len().min(new.len()) - prefix;
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
+    // A start at the edit's end follows inserted text; an end at the edit's
+    // start stays put, so typing next to a mark never stretches it.
+    let start = |i: usize| match i {
+        i if i >= old_end => i - old_end + new_end,
+        i if i <= prefix => i,
+        _ => new_end,
+    };
+    let end = |i: usize| match i {
+        i if i <= prefix => i,
+        i if i >= old_end => i - old_end + new_end,
+        _ => prefix,
+    };
+    diagnostics.retain_mut(|d| {
+        d.range = start(d.range.start)..end(d.range.end);
+        !d.range.is_empty()
+    });
+}
+
 /// The LSP client: initialize handshake, full-text document sync, and
 /// `publishDiagnostics` for the editor document. Anything else the server
 /// asks for gets an empty answer, so it never waits on us.
@@ -216,6 +250,11 @@ impl<L: Link> Client<L> {
             self.handle(message, diagnostics)?;
         }
         if self.initialized && self.synced.as_deref() != Some(text) {
+            // Until the server reports on the new text, keep the old marks
+            // on the characters they were about, not on the same indices.
+            if let Some(old) = &self.synced {
+                remap(diagnostics, old, text);
+            }
             self.sync(text);
         }
         Ok(self.initialized)
@@ -375,6 +414,60 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+
+    /// Marks follow their characters through an edit until the server
+    /// reports on the new text.
+    #[test]
+    fn diagnostics_follow_edits() {
+        let mark = |range| Diagnostic {
+            range,
+            severity: Severity::Error,
+            message: String::new(),
+        };
+        let old = "let t: u32 = 1.0;";
+        let remapped = |new: &str, range| {
+            let mut d = vec![mark(range)];
+            remap(&mut d, old, new);
+            d.first().map(|d| d.range.clone())
+        };
+        // `1.0` is 13..16.
+        assert_eq!(
+            remapped("    let t: u32 = 1.0;", 13..16),
+            Some(17..20),
+            "insert before"
+        );
+        assert_eq!(
+            remapped("let t: u32 = 1.0; // x", 13..16),
+            Some(13..16),
+            "insert after"
+        );
+        assert_eq!(
+            remapped("let t: u32 = 1.0f;", 13..16),
+            Some(13..16),
+            "typed at its end"
+        );
+        assert_eq!(
+            remapped("let t: u32 = -1.0;", 13..16),
+            Some(14..17),
+            "typed at its start"
+        );
+        assert_eq!(
+            remapped("let t: u32 = 1.50;", 13..16),
+            Some(13..17),
+            "typed inside"
+        );
+        assert_eq!(
+            remapped("let t: u32 = 1;", 13..16),
+            Some(13..14),
+            "partly deleted"
+        );
+        assert_eq!(remapped("let t: u32 = ;", 13..16), None, "deleted");
+        assert_eq!(
+            remapped("let t: i32 = 1.0;", 7..10),
+            Some(7..10),
+            "replaced in place"
+        );
+    }
 
     #[test]
     fn utf16_columns_to_char_indices() {

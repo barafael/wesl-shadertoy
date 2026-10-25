@@ -551,6 +551,18 @@ fn show_debug_info(frag_coord: vec2<f32>, color: vec3<f32>) -> vec3<f32> {
     WriteRGBAValues(probe(abs(uni.i_mouse.zw)), vec2<f32>(east - box_width, box_top), 0.85);
     WriteRGBAValues(probe(uni.i_mouse.xy), vec2<f32>(east - box_width, box_top - 4.6 - MARGIN), 1.0);
 
+    // Right centre (below the probe boxes if they reach that far): a swatch
+    // of just the clicked pixel's colour, on a dark frame.
+    let swatch = 2.5;
+    let boxes_bottom = box_top - 2. * (4.6 + MARGIN);
+    let mid = min(0.5 * (north + south), boxes_bottom - 0.5 * swatch - 0.3);
+    let lo = vec2<f32>(east - swatch, mid - 0.5 * swatch);
+    let hi = vec2<f32>(east, mid + 0.5 * swatch);
+    panel(lo - vec2<f32>(0.3), hi + vec2<f32>(0.3), 0.85);
+    let d = sdRoundedBox(text_pos() - 0.5 * (lo + hi), 0.5 * (hi - lo), vec4<f32>(0.15));
+    let aa = 0.5 / text_unit;
+    vColor = mix(vColor, probe(abs(uni.i_mouse.zw)).rgb, 1. - smoothstep(-aa, aa, d));
+
     draw_crossair(frag_coord);
     draw_ring(frag_coord);
 

@@ -31,6 +31,8 @@ use wesl::resolver::VirtualResolver;
 use wesl::syntax::ModulePath;
 use wesl::{CompileOptions, Compiler};
 
+use crate::tweak::{self, Constant, Hint, MAX_TWEAKS};
+
 /// The WGSL uniform block, shared by [`SHADERTOY_MODULE`] and the debugger
 /// overlay ([`crate::debugger::DEBUGGER_WGSL`]) so the two cannot drift.
 /// Field order must match [`crate::render::ShaderToyUniform`]; the
@@ -53,6 +55,8 @@ macro_rules! shadertoy_uniforms_wgsl {
     _overlay_bottom: f32,
     i_channel_time: vec4<f32>,
     i_channel_resolution: array<vec4<f32>, 4>,
+    // Live values of the Constants window (`crate::tweak`), one per slot.
+    i_tweaks: array<vec4<f32>, 32>,
 }
 "#
     };
@@ -115,6 +119,9 @@ fn i_channel_time(i: u32) -> f32 { return st_uniforms.i_channel_time[i]; }
 /// Size of buffer channel i (0..3) in pixels (z = 0 for 2D buffers);
 /// (0, 0, 0) while the channel is unused.
 fn i_channel_resolution(i: u32) -> vec3<f32> { return st_uniforms.i_channel_resolution[i].xyz; }
+/// Live value of tweakable constant slot i; used by the generated loader,
+/// not meant to be called by hand.
+fn i_tweak(i: u32) -> vec4<f32> { return st_uniforms.i_tweaks[i]; }
 "#
 );
 
@@ -139,9 +146,12 @@ pub fn buffer_entry(name: &str) -> String {
 const MAIN_MODULE_HEAD: &str = r#"import package::shadertoy::FullscreenVertexOutput;
 import package::shadertoy::i_resolution;
 import package::user::main_image;
+import package::user::st_load_tweaks;
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    // The Constants window's live values (see `tweak::instrument`).
+    st_load_tweaks();
     // shadertoy's fragCoord has its origin bottom-left; wgpu's
     // @builtin(position) is top-left, so flip y to match shadertoy.
     let p = in.position.xy;
@@ -175,7 +185,8 @@ fn main_module_for(buffers: u8) -> String {
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
         let body = if buffers & (1 << i) != 0 {
             format!(
-                "\x20   // Buffer passes use texel coordinates (no y-flip).\n\
+                "\x20   st_load_tweaks();\n\
+                 \x20   // Buffer passes use texel coordinates (no y-flip).\n\
                  \x20   return {name}(in.position.xy);\n"
             )
         } else {
@@ -202,6 +213,12 @@ pub struct CompiledShader {
     pub wgsl: String,
     /// Bit per [`BUFFER_NAMES`] entry the shader defines.
     pub buffers: u8,
+    /// The constants the Constants window can tweak live; slot = index.
+    pub tweaks: Vec<Constant>,
+    /// Literal constants that cannot be tweaked live because WGSL needs them
+    /// as true constants (array sizes, other constants' values), or because
+    /// there are more than [`MAX_TWEAKS`].
+    pub fixed: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -230,9 +247,63 @@ impl std::fmt::Display for CompileError {
 /// Compile the editor text into a complete WGSL module ready for
 /// `Shader::from_wgsl`, detecting which `buffer_a`..`buffer_d` passes it
 /// defines so the entry module (and renderer) can grow to match.
+///
+/// Literal module-scope constants become live-tweakable (see [`tweak`]).
+/// Any the rewrite cannot carry — used where WGSL needs a true constant in a
+/// way [`tweak::const_context_names`] did not spot — are found by compiling
+/// them one at a time and left as plain constants.
 pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileError> {
     let buffers = detect_buffers(user_source)?;
 
+    let in_const_context = tweak::const_context_names(user_source);
+    let mut fixed = Vec::new();
+    let mut tweaks = Vec::new();
+    for c in tweak::extract(user_source) {
+        if c.hint == Hint::Off {
+            continue;
+        }
+        if in_const_context.contains(&c.name) || tweaks.len() == MAX_TWEAKS {
+            fixed.push(c.name);
+        } else {
+            tweaks.push(c);
+        }
+    }
+
+    let wgsl = match compile_instrumented(user_source, buffers, &tweaks) {
+        Ok(wgsl) => wgsl,
+        Err(_) if !tweaks.is_empty() => {
+            // Report the user's own errors against the plain source.
+            compile_instrumented(user_source, buffers, &[])?;
+            let (ok, bad): (Vec<Constant>, Vec<Constant>) = tweaks.into_iter().partition(|c| {
+                compile_instrumented(user_source, buffers, std::slice::from_ref(c)).is_ok()
+            });
+            fixed.extend(bad.into_iter().map(|c| c.name));
+            tweaks = ok;
+            match compile_instrumented(user_source, buffers, &tweaks) {
+                Ok(wgsl) => wgsl,
+                Err(_) => {
+                    fixed.extend(tweaks.drain(..).map(|c| c.name));
+                    compile_instrumented(user_source, buffers, &[])?
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(CompiledShader {
+        wgsl,
+        buffers,
+        tweaks,
+        fixed,
+    })
+}
+
+/// Compile the user source with `tweaks` made live (see [`tweak::instrument`])
+/// into a validated WGSL module.
+fn compile_instrumented(
+    user_source: &str,
+    buffers: u8,
+    tweaks: &[Constant],
+) -> Result<String, CompileError> {
     let mut resolver = VirtualResolver::new();
     resolver.add_module(
         ModulePath::from_str("package::main").expect("valid module path"),
@@ -244,7 +315,7 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
     );
     resolver.add_module(
         ModulePath::from_str("package::user").expect("valid module path"),
-        user_source.to_string().into(),
+        tweak::instrument(user_source, tweaks).into(),
     );
 
     let compiler = Compiler::new_with_resolver(CompileOptions::default(), resolver);
@@ -266,8 +337,7 @@ pub fn compile_user_shader(user_source: &str) -> Result<CompiledShader, CompileE
         .validate(&module)
         .map_err(|e| CompileError::WgslValidate(e.emit_to_string(&wgsl)))?;
     check_bindings(&module)?;
-
-    Ok(CompiledShader { wgsl, buffers })
+    Ok(wgsl)
 }
 
 /// Reject resource bindings that `package::shadertoy` does not declare.
@@ -433,6 +503,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             overlay_bottom: 20.0,
             channel_time: v(21.0),
             channel_resolution: [v(25.0), v(29.0), v(33.0), v(37.0)],
+            tweaks: std::array::from_fn(|i| v(41.0 + 4.0 * i as f32)),
         };
         let bytes = crate::render::uniform_bytes(&rust);
         assert_eq!(bytes.len() as u64, ShaderToyUniform::min_size().get());
@@ -455,6 +526,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             ("_overlay_bottom", 20.0f32.to_bits()),
             ("i_channel_time", 21.0f32.to_bits()),
             ("i_channel_resolution", 25.0f32.to_bits()),
+            ("i_tweaks", 41.0f32.to_bits()),
         ];
 
         let module =
@@ -576,6 +648,48 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 }
 "#;
         assert_eq!(compile_user_shader(src).expect("should compile").buffers, 0);
+    }
+
+    /// Literal constants become live uniform reads; ones WGSL needs as true
+    /// constants stay constants, whether spotted up front (array size, used
+    /// by another constant) or only by the compile (a `switch` case).
+    #[test]
+    fn literal_constants_become_tweakable() {
+        let src = r#"
+const N: i32 = 4;
+const K: f32 = 0.5; // tweak: 0..2
+const A: f32 = 1.0;
+const B: f32 = A * 2.0;
+const SEL: i32 = 1;
+const TINT: vec3<f32> = vec3<f32>(1.0, 0.5, 0.25);
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    var arr: array<f32, N>;
+    var x = K + B + arr[0];
+    switch i32(frag_coord.x) {
+        case SEL: { x = 0.0; }
+        default: {}
+    }
+    return vec4<f32>(TINT * x, 1.0);
+}
+"#;
+        let compiled = compile_user_shader(src).expect("should compile");
+        let live: Vec<&str> = compiled.tweaks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(live, ["K", "TINT"]);
+        let mut fixed = compiled.fixed.clone();
+        fixed.sort();
+        assert_eq!(fixed, ["A", "N", "SEL"]);
+        // Every entry point loads the live values before the user code runs.
+        assert!(compiled.wgsl.contains("i_tweaks"), "{}", compiled.wgsl);
+    }
+
+    /// Errors in the user's code are reported against the plain source, not
+    /// as a failure of the tweak rewrite.
+    #[test]
+    fn errors_ignore_the_tweak_rewrite() {
+        let src = "const K: f32 = 0.5;\nfn main_image(p: vec2<f32>) -> vec4<f32> { return K; }\n";
+        let msg = compile_user_shader(src).unwrap_err().to_string();
+        assert!(!msg.contains("var<private>"), "{msg}");
+        assert!(!msg.contains("st_load_tweaks"), "{msg}");
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //!   the cursor and selection rectangles are computed from the very same galley
 //!   whose glyphs are on screen and can never drift off them;
 //! * the highlighted job is cached in [`HighlightCache`] and only rebuilt when
-//!   the text or theme actually changed — egui re-runs the layouter every
+//!   the text actually changed — egui re-runs the layouter every
 //!   frame, and re-tokenizing the whole document each time is pure waste. The
 //!   job is laid out every frame through egui's own galley cache, which is a
 //!   hash lookup (see [`CachedJob`] for why the galley itself must not be kept);
@@ -34,10 +34,10 @@ use bevy_egui::egui::{
 
 use crate::analyzer::{Diagnostic, Severity};
 use crate::highlight::highlight_job;
-use crate::theme::Theme;
+use crate::theme::SYNTAX;
 
-/// Cached highlight results, so the tokenizer runs only when the text or the
-/// theme actually changed — not on every egui frame (egui calls the editor's
+/// Cached highlight results, so the tokenizer runs only when the text
+/// actually changed — not on every egui frame (egui calls the editor's
 /// layouter once per frame, more while interacting).
 #[derive(Resource, Default)]
 pub struct HighlightCache {
@@ -48,44 +48,38 @@ pub struct HighlightCache {
 }
 
 /// A highlighted [`LayoutJob`], keyed by what it was built from (the source
-/// text, or the line count for a gutter) plus the theme.
+/// text, or the line count for a gutter).
 ///
 /// Only the job is cached, never the laid-out [`Galley`]: a galley's glyphs
 /// are UV rects into egui's font atlas, and egui discards and rebuilds that
 /// atlas when the fonts or text options change (installing the icon font on
-/// frame one, switching theme) or when it fills up, and rasterizes anew when
+/// frame one, the theme's text options) or when it fills up, and rasterizes anew when
 /// the scale changes (zoom, DPI). egui's galley cache is flushed on all of
 /// those; a galley kept across them paints stale texels — garbled or missing
 /// text until the next edit. Laying the cached job out every frame is a hash
 /// lookup in that cache.
 struct CachedJob<K> {
     key: K,
-    theme: Theme,
     job: LayoutJob,
 }
 
-/// The job cached in `slot` if it was built from `key` and `theme`, else a
+/// The job cached in `slot` if it was built from `key`, else a
 /// fresh one from `build` (which then replaces the cached one).
 fn cached_job<Q>(
     slot: &mut Option<CachedJob<Q::Owned>>,
     key: &Q,
-    theme: Theme,
     build: impl FnOnce() -> LayoutJob,
 ) -> LayoutJob
 where
     Q: PartialEq + ToOwned + ?Sized,
     Q::Owned: Borrow<Q>,
 {
-    if let Some(cached) = slot
-        .as_ref()
-        .filter(|c| c.theme == theme && c.key.borrow() == key)
-    {
+    if let Some(cached) = slot.as_ref().filter(|c| c.key.borrow() == key) {
         return cached.job.clone();
     }
     let job = build();
     *slot = Some(CachedJob {
         key: key.to_owned(),
-        theme,
         job: job.clone(),
     });
     job
@@ -110,22 +104,25 @@ fn editor_id_marker() -> Id {
 
 const INDENT: &str = "    ";
 
-pub struct EditorOutput {
-    /// The text was edited this frame.
-    pub changed: bool,
+/// Space between the right end of the line numbers and the code.
+const GUTTER_GAP: f32 = 10.0;
+
+/// Width of the line-number gutter for `lines` lines, including
+/// [`GUTTER_GAP`] (the numbers sit right-aligned against the gap).
+fn gutter_width(ctx: &Context, font_id: &FontId, lines: usize) -> f32 {
+    let digits = (lines.ilog10() as usize + 1).max(2) as f32;
+    digits * ctx.fonts_mut(|f| f.glyph_width(font_id, '0')) + 8.0 + GUTTER_GAP
 }
 
-/// Show the highlighted code editor inside `ui`, colored with `theme`'s
-/// palette, reusing (and updating) the highlighted jobs held in `cache`.
+/// Show the highlighted code editor inside `ui`, reusing (and updating) the highlighted jobs held in `cache`.
 /// `diagnostics` (char ranges into `text`) are squiggled under the code.
 pub fn show_code_editor(
     ui: &mut Ui,
     text: &mut String,
-    theme: Theme,
     cache: &mut HighlightCache,
     diagnostics: &[Diagnostic],
-) -> EditorOutput {
-    let pal = theme.syntax();
+) {
+    let pal = SYNTAX;
     let ctx = ui.ctx().clone();
     let font_id = FontId::monospace(13.0);
     let default_color = ui.visuals().text_color();
@@ -138,7 +135,6 @@ pub fn show_code_editor(
 
     // --- Tab / Shift-Tab handling (must run before TextEdit sees the key;
     // the TextEdit's `lock_focus` keeps egui from moving focus on Tab) ---
-    let mut changed = false;
     let prev_id: Option<Id> = ctx.data(|d| d.get_temp(editor_id_marker()));
     let focused = prev_id.is_some_and(|id| ctx.memory(|m| m.focused() == Some(id)));
     if focused {
@@ -157,7 +153,7 @@ pub fn show_code_editor(
         });
         if let Some(shift) = tab {
             if let Some(id) = prev_id {
-                changed = handle_tab(&ctx, id, text, shift);
+                handle_tab(&ctx, id, text, shift);
             }
             ctx.input_mut(|i| {
                 i.consume_key(Modifiers::NONE, Key::Tab);
@@ -167,22 +163,21 @@ pub fn show_code_editor(
     }
 
     let display_lines = text.matches('\n').count() + 1;
-    let gutter_width = (display_lines.ilog10() as usize + 1).max(2) as f32
-        * ctx.fonts_mut(|f| f.glyph_width(&font_id, '0'))
-        + 12.0;
+    let gutter_width = gutter_width(&ctx, &font_id, display_lines);
 
     ScrollArea::both()
         .id_salt("code_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
-
+            // Top-aligned, so the gutter's first row starts level with the
+            // TextEdit's (`horizontal` centers, and the TextEdit is taller by
+            // its margin, which pushed the numbers below their lines).
+            ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
                 // --- line-number gutter (job rebuilt only when the line
-                // count or theme changes, not every frame) ---
+                // count changes, not every frame) ---
                 let weak = ui.visuals().weak_text_color();
-                let job = cached_job(&mut cache.editor_gutter, &display_lines, theme, || {
+                let job = cached_job(&mut cache.editor_gutter, &display_lines, || {
                     gutter_job(&font_id, weak, display_lines)
                 });
                 let gutter_galley = ui.fonts_mut(|f| f.layout_job(job));
@@ -190,21 +185,13 @@ pub fn show_code_editor(
                     Vec2::new(gutter_width, gutter_galley.size().y),
                     Sense::hover(),
                 );
-                ui.painter().galley(
-                    pos2(
-                        gutter_rect.max.x - gutter_galley.size().x,
-                        gutter_rect.min.y + margin.top as f32,
-                    ),
-                    gutter_galley,
-                    ui.visuals().weak_text_color(),
-                );
 
                 // --- the editor: TextEdit paints the highlighted job itself,
                 // so cursor and selection always sit on the visible glyphs ---
                 let mut layouter =
                     |ui: &Ui, buf: &dyn TextBuffer, _wrap_width: f32| -> Arc<Galley> {
                         let src = buf.as_str();
-                        let job = cached_job(&mut cache.editor, src, theme, || {
+                        let job = cached_job(&mut cache.editor, src, || {
                             let mut job = highlight_job(src, font_id.clone(), default_color, &pal);
                             job.keep_trailing_whitespace = true;
                             job
@@ -221,14 +208,25 @@ pub fn show_code_editor(
                     .lock_focus(true)
                     .layouter(&mut layouter)
                     .show(ui);
-                changed |= output.response.response.changed();
+
+                // Numbers on the rows where the TextEdit actually put its
+                // text (it ignores the top margin, so `margin.top` would put
+                // them a couple of pixels low). Its left margin is part of
+                // the gap.
+                let gap = GUTTER_GAP - margin.left as f32;
+                ui.painter().galley(
+                    pos2(
+                        gutter_rect.max.x - gap - gutter_galley.size().x,
+                        output.galley_pos.y,
+                    ),
+                    gutter_galley,
+                    weak,
+                );
                 paint_diagnostics(ui, &output, gutter_rect, diagnostics);
 
                 ctx.data_mut(|d| d.insert_temp(editor_id_marker(), output.response.response.id));
             });
         });
-
-    EditorOutput { changed }
 }
 
 /// Squiggle each diagnostic under its text, tick its first line in the
@@ -324,16 +322,14 @@ fn squiggle(painter: &Painter, span: Rect, color: Color32) {
 /// `TextEdit`, since there is nothing to edit. `TextWrapMode::Extend` is what
 /// keeps long composed-WGSL lines on one row (a plain Label would wrap them
 /// at the window width and break the gutter alignment).
-pub fn show_code_view(ui: &mut Ui, text: &str, theme: Theme, cache: &mut HighlightCache) {
-    let pal = theme.syntax();
+pub fn show_code_view(ui: &mut Ui, text: &str, cache: &mut HighlightCache) {
+    let pal = SYNTAX;
     let ctx = ui.ctx().clone();
     let font_id = FontId::monospace(13.0);
     let default_color = ui.visuals().text_color();
 
     let display_lines = text.matches('\n').count() + 1;
-    let gutter_width = (display_lines.ilog10() as usize + 1).max(2) as f32
-        * ctx.fonts_mut(|f| f.glyph_width(&font_id, '0'))
-        + 12.0;
+    let gutter_width = gutter_width(&ctx, &font_id, display_lines);
 
     ScrollArea::both()
         .id_salt("code_view_scroll")
@@ -344,7 +340,7 @@ pub fn show_code_view(ui: &mut Ui, text: &str, theme: Theme, cache: &mut Highlig
             ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
                 // --- line-number gutter (cached job) ---
                 let weak = ui.visuals().weak_text_color();
-                let job = cached_job(&mut cache.viewer_gutter, &display_lines, theme, || {
+                let job = cached_job(&mut cache.viewer_gutter, &display_lines, || {
                     gutter_job(&font_id, weak, display_lines)
                 });
                 let gutter_galley = ui.fonts_mut(|f| f.layout_job(job));
@@ -354,7 +350,7 @@ pub fn show_code_view(ui: &mut Ui, text: &str, theme: Theme, cache: &mut Highlig
                 );
                 ui.painter().galley(
                     pos2(
-                        gutter_rect.max.x - gutter_galley.size().x,
+                        gutter_rect.max.x - GUTTER_GAP - gutter_galley.size().x,
                         gutter_rect.min.y,
                     ),
                     gutter_galley,
@@ -362,7 +358,7 @@ pub fn show_code_view(ui: &mut Ui, text: &str, theme: Theme, cache: &mut Highlig
                 );
 
                 // --- highlighted code, selectable for copy-paste ---
-                let job = cached_job(&mut cache.viewer, text, theme, || {
+                let job = cached_job(&mut cache.viewer, text, || {
                     highlight_job(text, font_id.clone(), default_color, &pal)
                 });
                 ui.add(
@@ -374,16 +370,14 @@ pub fn show_code_view(ui: &mut Ui, text: &str, theme: Theme, cache: &mut Highlig
         });
 }
 
-/// Indent (or with `shift`, dedent) at the cursor. Returns whether `text`
-/// changed.
-fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) -> bool {
+/// Indent (or with `shift`, dedent) at the cursor.
+fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {
     let Some(mut state) = TextEditState::load(ctx, id) else {
-        return false;
+        return;
     };
     let Some(range) = state.cursor.char_range() else {
-        return false;
+        return;
     };
-    let edited;
     let ccursor = range.primary;
     let byte = byte_index_from_char_index(text, ccursor.index.0);
 
@@ -397,7 +391,6 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) -> bool {
         if removed > 0 {
             text.replace_range(line_start..line_start + removed, "");
         }
-        edited = removed > 0;
         let new_byte = byte.saturating_sub(removed);
         let new_cc = char_index_from_byte_index(text, new_byte);
         state
@@ -405,7 +398,6 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) -> bool {
             .set_char_range(Some(CCursorRange::one(CCursor::new(new_cc))));
     } else {
         text.insert_str(byte, INDENT);
-        edited = true;
         state
             .cursor
             .set_char_range(Some(CCursorRange::one(CCursor::new(
@@ -413,7 +405,6 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) -> bool {
             ))));
     }
     state.store(ctx, id);
-    edited
 }
 
 /// egui keeps these functions private to `text_cursor_cache`; ours are tiny.
@@ -543,9 +534,6 @@ mod tests {
         /// `install_fonts` on the app's first frame: `set_fonts` makes egui
         /// build a new atlas at the start of the next pass.
         IconFont,
-        /// Dark and light visuals differ in `TextOptions`, which also
-        /// rebuilds the atlas on the next pass.
-        ThemeSwitch,
         /// Zoom / DPI change: glyphs are rasterized anew at the new scale.
         Zoom,
     }
@@ -554,18 +542,13 @@ mod tests {
     /// frame 2, and check every frame's painted glyphs — each trigger in a
     /// fresh context so one failing cannot mask another. The frame mirrors
     /// the app's: `theme::apply` runs first, then the pane.
-    fn survives_atlas_rebuilds(mut show: impl FnMut(&mut Ui, Theme, &mut HighlightCache)) {
-        for rebuild in [Rebuild::IconFont, Rebuild::ThemeSwitch, Rebuild::Zoom] {
+    fn survives_atlas_rebuilds(mut show: impl FnMut(&mut Ui, &mut HighlightCache)) {
+        for rebuild in [Rebuild::IconFont, Rebuild::Zoom] {
             let ctx = Context::default();
             let mut cache = HighlightCache::default();
             let mut gpu = GpuFontTexture::default();
             for frame in 0..4 {
                 let trigger = |r| frame == 2 && rebuild == r;
-                let theme = if frame >= 2 && rebuild == Rebuild::ThemeSwitch {
-                    Theme::Light
-                } else {
-                    Theme::Dark
-                };
                 if trigger(Rebuild::Zoom) {
                     ctx.set_zoom_factor(1.5);
                 }
@@ -573,8 +556,8 @@ mod tests {
                     if trigger(Rebuild::IconFont) {
                         ui.ctx().set_fonts(crate::lucide_fonts());
                     }
-                    crate::theme::apply(ui.ctx(), theme);
-                    show(ui, theme, &mut cache);
+                    crate::theme::apply(ui.ctx());
+                    show(ui, &mut cache);
                 });
                 gpu.upload(&output);
                 // Applied above; clearing first keeps a failed assert from
@@ -589,20 +572,19 @@ mod tests {
     #[test]
     fn editor_text_survives_font_atlas_rebuilds() {
         let mut text = crate::presets::ALL[0].code.to_string();
-        survives_atlas_rebuilds(|ui, theme, cache| {
-            show_code_editor(ui, &mut text, theme, cache, &[]);
+        survives_atlas_rebuilds(|ui, cache| {
+            show_code_editor(ui, &mut text, cache, &[]);
         });
     }
 
     #[test]
     fn viewer_text_survives_font_atlas_rebuilds() {
         let text = crate::presets::ALL[0].code;
-        survives_atlas_rebuilds(|ui, theme, cache| show_code_view(ui, text, theme, cache));
+        survives_atlas_rebuilds(|ui, cache| show_code_view(ui, text, cache));
     }
 
     /// Tab indents at the cursor and keeps focus in the editor (egui moves
-    /// focus on Tab unless the TextEdit locks it), Shift-Tab dedents, and
-    /// both count as edits so autosave and auto-run see them.
+    /// focus on Tab unless the TextEdit locks it), and Shift-Tab dedents.
     #[test]
     fn tab_indents_and_keeps_focus() {
         let ctx = Context::default();
@@ -634,12 +616,10 @@ mod tests {
             }
         };
         let mut frame = |input: RawInput, text: &mut String| {
-            let mut changed = false;
             ctx.run_ui(input, |ui| {
-                changed = show_code_editor(ui, text, Theme::Dark, &mut cache, &[]).changed;
+                show_code_editor(ui, text, &mut cache, &[]);
             })
             .drop_without_applying_deltas();
-            changed
         };
 
         frame(RawInput::default(), &mut text);
@@ -657,10 +637,7 @@ mod tests {
         frame(RawInput::default(), &mut text);
 
         for (shift, expected) in [(false, 4), (false, 8), (true, 4)] {
-            assert!(
-                frame(tab(shift), &mut text),
-                "tab (shift: {shift}) not reported"
-            );
+            frame(tab(shift), &mut text);
             assert_eq!(text, format!("{}fn f() {{}}\n", " ".repeat(expected)));
             assert_eq!(ctx.memory(|m| m.focused()), Some(id), "tab moved focus");
         }
@@ -681,7 +658,7 @@ mod tests {
         let mut text = crate::presets::ALL[0].code.to_string();
         for _ in 0..3 {
             ctx.run_ui(bevy_egui::egui::RawInput::default(), |ui| {
-                show_code_editor(ui, &mut text, Theme::Dark, &mut cache, &[]);
+                show_code_editor(ui, &mut text, &mut cache, &[]);
             })
             .drop_without_applying_deltas();
         }
@@ -710,15 +687,15 @@ mod tests {
 
         let mut frame = || {
             let mut out = ctx.run_ui(RawInput::default(), |ui| {
-                crate::theme::apply(ui.ctx(), Theme::Dark);
-                show_code_editor(ui, &mut text, Theme::Dark, &mut cache, &diagnostics);
+                crate::theme::apply(ui.ctx());
+                show_code_editor(ui, &mut text, &mut cache, &diagnostics);
             });
             out.textures_delta.clear();
             out
         };
         frame();
         let output = frame();
-        let red = Theme::Dark.visuals().error_fg_color;
+        let red = crate::theme::visuals().error_fg_color;
 
         let mut paths = Vec::new();
         let mut ticks = Vec::new();
@@ -758,7 +735,7 @@ mod tests {
         let text = crate::presets::ALL[0].code;
         for _ in 0..3 {
             ctx.run_ui(bevy_egui::egui::RawInput::default(), |ui| {
-                show_code_view(ui, text, Theme::Dark, &mut cache);
+                show_code_view(ui, text, &mut cache);
             })
             .drop_without_applying_deltas();
         }

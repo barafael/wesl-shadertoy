@@ -20,16 +20,25 @@ import package::shadertoy::i_mouse;
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_time;
 
-const dissipation: f32 = 0.95;
-const ballRadius: f32 = 0.06;
-const fogHeigth: f32 = 0.24;
-const nbSlice: i32 = 24;
-const fogSlice: f32 = 0.01;
-const nbSphere: i32 = 3;
-const shadowDensity: f32 = 25.;
-const fogDensity: f32 = 20.;
-const lightHeight: f32 = 1.;
-const tau: f32 = 6.28318530718;
+// Advection step: how far the fog is carried along its velocity per frame.
+const dissipation: f32 = 0.95; // tweak: 0..1.9
+const ballRadius: f32 = 0.06; // tweak: 0.02..0.2
+const fogHeigth: f32 = 0.24; // tweak: 0.05..0.6
+// Raymarch slices (cost grows with the square).
+const nbSlice: i32 = 24; // tweak: 4..48
+const fogSlice: f32 = 0.01; // tweak: 0.002..0.05
+const nbSphere: i32 = 3; // tweak: 1..8
+const shadowDensity: f32 = 25.; // tweak: 0..100
+const fogDensity: f32 = 20.; // tweak: 0..50
+// Height of the light above the first ball (must stay above the fog).
+const lightHeight: f32 = 1.; // tweak: 0.3..3
+const tau: f32 = 6.28318530718; // tweak: off
+
+// How much fog survives each frame.
+const DENSITY_DECAY: f32 = 0.99; // tweak: 0.95..1
+// How hard a moving ball pushes the fog.
+const BALL_PUSH: f32 = 5.; // tweak: 0..20
+const BALL_COLOR: vec3<f32> = vec3<f32>(1., 0., 0.); // tweak: color
 
 fn hash12(p: vec2<f32>) -> f32 {
     var p3: vec3<f32> = fract(vec3<f32>(p.xyx) * 0.1031);
@@ -184,12 +193,12 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
             let ballVelocity: vec2<f32> = p - op;
             density = density - ((influenceRadius - dist) / influenceRadius * 0.15);
             density = max(0., density);
-            velocity = velocity - (ballVelocity * 5.);
+            velocity = velocity - (ballVelocity * BALL_PUSH);
         }
     }
 
     density = min(1., density);
-    density = density * (0.99);
+    density = density * (DENSITY_DECAY);
     var state = vec3<f32>(velocity, density);
     state = vignetteSim(state, fragCoord / R, 1.);
     return vec4<f32>(state, 1.);
@@ -449,7 +458,7 @@ fn sceneIntersection(ro: vec3<f32>, rd: vec3<f32>, inter: ptr<function, vec3<f32
     for (var i: i32 = 0; i < nbSphere; i = i + 1) {
         let p2d: vec2<f32> = spherePosition(i, i32(i_frame()));
         let pos: vec3<f32> = vec3<f32>(p2d.x, ballRadius, p2d.y);
-        var ballColor: vec3<f32> = vec3<f32>(1., 0., 0.);
+        var ballColor: vec3<f32> = BALL_COLOR;
         if (i == 0) {
             ballColor = vec3<f32>(1.);
             (*lightPos) = pos + vec3<f32>(0., lightHeight, 0.);

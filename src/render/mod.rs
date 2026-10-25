@@ -1,6 +1,7 @@
 //! Rendering wiring: the shadertoy fullscreen-material plugin.
 
 pub mod active;
+pub mod blur;
 pub mod buffers;
 pub mod fullscreen_material;
 
@@ -57,6 +58,9 @@ pub struct ShaderToyUniform {
     /// Size of buffer channels A..D in pixels (zero while a channel is unused).
     /// The WGSL side reads these as `vec3` (z = 0 for 2D buffers).
     pub channel_resolution: [Vec4; 4],
+    /// Live values of the Constants window's tweakable constants, one slot
+    /// each (`crate::tweak`); read through the generated loader.
+    pub tweaks: [Vec4; crate::tweak::MAX_TWEAKS],
 }
 
 /// `uniform`'s bytes as the GPU sees them (std140 / WGSL uniform layout).
@@ -92,13 +96,18 @@ impl Plugin for ShaderToyRenderPlugin {
             ExtractResourcePlugin::<active::Playback>::default(),
             ExtractResourcePlugin::<crate::debugger::DebuggerShader>::default(),
             ExtractResourcePlugin::<crate::debugger::DebuggerOn>::default(),
+            ExtractResourcePlugin::<blur::Blur>::default(),
         ));
         // One feedback channel, shared (not extracted) by both worlds.
         let feedback = active::ShaderFeedback::default();
         app.init_resource::<active::Playback>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .insert_resource(feedback.clone());
-        app.add_systems(bevy::app::Startup, crate::debugger::setup_debugger_shader);
+        app.add_systems(
+            bevy::app::Startup,
+            (crate::debugger::setup_debugger_shader, blur::setup_blur),
+        )
+        .add_systems(bevy::app::PostUpdate, blur::size_blur_image);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -110,7 +119,10 @@ impl Plugin for ShaderToyRenderPlugin {
             .init_resource::<buffers::BufferTargets>()
             .init_resource::<buffers::BufferPipelines>()
             .init_resource::<crate::debugger::DebuggerOn>()
-            .add_systems(RenderStartup, crate::debugger::setup_debugger)
+            .add_systems(
+                RenderStartup,
+                (crate::debugger::setup_debugger, blur::setup_blur_pipelines),
+            )
             .add_systems(Render, active::activate_shader.in_set(RenderSystems::Queue))
             .add_systems(
                 Core3d,
@@ -121,6 +133,9 @@ impl Plugin for ShaderToyRenderPlugin {
                     crate::debugger::debugger_blit_pass
                         .in_set(Core3dSystems::PostProcess)
                         .after(fullscreen_material_system::<ShaderToyUniform>),
+                    blur::blur_pass
+                        .in_set(Core3dSystems::PostProcess)
+                        .after(crate::debugger::debugger_blit_pass),
                 ),
             )
             .add_systems(

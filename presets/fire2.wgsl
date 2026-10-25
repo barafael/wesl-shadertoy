@@ -4,6 +4,18 @@ import package::shadertoy::i_time;
 import package::shadertoy::i_resolution;
 import package::shadertoy::i_mouse;
 
+// Overall animation speed.
+const TIME_SPEED: f32 = 0.5; // tweak: 0..2
+// Height in pixels where the flames die out.
+const FLAME_HEIGHT: f32 = 210.; // tweak: 20..600
+const FIRE_BRIGHTNESS: f32 = 1.5; // tweak: 0..4
+const SMOKE_AMOUNT: f32 = 0.3; // tweak: 0..1
+// Size in pixels of the cell each spark lives in.
+const SPARK_GRID_SIZE: f32 = 30.; // tweak: 5..100
+// How fast the sparks rise, in pixels per second.
+const SPARK_RISE: f32 = 190.; // tweak: 0..500
+const SPARK_COLOR: vec3<f32> = vec3<f32>(1., 0.3, 0.);
+
 fn mod289(x: vec3<f32>) -> vec3<f32> {
     return x - floor(x * (1. / 289.)) * 289.;
 }
@@ -85,7 +97,7 @@ fn prng(seed: vec2<f32>) -> f32 {
     return fract(seed_var.x * seed_var.y * 95.4337);
 }
 
-const PI: f32 = 3.1415927;
+const PI: f32 = 3.1415927; // tweak: off
 fn noiseStack(pos_in: vec3<f32>, octaves: i32, falloff: f32) -> f32 {
     var pos = pos_in;
     var noise: f32 = snoise(vec3<f32>(pos));
@@ -132,7 +144,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let xpart: f32 = frag_coord.x / resolution.x;
     let ypart: f32 = frag_coord.y / resolution.y;
 
-    let clip: f32 = 210.;
+    let clip: f32 = FLAME_HEIGHT;
     let ypartClip: f32 = frag_coord.y / clip;
     let ypartClippedFalloff: f32 = clamp(2. - ypartClip, 0., 1.);
     let ypartClipped: f32 = min(ypartClip, 1.);
@@ -140,7 +152,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     let xfuel: f32 = 1. - abs(2. * xpart - 1.);
 
-    let timeSpeed: f32 = 0.5;
+    let timeSpeed: f32 = TIME_SPEED;
     let realTime: f32 = timeSpeed * time;
 
     let coordScaled: vec2<f32> = 0.01 * frag_coord - 0.02 * vec2<f32>(offset.x, 0.);
@@ -158,22 +170,22 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     let f: f32 = ypartClippedFalloff * pow(1. - flames * flames * flames, 8.);
     let fff: f32 = f * f * f;
-    let fire: vec3<f32> = 1.5 * vec3<f32>(f, fff, fff * fff);
+    let fire: vec3<f32> = FIRE_BRIGHTNESS * vec3<f32>(f, fff, fff * fff);
 
     // smoke
     let smokeNoise: f32 = 0.5 + snoise(0.4 * position + timing * vec3<f32>(1., 1., 0.2)) / 2.;
-    let smoke: vec3<f32> = vec3<f32>(0.3 * pow(xfuel, 3.) * pow(ypart, 2.) * (smokeNoise + 0.4 * (1. - noise)));
+    let smoke: vec3<f32> = vec3<f32>(SMOKE_AMOUNT * pow(xfuel, 3.) * pow(ypart, 2.) * (smokeNoise + 0.4 * (1. - noise)));
 
     // sparks
-    var sparkGridSize: f32 = 30.;
-    var sparkCoord: vec2<f32> = frag_coord - vec2<f32>(2. * offset.x, 190. * realTime);
+    var sparkGridSize: f32 = SPARK_GRID_SIZE;
+    var sparkCoord: vec2<f32> = frag_coord - vec2<f32>(2. * offset.x, SPARK_RISE * realTime);
     sparkCoord = sparkCoord - (30. * noiseStackUV(0.01 * vec3<f32>(sparkCoord, 30. * time), 1, 0.4, 0.1));
     sparkCoord = sparkCoord + (100. * flow.xy);
 
     if (((sparkCoord.y / sparkGridSize) % 2.) < 1.) { sparkCoord.x = sparkCoord.x + (0.5 * sparkGridSize); }
     let sparkGridIndex: vec2<f32> = vec2<f32>(floor(sparkCoord / sparkGridSize));
     let sparkRandom: f32 = prng(sparkGridIndex);
-    let sparkLife: f32 = min(10. * (1. - min((sparkGridIndex.y + 190. * realTime / sparkGridSize) / (24. - 20. * sparkRandom), 1.)), 1.);
+    let sparkLife: f32 = min(10. * (1. - min((sparkGridIndex.y + SPARK_RISE * realTime / sparkGridSize) / (24. - 20. * sparkRandom), 1.)), 1.);
     var sparks: vec3<f32> = vec3<f32>(0.);
     if (sparkLife > 0.) {
         let sparkSize: f32 = xfuel * xfuel * sparkRandom * 0.08;
@@ -183,7 +195,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         let sparkModulus: vec2<f32> = ((sparkCoord + sparkOffset) % sparkGridSize) - 0.5 * vec2<f32>(sparkGridSize);
         let sparkLength: f32 = length(sparkModulus);
         let sparksGray: f32 = max(0., 1. - sparkLength / (sparkSize * sparkGridSize));
-        sparks = sparkLife * sparksGray * vec3<f32>(1., 0.3, 0.);
+        sparks = sparkLife * sparksGray * SPARK_COLOR;
     }
 
     fragColor = vec4<f32>(max(fire, sparks) + smoke, 1.);

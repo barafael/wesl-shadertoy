@@ -79,15 +79,7 @@ pub fn run_render_cli(args: &[String]) {
     };
 
     let (width, height) = (640, 360);
-    let result = pollster::block_on(render(
-        &compiled.wgsl,
-        compiled.buffers,
-        width,
-        height,
-        time,
-        frames,
-        debugger,
-    ));
+    let result = pollster::block_on(render(&compiled, width, height, time, frames, debugger));
     match result {
         Ok(rgba) => {
             if let Err(e) = write_png(&out, width, height, &rgba) {
@@ -131,14 +123,14 @@ struct Surface {
 /// With `debugger` on, the overlay is composited and `iMouse` is parked at
 /// the centre so the crosshair and probe boxes are visible in the PNG.
 async fn render(
-    wgsl: &str,
-    buffers: u8,
+    compiled: &compile::CompiledShader,
     width: u32,
     height: u32,
     time: f32,
     frames: u32,
     debugger: bool,
 ) -> Result<Vec<u8>, String> {
+    let (wgsl, buffers) = (compiled.wgsl.as_str(), compiled.buffers);
     let instance = wgpu::Instance::default();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -524,6 +516,10 @@ async fn render(
             frame_rate: 60.0,
             ..Default::default()
         };
+        // The constants at their source values, as the app starts them.
+        for (slot, c) in compiled.tweaks.iter().enumerate() {
+            uniforms.tweaks[slot] = Vec4::from_array(c.value);
+        }
         if debugger {
             // Park iMouse at the centre (y-up, like the app) with a held
             // click there too, so the crosshair, ring and probe boxes show.
