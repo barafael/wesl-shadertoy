@@ -14,7 +14,7 @@ Runs natively and in the browser as WASM.
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
-| Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
+| Examples | `Examples` window — 40 examples (a seven-part tutorial, Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails, the tutorial and other beginner examples first; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
 | Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
@@ -27,6 +27,20 @@ edits, opened examples and files — and is restored on load, along with your
 settings. Compile errors appear in the bottom panel — the last good shader keeps
 running while you fix them, also when the GPU driver rejects a shader that
 passed validation.
+
+## Tutorial
+
+New to shaders, or to this app? The Examples window starts with seven short
+examples (tag `tutorial`), each about one feature and commented to be read
+top to bottom; each card says what it teaches:
+
+1. **Hello Shader** — `main_image`, `frag_coord`, `i_resolution`, `i_time`
+2. **Tweak Hints** — live constants and their `// tweak:` hints
+3. **Mouse Input** — what `i_mouse()` reports
+4. **Imports** — WESL imports and your own functions
+5. **Buffers 101** — a `buffer_a` feedback trail and `i_frame`
+6. **LYGIA 101** — importing LYGIA functions, and their conventions
+7. **Debugger Tour** — reading values back with the debugger overlay
 
 ## The shader dialect
 

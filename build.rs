@@ -55,6 +55,7 @@ fn examples_table(dir: &Path) -> String {
 /// // license: …
 /// // source: https://…        (optional)
 /// // tags: 2d, noise          (optional)
+/// // teaches: what a reader learns from it (optional, shown on its card)
 /// ```
 struct Header {
     name: String,
@@ -63,6 +64,7 @@ struct Header {
     license: String,
     source: String,
     tags: Vec<String>,
+    teaches: String,
 }
 
 impl Header {
@@ -79,13 +81,14 @@ impl Header {
             license: String::new(),
             source: String::new(),
             tags: Vec::new(),
+            teaches: String::new(),
         };
         let mut in_summary = true;
         for line in lines {
             let line = line.trim();
             let field = line
                 .split_once(':')
-                .filter(|(k, _)| ["author", "license", "source", "tags"].contains(k));
+                .filter(|(k, _)| ["author", "license", "source", "tags", "teaches"].contains(k));
             match field {
                 Some((key, value)) => {
                     in_summary = false;
@@ -94,6 +97,7 @@ impl Header {
                         "author" => header.author = value,
                         "license" => header.license = value,
                         "source" => header.source = value,
+                        "teaches" => header.teaches = value,
                         _ => header.tags = value.split(',').map(|t| t.trim().to_string()).collect(),
                     }
                 }
@@ -132,12 +136,13 @@ impl Header {
         format!(
             "    Example {{\n        name: {:?},\n        summary: {:?},\n        author: {:?},\n        \
              license: {:?},\n        source: {:?},\n        tags: &[{tags}],\n        \
-             code: include_str!({:?}),\n    }},\n",
+             teaches: {:?},\n        code: include_str!({:?}),\n    }},\n",
             self.name,
             self.summary,
             self.author,
             self.license,
             self.source,
+            self.teaches,
             path.display().to_string(),
         )
     }
