@@ -13,6 +13,7 @@ Runs natively and in the browser as WASM.
 | --- | --- |
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
+| Share | **Share** button: copies a link that *is* the shader (see [Share links](#share-links)) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
 | Examples | `Examples` window — 33 examples (Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
@@ -27,6 +28,23 @@ edits, opened examples and files — and is restored on load, along with your
 settings. Compile errors appear in the bottom panel — the last good shader keeps
 running while you fix them, also when the GPU driver rejects a shader that
 passed validation.
+
+### Share links
+
+**Share** copies a link with the whole document in its fragment:
+`#code=1.<data>` is the editor text (with any tweak not yet written back),
+deflated and base64url-encoded behind a format version; a document that is a
+built-in example verbatim shares as `#example=<name>` instead. The fragment
+never reaches a server, so the link is the shader. The web build links to the
+page it runs on; native builds link to the live demo. Links over 8 KB get a
+warning in the status bar, since some chat apps cut them off.
+
+Opening a link wins over the saved document, but does not overwrite it: the
+autosave only writes once you edit, and if the saved work differs from the
+link a *Shared link* window offers to go back to it. The fragment is then
+cleared from the address bar, so reloading after an edit shows the edit. A
+damaged link (cut off, or from a newer format) opens nothing and says why.
+Natively, `--open-link <url>` opens a link the same way.
 
 ## The shader dialect
 
@@ -197,6 +215,8 @@ src/
   tweak.rs      tweakable constants: find literal consts, rewrite them into
                 uniform-fed `var<private>`s, write tweaked values back
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
+  share.rs      share links: the document deflated + base64url in the URL
+                fragment, the Share button, opening links at startup
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
   headless.rs   `--render`: windowless wgpu renderer writing a PNG (native)
   render/
@@ -262,6 +282,7 @@ cargo run              # native (dynamic Bevy, fast rebuilds)
 cargo test             # compile pipeline, examples, highlighter, editor
 cargo run -- --render Plasma out.png [--time 3] [--debugger]  # headless PNG
 cargo run -- --example Fluid --examples  # start on an example, browser open
+cargo run -- --open-link '<share link>'  # open a share link
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 trunk serve            # browser build on http://127.0.0.1:8080
 ```

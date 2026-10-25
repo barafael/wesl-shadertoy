@@ -20,6 +20,7 @@ mod headless;
 mod highlight;
 mod persist;
 mod render;
+mod share;
 mod theme;
 mod tweak;
 
@@ -87,6 +88,7 @@ fn main() {
         .init_resource::<editor::HighlightCache>()
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
+        .init_resource::<share::Shared>()
         .add_plugins(EguiPlugin::default())
         .add_plugins(ShaderToyRenderPlugin)
         .insert_resource(RenderErrorHandler(on_render_error))
@@ -297,6 +299,7 @@ struct StartupParams<'w> {
     run: ResMut<'w, RunRequest>,
     state: ResMut<'w, ShaderToyState>,
     wins: ResMut<'w, UiWindows>,
+    shared: ResMut<'w, share::Shared>,
 }
 
 fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: StartupParams) {
@@ -307,13 +310,17 @@ fn setup(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, mut app: S
     commands.insert_resource(settings);
 
     // `--shader <file>` (native) wins over everything: it is how scripted
-    // live tests inject a document. Otherwise restore a saved document
-    // (browser localStorage) or start from an example — a random one when
-    // the fresh-start setting is on.
+    // live tests inject a document. Then a share link ([`share`]). Otherwise
+    // restore a saved document (browser localStorage) or start from an
+    // example — a random one when the fresh-start setting is on.
     app.state.debugger = cli_flag("--debugger");
     app.wins.examples = cli_flag("--examples");
+    let link = share::startup(&mut app.shared);
     if let Some(text) = cli_shader() {
         app.doc.text = text;
+    } else if let Some((text, example)) = link {
+        app.doc.text = text;
+        app.state.example = example.map(|e| e.name);
     } else {
         match persist::load_doc() {
             Some(saved) => {
@@ -651,6 +658,7 @@ struct UiParams<'w, 's> {
     tweaks: ResMut<'w, Tweaks>,
     browser: ResMut<'w, browser::Browser>,
     preview_feedback: Res<'w, render::previews::PreviewFeedback>,
+    shared: ResMut<'w, share::Shared>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
 }
@@ -769,6 +777,16 @@ fn ui(mut p: UiParams) {
             // Fixed-width slots: digit changes must not reflow the toolbar.
             readout(ui, format!("t = {:.1}s", p.state.time), 84.0);
             readout(ui, format!("{:.0} fps", p.state.fps), 48.0);
+
+            ui.separator();
+
+            if ui
+                .button("Share")
+                .on_hover_text("Copy a link that contains this shader")
+                .clicked()
+            {
+                p.status.note = Some(share::copy_link(ctx, &p.doc.text, &p.tweaks));
+            }
 
             ui.separator();
 
@@ -915,6 +933,18 @@ fn ui(mut p: UiParams) {
         if modal.should_close() {
             p.wins.confirm_example = None;
         }
+    }
+
+    // --- shared link window --------------------------------------------------
+    if let Some(work) = share::show_opened(ctx, glass, &mut p.shared) {
+        open_into(
+            &mut p.doc,
+            &mut p.state,
+            &mut p.run,
+            &mut p.status,
+            work,
+            "your saved work",
+        );
     }
 
     // --- settings window -----------------------------------------------------

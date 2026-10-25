@@ -55,6 +55,11 @@
     window.addEventListener('beforeunload', function () {
       document.querySelectorAll('canvas').forEach(function (c) { c.remove(); });
     });
+    // A share link pasted into this tab only changes the fragment, which
+    // loads nothing by itself; reload so the app opens it at startup.
+    window.addEventListener('hashchange', function () {
+      if (window.location.hash.length > 1) { window.location.reload(); }
+    });
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     // Auto-reload when the WebGL context is lost (GPU switch, sleep, ...).
     new MutationObserver(function () {
