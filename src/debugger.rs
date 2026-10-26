@@ -640,16 +640,23 @@ impl ImageTarget {
 }
 
 /// Where the main fullscreen pass renders: the debugger's [`ImageTarget`]
-/// while the overlay is on, the view target otherwise.
+/// while the overlay is on, the view target otherwise. The UI-texture mode
+/// overrides the overlay: its melt pass always draws to the view, so the
+/// main pipeline must be built for the view's format.
 #[derive(SystemParam)]
 pub struct MainPassTarget<'w> {
     on: Res<'w, DebuggerOn>,
+    ui_texture: Res<'w, crate::ui_texture::UiTexture>,
     image: Res<'w, ImageTarget>,
 }
 
 impl MainPassTarget<'_> {
+    fn redirected(&self) -> bool {
+        self.on.0 && !self.ui_texture.on
+    }
+
     pub fn format(&self, view_format: TextureFormat) -> TextureFormat {
-        if self.on.0 {
+        if self.redirected() {
             self.image.format
         } else {
             view_format
@@ -657,7 +664,7 @@ impl MainPassTarget<'_> {
     }
 
     pub fn view<'a>(&'a self, view_destination: &'a TextureView) -> &'a TextureView {
-        if self.on.0 {
+        if self.redirected() {
             &self.image.view
         } else {
             view_destination
