@@ -100,9 +100,7 @@ trait Link {
 }
 
 enum LinkState {
-    /// Only the web link loads asynchronously; a spawned process is ready
-    /// to take messages at once.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    /// Loading the server (web) or writing its workspace (native).
     Starting,
     Ready,
     Failed(String),
@@ -170,7 +168,7 @@ impl Analyzer {
             if matches!(self.status, Status::Unavailable(_)) {
                 return;
             }
-            match Transport::start(&workspace_files()) {
+            match Transport::start(workspace_files()) {
                 Ok(link) => {
                     self.client = Some(Client::new(link));
                     self.status = Status::Starting;
