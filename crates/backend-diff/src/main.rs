@@ -1,4 +1,4 @@
-//! `cargo run -p backend-diff -- [--fuzz N] [--seed S] [--only NAME] [FILE.wesl…]`
+//! `cargo run -p backend-diff -- [--fuzz N] [--fuzz-int N] [--seed S] [--only NAME] [FILE.wesl…]`
 //!
 //! Prints the adapters found, then one row per case and adapter: the largest
 //! channel difference against the reference adapter, the share of pixels
@@ -14,6 +14,7 @@ use wesl_shadertoy::compile::compile_user_shader;
 
 fn main() {
     let mut fuzz = 0u64;
+    let mut fuzz_int = 0u64;
     let mut seed = 0u64;
     let mut only: Option<String> = None;
     let mut files = Vec::new();
@@ -28,6 +29,11 @@ fn main() {
                 fuzz = value()
                     .parse()
                     .unwrap_or_else(|_| usage("--fuzz takes a count"))
+            }
+            "--fuzz-int" => {
+                fuzz_int = value()
+                    .parse()
+                    .unwrap_or_else(|_| usage("--fuzz-int takes a count"))
             }
             "--seed" => {
                 seed = value()
@@ -46,6 +52,7 @@ fn main() {
         files.iter().map(|path| file_case(path)).collect()
     };
     cases.extend((seed..seed + fuzz).map(Case::fuzz));
+    cases.extend((seed..seed + fuzz_int).map(Case::fuzz_int));
     if let Some(only) = &only {
         cases.retain(|c| c.name.eq_ignore_ascii_case(only));
         if cases.is_empty() {
@@ -158,6 +165,8 @@ fn file_case(path: &str) -> Case {
 }
 
 fn usage(problem: &str) -> ! {
-    eprintln!("{problem}\nusage: backend-diff [--fuzz N] [--seed S] [--only NAME] [FILE.wesl…]");
+    eprintln!(
+        "{problem}\nusage: backend-diff [--fuzz N] [--fuzz-int N] [--seed S] [--only NAME] [FILE.wesl…]"
+    );
     std::process::exit(2);
 }

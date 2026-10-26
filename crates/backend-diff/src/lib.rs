@@ -55,6 +55,14 @@ impl Case {
         }
     }
 
+    /// The integer fuzz shader for `seed` ([`fuzz::int_shader`]).
+    pub fn fuzz_int(seed: u64) -> Case {
+        Case {
+            name: format!("ifuzz-{seed}"),
+            source: fuzz::int_shader(seed),
+        }
+    }
+
     /// File-name-safe form of the name.
     pub fn slug(&self) -> String {
         self.name

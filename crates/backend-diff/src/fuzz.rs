@@ -231,6 +231,268 @@ pub fn shader(seed: u64) -> String {
     )
 }
 
+/// Types of the integer generator: the two integers, and `f32` for the
+/// conversions between them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ITy {
+    I32,
+    U32,
+    F32,
+}
+
+impl ITy {
+    const ALL: [ITy; 3] = [ITy::I32, ITy::U32, ITy::F32];
+
+    fn wgsl(self) -> &'static str {
+        match self {
+            ITy::I32 => "i32",
+            ITy::U32 => "u32",
+            ITy::F32 => "f32",
+        }
+    }
+
+    /// The edge-value table function for this type.
+    fn table(self) -> &'static str {
+        match self {
+            ITy::I32 => "ei",
+            ITy::U32 => "eu",
+            ITy::F32 => "ef",
+        }
+    }
+}
+
+/// Edge-value tables and the colour hash, shared by every integer shader.
+/// The tables are indexed at run time, so naga cannot fold the edge cases
+/// away; the hash turns any bit of difference into a different colour.
+const INT_PRELUDE: &str = "\
+fn show(v: u32) -> vec4<f32> {
+    var h = v * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (h >> 22u) ^ h;
+    return vec4<f32>(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u), 255.0) / 255.0;
+}
+
+fn ei(k: u32) -> i32 {
+    var t = array<i32, 16>(0, 1, -1, 2, -2, 7, -7, 3, 31, 32, 33, 2147483647, -2147483647 - 1, 65536, -65536, 1000000);
+    return t[k & 15u];
+}
+
+fn eu(k: u32) -> u32 {
+    var t = array<u32, 16>(0u, 1u, 2u, 3u, 7u, 31u, 32u, 33u, 63u, 0x80000000u, 0xffffffffu, 0xfffffffeu, 0x7fffffffu, 0x10000u, 0xdeadbeefu, 5u);
+    return t[k & 15u];
+}
+
+fn ef(k: u32) -> f32 {
+    var t = array<f32, 16>(0.0, -0.5, 0.5, 1.5, -1.5, 2.5, -2.5, 3e9, -3e9, 5e9, 16777217.0, 4294967040.0, 2147483520.0, -2147483904.0, 1e20, -1e20);
+    return t[k & 15u];
+}
+";
+
+/// The integer generator: like [`Generator`], over [`ITy`]. Every value is
+/// defined by WGSL for every input (division by zero, `INT_MIN / -1`,
+/// shifts past the width, out-of-range float conversions all have a
+/// specified result), and the floats stay finite: they are only added,
+/// halved and rounded, never multiplied or divided by run-time values.
+struct IntGenerator {
+    rng: Rng,
+    bound: Vec<(String, ITy)>,
+}
+
+impl IntGenerator {
+    fn expr(&mut self, ty: ITy, depth: u32) -> String {
+        if depth == 0 || self.rng.below(5) == 0 {
+            return self.leaf(ty);
+        }
+        let d = depth - 1;
+        match ty {
+            ITy::F32 => self.float(d),
+            _ => self.int(ty, d),
+        }
+    }
+
+    fn int(&mut self, ty: ITy, d: u32) -> String {
+        let w = ty.wgsl();
+        match self.rng.below(16) {
+            0..=3 => {
+                let op = ["+", "-", "*", "/", "%", "&", "|", "^"][self.rng.below(8) as usize];
+                format!("({} {op} {})", self.expr(ty, d), self.expr(ty, d))
+            }
+            4 => {
+                let op = ["/", "%"][self.rng.below(2) as usize];
+                format!("({} {op} {})", self.expr(ty, d), self.expr(ty, d))
+            }
+            5 => {
+                let op = ["<<", ">>"][self.rng.below(2) as usize];
+                format!("({} {op} {})", self.expr(ty, d), self.expr(ITy::U32, d))
+            }
+            6 => match ty {
+                ITy::I32 => format!("(-{})", self.expr(ty, d)),
+                _ => format!("(~{})", self.expr(ty, d)),
+            },
+            7 => {
+                let f = ["min", "max"][self.rng.below(2) as usize];
+                format!("{f}({}, {})", self.expr(ty, d), self.expr(ty, d))
+            }
+            8 => format!(
+                "clamp({}, {}, {})",
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d)
+            ),
+            9 => format!(
+                "select({}, {}, {} < {})",
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d)
+            ),
+            // A vector select, which GLSL spells as `mix` with a bool vector.
+            10 => format!(
+                "select(vec2<{w}>({}, {}), vec2<{w}>({}, {}), vec2<bool>({} < {}, {} == {})).{}",
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ty, d),
+                ["x", "y"][self.rng.below(2) as usize]
+            ),
+            11 => {
+                let f = [
+                    "countOneBits",
+                    "countLeadingZeros",
+                    "countTrailingZeros",
+                    "firstLeadingBit",
+                    "firstTrailingBit",
+                    "reverseBits",
+                ][self.rng.below(6) as usize];
+                format!("{f}({})", self.expr(ty, d))
+            }
+            12 => format!(
+                "extractBits({}, {}, {})",
+                self.expr(ty, d),
+                self.expr(ITy::U32, d),
+                self.expr(ITy::U32, d)
+            ),
+            13 => format!(
+                "insertBits({}, {}, {}, {})",
+                self.expr(ty, d),
+                self.expr(ty, d),
+                self.expr(ITy::U32, d),
+                self.expr(ITy::U32, d)
+            ),
+            14 => match ty {
+                ITy::I32 => format!("abs({})", self.expr(ty, d)),
+                _ => format!(
+                    "({} {} {})",
+                    self.expr(ty, d),
+                    ["/", "%"][self.rng.below(2) as usize],
+                    self.expr(ty, d)
+                ),
+            },
+            // Changes of type.
+            _ => {
+                let other = if ty == ITy::I32 { ITy::U32 } else { ITy::I32 };
+                match self.rng.below(3) {
+                    0 => format!("{w}({})", self.expr(other, d)),
+                    1 => format!("bitcast<{w}>({})", self.expr(other, d)),
+                    _ => format!("{w}({})", self.expr(ITy::F32, d)),
+                }
+            }
+        }
+    }
+
+    fn float(&mut self, d: u32) -> String {
+        match self.rng.below(8) {
+            0 => format!("({} + {})", self.expr(ITy::F32, d), self.expr(ITy::F32, d)),
+            1 => format!("({} - {})", self.expr(ITy::F32, d), self.expr(ITy::F32, d)),
+            2 => {
+                let f =
+                    ["trunc", "floor", "ceil", "round", "abs", "fract"][self.rng.below(6) as usize];
+                format!("{f}({})", self.expr(ITy::F32, d))
+            }
+            3 => format!(
+                "({} * {})",
+                self.expr(ITy::F32, d),
+                ["0.5", "1.5", "-0.25"][self.rng.below(3) as usize]
+            ),
+            4 => format!(
+                "({} % {})",
+                self.expr(ITy::F32, d),
+                ["1.25", "-0.75", "3.0"][self.rng.below(3) as usize]
+            ),
+            5 => format!("f32({})", self.expr(ITy::I32, d)),
+            6 => format!("f32({})", self.expr(ITy::U32, d)),
+            _ => format!(
+                "select({}, {}, {} < {})",
+                self.expr(ITy::F32, d),
+                self.expr(ITy::F32, d),
+                self.expr(ITy::F32, d),
+                self.expr(ITy::F32, d)
+            ),
+        }
+    }
+
+    fn leaf(&mut self, ty: ITy) -> String {
+        let bound: Vec<String> = self
+            .bound
+            .iter()
+            .filter(|(_, t)| *t == ty)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !bound.is_empty() && self.rng.below(3) == 0 {
+            return bound[self.rng.below(bound.len() as u32) as usize].clone();
+        }
+        let k = self.rng.below(16);
+        let axis = ["px", "py", "pk"][self.rng.below(3) as usize];
+        match (ty, self.rng.below(4)) {
+            (ITy::I32, 0) => ["ix", "iy"][self.rng.below(2) as usize].into(),
+            (ITy::U32, 0) => axis.into(),
+            _ => format!("{}({axis} + {k}u)", ty.table()),
+        }
+    }
+}
+
+/// The integer fuzz shader for `seed`: integer arithmetic over edge values,
+/// conversions and bit builtins, hashed to a colour so that any difference
+/// in any bit shows.
+pub fn int_shader(seed: u64) -> String {
+    let mut g = IntGenerator {
+        rng: Rng(seed),
+        bound: Vec::new(),
+    };
+    let mut body = String::new();
+    let lets = 2 + g.rng.below(4);
+    let mut last = ITy::U32;
+    for i in 0..lets {
+        let ty = ITy::ALL[g.rng.below(3) as usize];
+        let name = format!("v{i}");
+        let value = g.expr(ty, 4);
+        let _ = writeln!(body, "    let {name}: {} = {value};", ty.wgsl());
+        g.bound.push((name, ty));
+        last = ty;
+    }
+    let shown = match last {
+        ITy::U32 => format!("v{}", lets - 1),
+        _ => format!("bitcast<u32>(v{})", lets - 1),
+    };
+    format!(
+        "// backend-diff integer fuzz shader, seed {seed}\n\n\
+         {INT_PRELUDE}\n\
+         fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {{\n\
+         \x20   let px = u32(frag_coord.x);\n\
+         \x20   let py = u32(frag_coord.y);\n\
+         \x20   let pk = px * 7u + py * 3u;\n\
+         \x20   let ix = i32(px) - 128;\n\
+         \x20   let iy = i32(py) - 72;\n\
+         {body}\
+         \x20   return show({shown});\n\
+         }}\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +509,16 @@ mod tests {
     fn generated_shaders_compile() {
         for seed in 0..300 {
             let src = shader(seed);
+            if let Err(e) = wesl_shadertoy::compile::compile_user_shader(&src) {
+                panic!("seed {seed}: {e}\n{src}");
+            }
+        }
+    }
+
+    #[test]
+    fn generated_int_shaders_compile() {
+        for seed in 0..300 {
+            let src = int_shader(seed);
             if let Err(e) = wesl_shadertoy::compile::compile_user_shader(&src) {
                 panic!("seed {seed}: {e}\n{src}");
             }

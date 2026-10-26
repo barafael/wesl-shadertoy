@@ -455,7 +455,7 @@ crates/
     image.rs      per-pixel diff, tolerances, PNG output
     translate.rs  naga's GLSL ES 3.00 / MSL / HLSL / SPIR-V writers, checked
                   by glslangValidator / spirv-val when installed
-    fuzz.rs       seeded generator of well-typed main_image shaders
+    fuzz.rs       seeded generators of well-typed main_image shaders (float and integer)
 web/
   analyzer.js               JS side of the web transport
   fetch-wgsl-analyzer.sh    fetches the pinned wgsl-analyzer-web build
@@ -501,6 +501,7 @@ WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 cargo test -- --ignored exported_crates_build  # exported crates build (slow)
 cargo test -p backend-diff                # every example on Vulkan vs GL + naga writers
 cargo run -p backend-diff -- --fuzz 200   # the same as a table, plus fuzz shaders
+cargo run -p backend-diff -- --fuzz-int 200  # plus integer fuzz shaders (edge values, bit builtins)
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
 
@@ -518,8 +519,8 @@ Vulkan one in the sRGB bytes the screen shows: a pixel differs when a channel
 is off by more than 8/255, and a case differs when over 1% of its pixels do.
 Differing cases leave both renders, an amplified diff and the shader in
 `target/backend-diff/`. The rendering tests skip with a note when there are
-not two adapters; the naga translation tests need no GPU. Elevated, Fire,
-Seascape and Voronoi are expected to differ: their `fract(sin(dot(p, K)) *
+not two adapters; the naga translation tests need no GPU. Elevated and
+Seascape are expected to differ: their `fract(sin(dot(p, K)) *
 43758.5453)` hash turns a last-bit difference in `dot` (which drivers may
 fuse into an FMA in either operand order) into a different random value.
 
