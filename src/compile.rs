@@ -128,7 +128,8 @@ fn i_resolution() -> vec3<f32> { return st_uniforms.i_resolution.xyz; }
 /// zw: click position; positive while a button is held, negative after
 /// release. Origin bottom-left, like shadertoy's iMouse.
 fn i_mouse() -> vec4<f32> { return st_uniforms.i_mouse; }
-/// x: year, y: month (1-12), z: day of month, w: seconds since midnight.
+/// Local date and time, like shadertoy's iDate: x: year, y: month
+/// (0 = January), z: day of month (from 1), w: seconds since midnight.
 fn i_date() -> vec4<f32> { return st_uniforms.i_date; }
 /// Audio sample rate in Hz. Fixed at 44100 — there is no audio input.
 fn i_sample_rate() -> f32 { return st_uniforms.i_sample_rate; }

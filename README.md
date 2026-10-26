@@ -182,7 +182,7 @@ Available uniforms (import from `package::shadertoy`):
 | `i_resolution() -> vec3<f32>` | `iResolution` | viewport size in pixels (z = 1) |
 | `i_mouse() -> vec4<f32>` | `iMouse` | xy: drag position, zw: click; negative z after release |
 | `i_frame_rate() -> f32` | `iFrameRate` | smoothed frames per second |
-| `i_date() -> vec4<f32>` | `iDate` | year, month (1–12), day of month, seconds since midnight (UTC) |
+| `i_date() -> vec4<f32>` | `iDate` | year, month (0 = January, as on shadertoy), day of month, seconds since midnight, all in local time |
 | `i_sample_rate() -> f32` | `iSampleRate` | 44100 (there is no audio input) |
 | `i_channel_time(i: u32) -> f32` | `iChannelTime[i]` | seconds since buffer channel `i` started (0 if the shader has no such buffer) |
 | `i_channel_resolution(i: u32) -> vec3<f32>` | `iChannelResolution[i]` | size of buffer channel `i` in pixels (0 if unused) |

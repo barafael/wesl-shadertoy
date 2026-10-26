@@ -1824,21 +1824,6 @@ fn readout(ui: &mut egui::Ui, text: String, width: f32) {
     );
 }
 
-/// Howard Hinnant's `civil_from_days`, so iDate needs no chrono dependency.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // days since Mar 1
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d)
-}
-
 // --- wall clock ---------------------------------------------------------------
 
 /// Seconds since the Unix epoch. `SystemTime::now()` *panics* on
@@ -1857,20 +1842,58 @@ pub(crate) fn now_epoch_secs() -> f64 {
     }
 }
 
-/// x: year, y: month (1-12), z: day of month, w: seconds since midnight.
-/// (shadertoy's `iDate` convention; matches the `i_date` docs in the
-/// environment module.)
+/// shadertoy's `iDate`, in local time: x: year, y: month (0 = January),
+/// z: day of month (from 1), w: seconds since midnight. Matches the
+/// `i_date` docs in the environment module.
 fn date_uniforms() -> Vec4 {
-    let secs = now_epoch_secs();
-    let days = (secs / 86400.0).floor() as i64;
-    let seconds_of_day = secs - days as f64 * 86400.0;
-    let (year, month, day) = civil_from_days(days);
-    Vec4::new(year as f32, month as f32, day as f32, seconds_of_day as f32)
+    #[cfg(target_arch = "wasm32")]
+    {
+        let now = js_sys::Date::new_0();
+        let seconds =
+            f64::from(now.get_hours() * 3600 + now.get_minutes() * 60 + now.get_seconds())
+                + f64::from(now.get_milliseconds()) / 1000.0;
+        Vec4::new(
+            now.get_full_year() as f32,
+            now.get_month() as f32,
+            now.get_date() as f32,
+            seconds as f32,
+        )
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let now = jiff::Zoned::now();
+        local_date(now.datetime())
+    }
+}
+
+/// [`date_uniforms`] for a local date and time.
+#[cfg(not(target_arch = "wasm32"))]
+fn local_date(t: jiff::civil::DateTime) -> Vec4 {
+    let seconds = f64::from(t.hour()) * 3600.0
+        + f64::from(t.minute()) * 60.0
+        + f64::from(t.second())
+        + f64::from(t.subsec_nanosecond()) * 1e-9;
+    Vec4::new(
+        f32::from(t.year()),
+        f32::from(t.month() - 1),
+        f32::from(t.day()),
+        seconds as f32,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `iDate` counts months from 0, like shadertoy, and seconds from
+    /// local midnight.
+    #[test]
+    fn date_follows_shadertoy() {
+        let t = jiff::civil::date(2026, 1, 31).at(13, 30, 15, 500_000_000);
+        assert_eq!(local_date(t), Vec4::new(2026.0, 0.0, 31.0, 48_615.5));
+        let t = jiff::civil::date(2026, 12, 1).at(0, 0, 0, 0);
+        assert_eq!(local_date(t), Vec4::new(2026.0, 11.0, 1.0, 0.0));
+    }
 
     /// A press over a window is UI, a press on the free viewport is canvas.
     #[test]

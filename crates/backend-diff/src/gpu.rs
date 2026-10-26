@@ -547,7 +547,8 @@ impl UniformLayout {
         put("i_frame", 0, &[frame]);
         put("i_resolution", 0, &f(&[w, h, 1.0, 0.0]));
         put("i_mouse", 0, &f(&[0.6 * w, 0.4 * h, 0.6 * w, 0.4 * h]));
-        put("i_date", 0, &f(&[2026.0, 10.0, 25.0, 43_200.0]));
+        // Noon on 25 October 2026 (months count from 0).
+        put("i_date", 0, &f(&[2026.0, 9.0, 25.0, 43_200.0]));
         put("i_sample_rate", 0, &f(&[44_100.0]));
         put("i_frame_rate", 0, &f(&[60.0]));
         let defined = |i: u32| shader.buffers & (1 << i) != 0;

@@ -260,6 +260,8 @@ bevy = {{ version = "0.20", default-features = false, features = [
     "bevy_render",
     "bevy_core_pipeline",
 ] }}
+# `iDate` in local time, as on shadertoy.
+jiff = "0.2"
 
 # A workspace of its own, so the crate builds wherever it is unpacked.
 [workspace]
@@ -442,25 +444,20 @@ fn update_uniforms(
     }}
 }}
 
-/// shadertoy's `iDate` from the system clock (UTC).
+/// shadertoy's `iDate`, in local time: year, month (0 = January), day of
+/// month, seconds since midnight.
 fn date() -> Vec4 {{
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    let days = (secs / 86400.0).floor() as i64;
-    // Howard Hinnant's `civil_from_days`.
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 {{ mp + 3 }} else {{ mp - 9 }};
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    let seconds = secs - days as f64 * 86400.0;
-    Vec4::new(year as f32, month as f32, day as f32, seconds as f32)
+    let now = jiff::Zoned::now();
+    let seconds = f64::from(now.hour()) * 3600.0
+        + f64::from(now.minute()) * 60.0
+        + f64::from(now.second())
+        + f64::from(now.subsec_nanosecond()) * 1e-9;
+    Vec4::new(
+        f32::from(now.year()),
+        f32::from(now.month() - 1),
+        f32::from(now.day()),
+        seconds as f32,
+    )
 }}
 "#,
         title = title,

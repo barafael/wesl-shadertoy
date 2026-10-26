@@ -38,7 +38,7 @@ fn dial(turns: f32) -> vec2<f32> {
     return vec2<f32>(sin(a), cos(a));
 }
 
-// Seconds since midnight (UTC). Instead of importing it, this names
+// Seconds since local midnight. Instead of importing it, this names
 // `i_date` by its full path, which works anywhere without an import.
 fn time_of_day() -> f32 {
     return package::shadertoy::i_date().w;
