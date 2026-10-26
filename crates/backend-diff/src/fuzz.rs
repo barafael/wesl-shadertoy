@@ -509,7 +509,7 @@ mod tests {
     fn generated_shaders_compile() {
         for seed in 0..300 {
             let src = shader(seed);
-            if let Err(e) = wesl_shadertoy::compile::compile_user_shader(&src) {
+            if let Err(e) = wesl_shadertoy_core::compile::compile_user_shader(&src) {
                 panic!("seed {seed}: {e}\n{src}");
             }
         }
@@ -519,7 +519,7 @@ mod tests {
     fn generated_int_shaders_compile() {
         for seed in 0..300 {
             let src = int_shader(seed);
-            if let Err(e) = wesl_shadertoy::compile::compile_user_shader(&src) {
+            if let Err(e) = wesl_shadertoy_core::compile::compile_user_shader(&src) {
                 panic!("seed {seed}: {e}\n{src}");
             }
         }

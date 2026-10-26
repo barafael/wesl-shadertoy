@@ -4,7 +4,7 @@
 # commit given as the first argument (default: the upstream main branch).
 #
 # Only `*.wesl` files are kept (the package wesl.toml declares, minus the
-# test/ tree); build.rs embeds them as the `lygia` WESL package.
+# test/ tree); crates/core/build.rs embeds them as the `lygia` WESL package.
 set -eu
 
 repo=https://github.com/patriciogonzalezvivo/lygia.git

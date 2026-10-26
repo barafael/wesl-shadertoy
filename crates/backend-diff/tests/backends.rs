@@ -6,7 +6,7 @@
 use backend_diff::gpu::{Gpu, Scene};
 use backend_diff::translate::{self, TARGETS};
 use backend_diff::{Case, compare, out_dir};
-use wesl_shadertoy::compile::compile_user_shader;
+use wesl_shadertoy_core::compile::compile_user_shader;
 
 /// Fuzz seeds the tests render (the binary's `--fuzz N` runs more).
 const FUZZ_SEEDS: std::ops::Range<u64> = 0..48;

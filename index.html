@@ -35,7 +35,7 @@
 </head>
 <body>
   <!-- Rust emits bulk-memory ops; trunk's bundled wasm-opt needs them enabled.
-       data-bin: the package also has a library target (src/lib.rs). -->
+       data-bin: the binary to build. -->
   <link data-trunk rel="rust" data-bin="wesl-shadertoy" data-wasm-opt="z"
         data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int" />
   <link data-trunk rel="copy-file" href="web/coi-serviceworker.js" />

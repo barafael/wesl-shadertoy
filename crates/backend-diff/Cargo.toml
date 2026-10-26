@@ -7,9 +7,9 @@ description = "Renders wesl-shadertoy shaders through every wgpu backend on the 
 publish = false
 
 [dependencies]
-# The app's library half: the WESL compiler and the bundled examples, so the
-# shaders under test are composed exactly as the app composes them.
-wesl-shadertoy = { path = "../.." }
+# The app's engine-free half: the WESL compiler and the bundled examples, so
+# the shaders under test are composed exactly as the app composes them.
+wesl-shadertoy-core = { path = "../core" }
 # Same majors as the app (Bevy 0.20's renderer). Backends are picked per
 # adapter at run time; the default features cover Vulkan and GL on Linux.
 wgpu = "30"

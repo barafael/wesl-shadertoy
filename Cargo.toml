@@ -8,7 +8,7 @@ description = "A shadertoy-style live shader editor for WESL, built on Bevy 0.20
 # The root package is the app; `crates/` holds tooling around it (see
 # README.md). Profiles below apply to every member.
 [workspace]
-members = [".", "crates/backend-diff"]
+members = [".", "crates/core", "crates/backend-diff"]
 # Git worktrees of this repository (agents' and tools') are checkouts of
 # their own, not members.
 exclude = [".claude"]
@@ -37,7 +37,10 @@ bevy_egui = { version = "0.43.1", default-features = false, features = [
     "open_url",
 ] }
 
-# The WESL compiler (crate is published as `wesl`, not `wesl-compiler`).
+# The compiler, the bundled examples and LYGIA (the engine-free half).
+wesl-shadertoy-core = { path = "crates/core" }
+# The WESL compiler (crate is published as `wesl`, not `wesl-compiler`), for
+# its name mangling in the Graph window.
 wesl = "0.6"
 # Same major as the naga inside wgpu 30 (Bevy 0.20's renderer), so anything
 # we validate here is accepted by the pipeline cache there.
@@ -52,6 +55,10 @@ ab_glyph = "0.2"
 # fragment (both already in the tree, through png and bevy).
 miniz_oxide = "0.8"
 base64 = "0.23"
+
+[build-dependencies]
+# Compiles every example at build time for the Examples window.
+wesl-shadertoy-core = { path = "crates/core" }
 
 [features]
 # Fast native dev rebuilds (same trick as omdurman's app crate): Bevy as a

@@ -370,14 +370,9 @@ when compiling.
 ```
 src/
   main.rs       app wiring, resources, per-frame uniforms, egui UI
-  lib.rs        the Bevy-free modules below (compile, tweak, examples) as a
-                library, for tools such as crates/backend-diff
-  compile.rs    WESL link + naga validate (the shader contract above), with
-                the bundled LYGIA as the `lygia` package
-  tweak.rs      tweakable constants: find literal consts, rewrite them into
-                uniform-fed `var<private>`s, write tweaked values back
-  heatmap.rs    cost heatmap: count loop iterations in a `var<private>`,
-                the heat entry point and palette, the legend
+                (the compiler and examples come from crates/core)
+  heatmap.rs    cost heatmap: the toolbar's on/off and the legend (the
+                rewrite is crates/core's heat.rs)
 
   flags.rs      the Flags window: `// wesl-flags:` / `// wesl-const:` lines
                 -> WESL features and the `constants::` module, and which
@@ -404,13 +399,9 @@ src/
                               channel clocks and buffers on the switch
     buffers.rs                the buffer_a..buffer_d passes (ping-pong
                               Rgba32Float targets behind i_channel_0..3)
-    previews.rs               live thumbnails (the example browser's and
-                              Evolve's variants): each job's buffer and
-                              image passes into an image of its own
-
-    previews.rs               live thumbnails (example browser, Graph
-                              window): each shader's buffer and image passes
-                              into a small image of its own
+    previews.rs               live thumbnails (example browser, Evolve,
+                              Graph window): each job's buffer and image
+                              passes into a small image of its own
     blur.rs                   frosted-glass backdrop: the finished frame,
                               downsampled 4x and Gaussian-blurred into an
                               image egui paints under windows and panels
@@ -424,10 +415,8 @@ src/
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
   editor.rs     the code editor: TextEdit with a custom layouter that paints
                 the highlighted job, line-number gutter, Tab/Shift-Tab
-  examples.rs   the built-in examples (examples/*.wesl, embedded by build.rs,
-                which also parses each file's name/author/license header)
-  browser.rs    the Examples window: cards, filters, lazy compiles, and which
-                thumbnails to draw each frame
+  browser.rs    the Examples window: cards, filters, and which thumbnails to
+                draw each frame, from the examples build.rs compiled
   evolve.rs     Evolve mode: mutating constants, the lineage, the 3×3 grid of
                 variants drawn as live thumbnails
 
@@ -442,13 +431,27 @@ src/
     mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
     native.rs     the wgsl-analyzer executable over stdio
     web.rs        wgsl-analyzer-web in a Web Worker, via web/analyzer.js
+build.rs        compiles every example ahead of time for the Examples
+                window, and indexes LYGIA's doc blocks and declarations
 examples/       one .wesl file per example; the leading comment block names
-                and credits it (see src/examples.rs for the format)
+                and credits it (see crates/core/src/examples.rs for the format)
 vendor/lygia/   the WESL modules of LYGIA at a pinned commit, refreshed by
-                vendor/update-lygia.sh; build.rs embeds them as a package
-                and indexes their doc blocks and declarations
+                vendor/update-lygia.sh; crates/core/build.rs embeds them as
+                a package
 
 crates/
+  core/         the Bevy-free half, shared by the app, its build script and
+                backend-diff
+    build.rs      embeds examples/ (parsing each file's name/author/license
+                  header) and vendor/lygia/ as the `lygia` package
+    compile.rs    WESL link + naga validate (the shader contract above), with
+                  the bundled LYGIA as the `lygia` package
+    tweak.rs      tweakable constants: find literal consts, rewrite them into
+                  uniform-fed `var<private>`s, write tweaked values back
+    heat.rs       cost heatmap: loop iterations counted in a `var<private>`,
+                  the heat entry point and palette
+    pragmas.rs    `// wesl-flags:` / `// wesl-const:` lines
+    examples.rs   the built-in examples and their order
   backend-diff/ test crate (not part of the app or its wasm build):
                 renders shaders on every wgpu adapter and diffs the pixels
     gpu.rs        offscreen buffer + image passes on one adapter

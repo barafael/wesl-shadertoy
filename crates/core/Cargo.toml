@@ -1,0 +1,14 @@
+[package]
+name = "wesl-shadertoy-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "The engine-free half of wesl-shadertoy: the WESL → WGSL compiler with its live-tweak and heat rewrites, the bundled LYGIA package and the examples."
+publish = false
+
+[dependencies]
+# The WESL compiler (crate is published as `wesl`, not `wesl-compiler`).
+wesl = "0.6"
+# Same major as the naga inside wgpu 30 (Bevy 0.20's renderer), so anything
+# validated here is accepted by the app's pipeline cache.
+naga = { version = "30", features = ["wgsl-in"] }

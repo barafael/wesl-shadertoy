@@ -3,7 +3,7 @@
 //! The app's shaders reach the screen through naga translations — SPIR-V on
 //! Vulkan, GLSL ES on WebGL2 (and native GL), MSL and HLSL elsewhere — so a
 //! translation bug shows up as a picture that depends on the backend. This
-//! crate composes a shader exactly like the app ([`wesl_shadertoy::compile`]),
+//! crate composes a shader exactly like the app ([`wesl_shadertoy_core::compile`]),
 //! renders it on every wgpu adapter the machine has ([`gpu`]), and diffs each
 //! render against the first one, Vulkan when present ([`image`]). It also
 //! writes every naga backend's output directly ([`translate`]), which covers
@@ -22,7 +22,7 @@ pub mod translate;
 
 use std::path::PathBuf;
 
-use wesl_shadertoy::compile::compile_user_shader;
+use wesl_shadertoy_core::compile::compile_user_shader;
 
 use crate::gpu::{Gpu, Scene};
 use crate::image::{Diff, Image};
@@ -38,7 +38,7 @@ pub struct Case {
 impl Case {
     /// Every bundled example.
     pub fn examples() -> Vec<Case> {
-        wesl_shadertoy::examples::ALL
+        wesl_shadertoy_core::examples::ALL
             .iter()
             .map(|e| Case {
                 name: e.name.to_string(),

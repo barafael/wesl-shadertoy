@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use crate::render::ShaderToyUniform;
-use wesl_shadertoy::heat;
+use wesl_shadertoy_core::heat;
 
 /// The legend's default max: iterations that map to the hot end.
 pub const DEFAULT_MAX: f32 = 256.0;

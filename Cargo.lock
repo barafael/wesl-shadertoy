@@ -437,7 +437,7 @@ dependencies = [
  "naga",
  "png 0.17.16",
  "pollster",
- "wesl-shadertoy",
+ "wesl-shadertoy-core",
  "wgpu",
 ]
 
@@ -6169,7 +6169,16 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "wesl",
+ "wesl-shadertoy-core",
  "wgpu",
+]
+
+[[package]]
+name = "wesl-shadertoy-core"
+version = "0.1.0"
+dependencies = [
+ "naga",
+ "wesl",
 ]
 
 [[package]]

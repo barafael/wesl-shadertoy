@@ -3,16 +3,15 @@
 //! The tutorial comes first, then the other beginner examples (see
 //! [`examples::rank`]).
 //!
-//! The thumbnails are real renders ([`crate::render::previews`]). Each
-//! example is compiled the first time its card scrolls into view (within a
-//! small time budget per frame, so opening the window never stalls), into a
-//! shader asset of its own that the render world builds pipelines for. Each
-//! frame [`update_previews`] then asks for the hovered card plus a few of
-//! the visible ones in turn, so a full window costs a handful of small
-//! draws per frame. Hovering a card drives its `i_mouse` as a drag, so
-//! interactive examples react in place.
+//! The thumbnails are real renders ([`crate::render::previews`]) of the
+//! examples' WGSL, which `build.rs` compiles ([`COMPILED`]), so opening the
+//! window compiles nothing on the CPU. The first time a card scrolls into
+//! view its WGSL becomes a shader asset of its own that the render world
+//! builds pipelines for. Each frame [`update_previews`] then asks for the
+//! hovered card plus a few of the visible ones in turn, so a full window
+//! costs a handful of small draws per frame. Hovering a card drives its
+//! `i_mouse` as a drag, so interactive examples react in place.
 
-use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
@@ -32,9 +31,6 @@ const GAP: f32 = 12.0;
 
 /// Visible cards drawn per frame besides the hovered one, round-robin.
 const BUDGET: usize = 4;
-
-/// Time per frame spent compiling examples once at least one was compiled.
-const COMPILE_BUDGET_MS: f32 = 8.0;
 
 /// The browser's state: per-card resources and the filter.
 #[derive(Resource)]
@@ -71,17 +67,21 @@ impl Default for Browser {
 #[derive(Default)]
 struct Card {
     image: Option<(Handle<Image>, egui::TextureId)>,
-    compiled: Option<Result<Compiled, String>>,
+    shader: Option<Handle<Shader>>,
     /// `i_time` when it was last drawn, for its `i_time_delta`.
     last_drawn: f32,
 }
 
-struct Compiled {
-    shader: Handle<Shader>,
+/// An example as `build.rs` compiled it.
+struct CompiledExample {
+    wgsl: &'static str,
     buffers: u8,
-    /// The example's constants at their defaults, slot = index.
-    tweaks: [Vec4; MAX_TWEAKS],
+    /// Its live constants' default values, slot = index.
+    tweaks: &'static [[f32; 4]],
 }
+
+// `COMPILED`, one entry per example in `examples::ALL` order.
+include!(concat!(env!("OUT_DIR"), "/compiled_examples.rs"));
 
 impl Browser {
     /// Call every frame before [`show`]: a closed window shows no cards.
@@ -91,8 +91,8 @@ impl Browser {
     }
 }
 
-/// Allocate images and compile examples for the cards the window showed
-/// last frame, and pick this frame's [`PreviewJobs`].
+/// Allocate images and shader assets for the cards the window showed last
+/// frame, and pick this frame's [`PreviewJobs`].
 pub fn update_previews(
     mut browser: ResMut<Browser>,
     mut contexts: EguiContexts,
@@ -107,8 +107,6 @@ pub fn update_previews(
         return;
     }
 
-    let started = Instant::now();
-    let mut compiled_one = false;
     for &i in &b.visible {
         let card = &mut b.cards[i];
         if card.image.is_none() {
@@ -121,15 +119,14 @@ pub fn update_previews(
             let texture = contexts.add_image(bevy_egui::EguiTextureHandle::Strong(image.clone()));
             card.image = Some((image, texture));
         }
-        let over_budget = started.elapsed().as_secs_f32() * 1000.0 > COMPILE_BUDGET_MS;
-        if card.compiled.is_none() && !(compiled_one && over_budget) {
-            card.compiled = Some(compile(i, &mut shaders));
-            compiled_one = true;
-        }
+        card.shader.get_or_insert_with(|| {
+            let path = format!("shadertoy://example/{i}");
+            shaders.add(Shader::from_wgsl(COMPILED[i].wgsl, path))
+        });
     }
 
     // The hovered card every frame, then the next few visible ones.
-    let drawable = |b: &Browser, i: usize| matches!(b.cards[i].compiled, Some(Ok(_)));
+    let drawable = |b: &Browser, i: usize| b.cards[i].shader.is_some();
     let mut picked: Vec<usize> = b.hovered.map(|(i, ..)| i).into_iter().collect();
     let candidates: Vec<usize> = b
         .visible
@@ -148,9 +145,14 @@ pub fn update_previews(
     for i in picked {
         let hovered = b.hovered;
         let card = &mut b.cards[i];
-        let (Some((image, _)), Some(Ok(compiled))) = (&card.image, &card.compiled) else {
+        let (Some((image, _)), Some(shader)) = (&card.image, &card.shader) else {
             continue;
         };
+        let compiled = &COMPILED[i];
+        let mut tweaks = [Vec4::ZERO; MAX_TWEAKS];
+        for (slot, value) in compiled.tweaks.iter().enumerate() {
+            tweaks[slot] = Vec4::from_array(*value);
+        }
         let mouse = match hovered {
             Some((h, pos, start)) if h == i => Vec4::new(pos.x, pos.y, start.x, start.y),
             _ => Vec4::ZERO,
@@ -169,7 +171,7 @@ pub fn update_previews(
                 if defined(c) { now } else { 0.0 }
             })),
             channel_resolution: std::array::from_fn(|c| if defined(c) { size } else { Vec4::ZERO }),
-            tweaks: compiled.tweaks,
+            tweaks,
             ..default()
         };
         card.last_drawn = now;
@@ -178,30 +180,11 @@ pub fn update_previews(
             image: image.id(),
             size: PREVIEW_SIZE,
             generation: 0,
-            shader: compiled.shader.clone(),
+            shader: shader.clone(),
             buffers: compiled.buffers,
             uniform,
         });
     }
-}
-
-/// Compile example `i` into a shader asset of its own.
-fn compile(i: usize, shaders: &mut Assets<Shader>) -> Result<Compiled, String> {
-    let example = &examples::ALL[i];
-    let compiled = crate::compile::compile_user_shader(example.code).map_err(|e| {
-        warn!("example {} does not compile: {e}", example.name);
-        e.to_string()
-    })?;
-    let mut tweaks = [Vec4::ZERO; MAX_TWEAKS];
-    for (slot, c) in compiled.tweaks.iter().enumerate() {
-        tweaks[slot] = Vec4::from_array(c.value);
-    }
-    let path = format!("shadertoy://example/{i}");
-    Ok(Compiled {
-        shader: shaders.add(Shader::from_wgsl(compiled.wgsl, path)),
-        buffers: compiled.buffers,
-        tweaks,
-    })
 }
 
 /// The window's contents. `current` names the example in the editor (if
@@ -338,18 +321,8 @@ fn card(
 fn thumbnail(ui: &egui::Ui, b: &Browser, i: usize, rect: egui::Rect, feedback: &PreviewFeedback) {
     let painter = ui.painter();
     let card = &b.cards[i];
-    match (&card.image, &card.compiled) {
-        (_, Some(Err(_))) => {
-            painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "does not compile",
-                egui::FontId::proportional(12.0),
-                crate::theme::ERR_COLOR,
-            );
-        }
-        (Some((_, texture)), _) if feedback.drawn(PreviewKey::Example(i)) => {
+    match &card.image {
+        Some((_, texture)) if feedback.drawn(PreviewKey::Example(i)) => {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(*texture, rect, uv, egui::Color32::WHITE);
         }
@@ -395,6 +368,27 @@ fn teaches(e: &Example) -> egui::RichText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The build-time compiles line up with the examples and match what
+    /// compiling them now gives. wesl orders the declarations it emits
+    /// differently from one process to the next (its maps are seeded per
+    /// process), so the WGSL is compared as a set of lines.
+    #[test]
+    fn compiled_examples_match_the_examples() {
+        assert_eq!(COMPILED.len(), examples::ALL.len());
+        for (example, compiled) in examples::ALL.iter().zip(COMPILED) {
+            let now = crate::compile::compile_user_shader(example.code).expect("compiles");
+            let lines = |wgsl: &str| {
+                let mut lines: Vec<String> = wgsl.lines().map(str::to_owned).collect();
+                lines.sort();
+                lines
+            };
+            assert_eq!(lines(compiled.wgsl), lines(&now.wgsl), "{}", example.name);
+            assert_eq!(compiled.buffers, now.buffers, "{}", example.name);
+            let values: Vec<[f32; 4]> = now.tweaks.iter().map(|c| c.value).collect();
+            assert_eq!(compiled.tweaks, values, "{}", example.name);
+        }
+    }
 
     /// Cards report which of them are on screen and hovered, the tag filter
     /// narrows them down, and a click on a thumbnail opens that example.

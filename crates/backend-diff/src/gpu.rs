@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use wesl_shadertoy::compile::{self, CompiledShader};
+use wesl_shadertoy_core::compile::{self, CompiledShader};
 
 use crate::image::Image;
 

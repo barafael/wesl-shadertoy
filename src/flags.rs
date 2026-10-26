@@ -26,7 +26,7 @@
 use bevy::prelude::Resource;
 use bevy_egui::egui;
 
-use wesl_shadertoy::pragmas::Pragmas;
+use wesl_shadertoy_core::pragmas::Pragmas;
 
 use crate::library;
 use crate::wesl_scan;
