@@ -94,9 +94,15 @@ impl Comparison {
 
 /// Compile `case` and render it on every adapter in `gpus`, comparing each
 /// with `gpus[0]`. Cases that differ get their renders, the diff and the
-/// source written to [`out_dir`]. `Err` when the case does not compile (its
-/// source is saved too, so a fuzz shader that trips the compiler is kept).
-pub fn compare(case: &Case, gpus: &[Gpu], scene: &Scene) -> Result<Vec<Comparison>, String> {
+/// source written to [`out_dir`]. Returns the composed WGSL alongside, for
+/// further checks without compiling again. `Err` when the case does not
+/// compile (its source is saved too, so a fuzz shader that trips the
+/// compiler is kept).
+pub fn compare(
+    case: &Case,
+    gpus: &[Gpu],
+    scene: &Scene,
+) -> Result<(String, Vec<Comparison>), String> {
     let shader = compile_user_shader(&case.source).map_err(|e| {
         save_source(case);
         e.to_string()
@@ -104,7 +110,7 @@ pub fn compare(case: &Case, gpus: &[Gpu], scene: &Scene) -> Result<Vec<Compariso
     let renders: Vec<Result<Image, String>> =
         gpus.iter().map(|g| g.render(&shader, scene)).collect();
     let Some((reference, others)) = renders.split_first() else {
-        return Ok(Vec::new());
+        return Ok((shader.wgsl, Vec::new()));
     };
     let mut comparisons = Vec::new();
     for (gpu, render) in gpus[1..].iter().zip(others) {
@@ -122,7 +128,7 @@ pub fn compare(case: &Case, gpus: &[Gpu], scene: &Scene) -> Result<Vec<Compariso
         }
         comparisons.push(comparison);
     }
-    Ok(comparisons)
+    Ok((shader.wgsl, comparisons))
 }
 
 /// Write what there is of a mismatch to [`out_dir`]: both renders, the

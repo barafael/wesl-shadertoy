@@ -10,9 +10,14 @@ use backend_diff::gpu::{Gpu, Scene};
 use backend_diff::image::{MAX_DIFFERING_SHARE, PIXEL_TOLERANCE};
 use backend_diff::translate::{self, TARGETS};
 use backend_diff::{Case, compare, out_dir};
-use wesl_shadertoy::compile::compile_user_shader;
 
 fn main() {
+    if cfg!(panic = "abort") {
+        eprintln!(
+            "warning: built with panic = \"abort\": a panicking naga writer ends the run \
+             instead of failing its case (use --profile fuzz for optimized runs)"
+        );
+    }
     let mut fuzz = 0u64;
     let mut fuzz_int = 0u64;
     let mut seed = 0u64;
@@ -88,7 +93,7 @@ fn main() {
     );
     let mut failures = 0;
     for case in &cases {
-        let comparisons = match compare(case, &gpus, &scene) {
+        let (wgsl, comparisons) = match compare(case, &gpus, &scene) {
             Ok(c) => c,
             Err(e) => {
                 failures += 1;
@@ -96,9 +101,6 @@ fn main() {
                 continue;
             }
         };
-        let wgsl = compile_user_shader(&case.source)
-            .expect("compiled for the comparison")
-            .wgsl;
         // The writers' verdicts, and their errors to print under the rows.
         let (naga, errors): (String, Vec<String>) = match translate::translate(&wgsl) {
             Ok(outcomes) => {

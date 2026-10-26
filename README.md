@@ -502,6 +502,7 @@ cargo test -- --ignored exported_crates_build  # exported crates build (slow)
 cargo test -p backend-diff                # every example on Vulkan vs GL + naga writers
 cargo run -p backend-diff -- --fuzz 200   # the same as a table, plus fuzz shaders
 cargo run -p backend-diff -- --fuzz-int 200  # plus integer fuzz shaders (edge values, bit builtins)
+cargo run --profile fuzz -p backend-diff -- --fuzz 5000  # long runs: optimized, still catches writer panics
 trunk serve            # browser build on http://127.0.0.1:8080
 ```
 

@@ -72,7 +72,9 @@ fn assert_backends_agree(cases: &[Case], tolerated: &[&str]) {
     let scene = Scene::default();
     let mut failures = Vec::new();
     for case in cases {
-        for c in compare(case, &gpus, &scene).unwrap_or_else(|e| panic!("{}: {e}", case.name)) {
+        let (_, comparisons) =
+            compare(case, &gpus, &scene).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        for c in comparisons {
             match &c.diff {
                 Ok(d) if d.matches() => {}
                 Ok(d) if tolerated.contains(&case.name.as_str()) => println!(
