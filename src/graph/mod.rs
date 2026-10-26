@@ -17,8 +17,8 @@
 //! up new ones. Known rough edges: after a recompile a slot shows its old
 //! image until the new pipeline is built, a `let` inside a branch shows the
 //! normal image wherever the branch is not taken, and a variant the GPU
-//! rejects would be blamed on the user's shader by the render error
-//! handler (it passed naga like the original, so this is unlikely).
+//! rejects just stops drawing (it passed naga like the original, so this
+//! is unlikely).
 //!
 //! Not done: hovering a node does not highlight its source in the editor
 //! (naga spans point into the composed WGSL, not the editor text), user
@@ -103,12 +103,33 @@ impl Default for GraphView {
 /// What the graph was built from, and the result.
 struct Built {
     key: (u32, String, Mode),
+    /// Buffer passes the compile defines; every variant runs them too.
+    buffers: u8,
     functions: Vec<String>,
     result: Result<(Graph, Layout), String>,
     /// Per node: its thumbnail slot.
     thumbs: Vec<Option<usize>>,
     /// Per slot: the variant shader that shows it (`None`: cannot be shown).
-    variants: Vec<Option<String>>,
+    variants: Vec<Option<Variant>>,
+}
+
+/// A thumbnail's shader: the compile with `main_image` returning one `let`.
+struct Variant {
+    wgsl: String,
+    /// Of `wgsl`, so a slot can tell cheaply whether it holds this variant.
+    hash: u64,
+}
+
+impl Variant {
+    fn new(wgsl: String) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        wgsl.hash(&mut hasher);
+        Self {
+            hash: hasher.finish(),
+            wgsl,
+        }
+    }
 }
 
 /// One thumbnail: image, shader asset, and which variant it holds.
@@ -116,8 +137,8 @@ struct Slot {
     image: Handle<Image>,
     texture: egui::TextureId,
     shader: Handle<Shader>,
-    /// The variant WGSL now in `shader`.
-    holds: Option<String>,
+    /// [`Variant::hash`] of the variant now in `shader`.
+    holds: Option<u64>,
     /// Bumped whenever `holds` changes, so the slot's `i_frame` and buffers
     /// restart with the new variant.
     generation: u32,
@@ -139,7 +160,7 @@ pub fn parse(wgsl: &str) -> Result<(naga::Module, naga::valid::ModuleInfo), Stri
 
 impl GraphView {
     /// Rebuild the graph if the compile, function or mode changed.
-    fn refresh(&mut self, wgsl: &str, generation: u32) {
+    fn refresh(&mut self, wgsl: &str, generation: u32, buffers: u8) {
         let key = (generation, self.function.clone(), self.mode);
         if self.built.as_ref().is_some_and(|b| b.key == key) {
             return;
@@ -147,6 +168,7 @@ impl GraphView {
         self.fit = FIT_FRAMES;
         let mut built = Built {
             key,
+            buffers,
             functions: Vec::new(),
             result: Err("Compile a shader to see its graph.".into()),
             thumbs: Vec::new(),
@@ -200,7 +222,7 @@ fn build(
                 && let Some(variant) = thumbnail_variant(wgsl, module, info, *handle, expr)
             {
                 built.thumbs[i] = Some(built.variants.len());
-                built.variants.push(Some(variant));
+                built.variants.push(Some(Variant::new(variant)));
             }
         }
     }
@@ -357,11 +379,12 @@ pub fn show(
     view: &mut GraphView,
     wgsl: &str,
     generation: u32,
+    buffers: u8,
     feedback: &PreviewFeedback,
 ) {
     view.shown = true;
     view.hovered_slot = None;
-    view.refresh(wgsl, generation);
+    view.refresh(wgsl, generation, buffers);
 
     ui.horizontal(|ui| {
         let functions = view
@@ -399,7 +422,7 @@ pub fn show(
         }
     });
     // A switch takes effect next frame (the combo box borrows the list).
-    view.refresh(wgsl, generation);
+    view.refresh(wgsl, generation, buffers);
 
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -623,26 +646,28 @@ pub fn update_thumbnails(
             last_drawn: 0.0,
         });
     }
+    let holds = |slot: &Slot, variant: &Option<Variant>| {
+        variant.as_ref().is_some_and(|v| slot.holds == Some(v.hash))
+    };
     // Load at most one changed variant per frame: each is a pipeline build.
-    if let Some((k, variant)) = built
+    if let Some((k, Some(variant))) = built
         .variants
         .iter()
         .enumerate()
-        .find(|(k, v)| v.is_some() && view.slots[*k].holds != **v)
+        .find(|(k, v)| v.is_some() && !holds(&view.slots[*k], v))
     {
         let slot = &mut view.slots[k];
-        let wgsl = variant.clone().expect("checked above");
         let path = format!("shadertoy://graph/{k}");
         shaders
-            .insert(&slot.shader, Shader::from_wgsl(wgsl.clone(), path))
+            .insert(&slot.shader, Shader::from_wgsl(variant.wgsl.clone(), path))
             .expect("slot handles stay valid");
-        slot.buffers = defined_buffers(&wgsl);
-        slot.holds = Some(wgsl);
+        slot.buffers = built.buffers;
+        slot.holds = Some(variant.hash);
         slot.generation += 1;
     }
 
     let ready: Vec<usize> = (0..wanted)
-        .filter(|&k| view.slots[k].holds.is_some() && view.slots[k].holds == built.variants[k])
+        .filter(|&k| holds(&view.slots[k], &built.variants[k]))
         .collect();
     if ready.is_empty() {
         return;
@@ -692,19 +717,6 @@ pub fn update_thumbnails(
     }
 }
 
-/// Buffer passes a composed module defines, from its entry points (a
-/// defined pass's entry calls the user's function, a stub returns zero).
-fn defined_buffers(wgsl: &str) -> u8 {
-    let mut mask = 0;
-    for (i, name) in crate::compile::BUFFER_NAMES.iter().enumerate() {
-        // WESL's mangling of `package::user::buffer_a`.
-        if wgsl.contains(&format!("fn package_user__1{name}(")) {
-            mask |= 1 << i;
-        }
-    }
-    mask
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,7 +746,7 @@ mod tests {
                 let shown = egui::Window::new("Graph")
                     .default_pos([100.0, 60.0])
                     .default_size([760.0, 520.0])
-                    .show(ui.ctx(), |ui| show(ui, &mut view, &wgsl, 1, &feedback));
+                    .show(ui.ctx(), |ui| show(ui, &mut view, &wgsl, 1, 0, &feedback));
                 sizes.push(shown.unwrap().response.rect.size());
             })
             .drop_without_applying_deltas();
@@ -750,7 +762,7 @@ mod tests {
             .expect("compiles")
             .wgsl;
         let mut view = GraphView::default();
-        view.refresh(&wgsl, 1);
+        view.refresh(&wgsl, 1, 0);
         let built = view.built.as_ref().unwrap();
         let (graph, _) = built.result.as_ref().expect("graph");
         let with_thumbs: Vec<&str> = graph
@@ -762,27 +774,19 @@ mod tests {
             .collect();
         // `res` and `t` are the same for every pixel.
         assert_eq!(with_thumbs, ["uv", "col"]);
-        let col = built.variants[1].as_ref().unwrap();
+        let col = &built.variants[1].as_ref().unwrap().wgsl;
         assert!(col.contains("return vec4<f32>(col, 1.0);"), "{col}");
-        assert_eq!(defined_buffers(&wgsl), 0);
 
         // Also when the environment reads are nodes of their own.
         let mut all = GraphView {
             mode: Mode::All,
             ..default()
         };
-        all.refresh(&wgsl, 1);
+        all.refresh(&wgsl, 1, 0);
         let built = all.built.as_ref().unwrap();
         let (graph, _) = built.result.as_ref().expect("graph");
         let thumbs = built.thumbs.iter().flatten().count();
         assert_eq!(thumbs, 2, "{:?}", graph.nodes);
-    }
-
-    #[test]
-    fn buffer_passes_are_found_in_the_composed_module() {
-        let example = crate::examples::by_name("Fluid").expect("Fluid");
-        let compiled = crate::compile::compile_user_shader(example.code).expect("compiles");
-        assert_eq!(defined_buffers(&compiled.wgsl), compiled.buffers);
     }
 
     /// Every example's `main_image` gets a graph, and every thumbnail
@@ -795,7 +799,7 @@ mod tests {
                 .wgsl;
             for mode in [Mode::Lets, Mode::All] {
                 let mut view = GraphView { mode, ..default() };
-                view.refresh(&wgsl, 1);
+                view.refresh(&wgsl, 1, 0);
                 let built = view.built.as_ref().unwrap();
                 assert!(built.result.is_ok(), "{}", example.name);
                 assert!(built.variants.len() <= MAX_THUMBS);

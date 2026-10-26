@@ -105,7 +105,15 @@ pub struct PreviewState {
     /// Cards the GPU rejected, with the generation it rejected: not drawn
     /// again until their shader changes.
     failed: HashMap<PreviewKey, u32>,
+    /// Calls of [`preview_pass`] so far, i.e. frames.
+    frame: u64,
 }
+
+/// Frames a card may go without a job before it is forgotten, freeing its
+/// buffer targets (its `i_frame` restarts if it comes back): far longer
+/// than the round-robin takes to return to a visible card, so only cards
+/// scrolled away or whose window closed go.
+const IDLE_FRAMES: u64 = 300;
 
 impl PreviewState {
     /// Stop drawing `card` at `generation` (see [`card_from_error`]).
@@ -150,6 +158,8 @@ pub fn card_from_error(description: &str) -> Option<(PreviewKey, u32)> {
 
 #[derive(Default)]
 struct Card {
+    /// [`PreviewState::frame`] when it last had a job.
+    seen: u64,
     /// `i_frame`: thumbnails drawn so far.
     frame: u32,
     /// The job's [`PreviewJob::generation`] that `frame` counts for.
@@ -187,13 +197,16 @@ pub fn preview_pass(
     mut p: PreviewParams,
     mut ctx: RenderContext,
 ) {
+    let state = &mut *p.state;
+    state.frame += 1;
+    let now = state.frame;
+    state.cards.retain(|_, card| now - card.seen < IDLE_FRAMES);
     if p.jobs.0.is_empty() {
         return;
     }
     let cache = &*p.pipeline_cache;
 
     // Queue every job's pipelines; draw only those already built.
-    let state = &mut *p.state;
     state.uniforms.clear();
     let mut ready = Vec::new();
     for job in &p.jobs.0 {
@@ -217,6 +230,7 @@ pub fn preview_pass(
             continue;
         }
         let card = state.cards.entry(job.card).or_default();
+        card.seen = now;
         if card.generation != job.generation {
             card.generation = job.generation;
             card.frame = 0;

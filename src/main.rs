@@ -189,6 +189,8 @@ struct CurrentShader {
     generation: u32,
     /// Its composed WGSL, for the WGSL window.
     wgsl: String,
+    /// Its buffer passes, bit per pass (for the Graph's thumbnails).
+    buffers: u8,
 }
 
 impl CurrentShader {
@@ -630,6 +632,7 @@ fn compile_and_apply(mut p: CompileParams) {
                 .expect("slot handles stay valid");
             p.current.generation += 1;
             p.current.wgsl = compiled.wgsl;
+            p.current.buffers = compiled.buffers;
             p.tweaks.replace(compiled.tweaks, compiled.fixed);
             // The render world switches to it (and restarts i_frame, the
             // channel clocks and the buffers) once its pipelines are built.
@@ -1093,8 +1096,15 @@ fn ui(mut p: UiParams) {
                 .default_size([760.0, 520.0])
                 .open(&mut p.wins.graph),
             |ui| {
-                let (wgsl, generation) = (&p.current.wgsl, p.current.generation);
-                graph::show(ui, &mut p.graph, wgsl, generation, &p.preview_feedback);
+                let current = &p.current;
+                graph::show(
+                    ui,
+                    &mut p.graph,
+                    &current.wgsl,
+                    current.generation,
+                    current.buffers,
+                    &p.preview_feedback,
+                );
             },
         );
     }
