@@ -1208,17 +1208,105 @@ fn show_window(
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
     let id = egui::Id::new(id);
-    let window = window.id(id);
+    let (window, drag) = NearEdgeDrag::begin(ctx, id, window.id(id));
     let Some(glass) = glass else {
-        window.show(ctx, add_contents);
+        let shown = window.show(ctx, add_contents);
+        if let Some(drag) = drag {
+            drag.end(ctx, id, shown.map(|s| s.response.rect));
+        }
         return;
     };
     let fill = ctx.global_style().visuals.window_fill;
     let frame = egui::Frame::window(&ctx.global_style()).fill(egui::Color32::TRANSPARENT);
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, id));
     let backdrop = painter.add(egui::Shape::Noop);
-    if let Some(shown) = window.frame(frame).show(ctx, add_contents) {
+    let shown = window.frame(frame).show(ctx, add_contents);
+    if let Some(shown) = &shown {
         painter.set(backdrop, glass.shape(shown.response.rect, fill));
+    }
+    if let Some(drag) = drag {
+        drag.end(ctx, id, shown.map(|s| s.response.rect));
+    }
+}
+
+/// A window resize from its left or top edge, kept from sliding.
+///
+/// egui resizes from those edges by moving the window with the pointer and
+/// asking for the size that keeps the far edge in place, then sizes the
+/// window to fit its content. Dragged past the content's minimum width
+/// (height), the window keeps that minimum and so slides along with the
+/// pointer, even off the screen. Once a frame shows the window larger than
+/// asked, [`Self::end`] records that minimum, and from then on
+/// [`Self::begin`] places the window so its far edge stays put.
+struct NearEdgeDrag {
+    /// The outer size egui asks for this frame, on the dragged axes.
+    requested: egui::Vec2,
+    /// Whether the left (x) and top (y) edge are being dragged.
+    dragged: [bool; 2],
+}
+
+impl NearEdgeDrag {
+    fn min_id(id: egui::Id) -> egui::Id {
+        id.with("near_edge_drag_min")
+    }
+
+    fn begin<'a>(
+        ctx: &egui::Context,
+        id: egui::Id,
+        window: egui::Window<'a>,
+    ) -> (egui::Window<'a>, Option<Self>) {
+        // egui's record of the window's outer rect when the edge drag in
+        // progress started (`move_and_resize_window` in egui's window.rs),
+        // present only during one, up to and including its release frame.
+        let start: Option<egui::Rect> =
+            ctx.data(|d| d.get_temp(id.with("resize").with("window_rect_at_drag_start")));
+        let Some(start) = start else {
+            ctx.data_mut(|d| d.remove::<egui::Vec2>(Self::min_id(id)));
+            return (window, None);
+        };
+        let Some(state) = egui::AreaState::load(ctx, id) else {
+            return (window, None);
+        };
+        let mut pos = state.left_top_pos();
+        let dragged = [0, 1].map(|d| pos[d] != start.min[d]);
+        let drag = Self {
+            requested: start.max - pos,
+            dragged,
+        };
+        let min = ctx.data(|d| d.get_temp::<egui::Vec2>(Self::min_id(id)));
+        let Some(min) = min.filter(|_| dragged.contains(&true)) else {
+            return (window, Some(drag));
+        };
+        for d in 0..2 {
+            if dragged[d] {
+                pos[d] = pos[d].min(start.max[d] - min[d]);
+            }
+        }
+        // Also on the release frame, where egui stops moving the window:
+        // that keeps it where it was shown. In title-bar drag mode egui
+        // restores the stored position over `current_pos`, so drag from
+        // anywhere instead: the edge holds the pointer, so nothing else
+        // moves the window meanwhile.
+        let window = window
+            .drag_area(egui::WindowDrag::Anywhere)
+            .current_pos(pos);
+        (window, Some(drag))
+    }
+
+    fn end(self, ctx: &egui::Context, id: egui::Id, shown: Option<egui::Rect>) {
+        let Some(shown) = shown else {
+            return;
+        };
+        let min_id = Self::min_id(id);
+        let mut min = ctx
+            .data(|d| d.get_temp::<egui::Vec2>(min_id))
+            .unwrap_or_default();
+        for d in 0..2 {
+            if self.dragged[d] && shown.size()[d] > self.requested[d] + 0.5 {
+                min[d] = shown.size()[d];
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(min_id, min));
     }
 }
 
@@ -1698,6 +1786,80 @@ mod tests {
         assert!(!pointer_on_canvas(&ctx, canvas, on_toolbar), "toolbar");
         // The old test called this empty spot UI.
         assert!(ctx.input(|i| i.pointer.interact_pos().is_some()));
+    }
+
+    /// Dragging a window's left (top) edge past what its content needs stops
+    /// the window at that size with its right (bottom) edge in place, in both
+    /// of egui's drag modes. It used to slide along with the pointer.
+    #[test]
+    fn window_resized_from_near_edge_stays_put() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let drag = |mode: egui::WindowDrag, from: egui::Pos2, to: egui::Pos2| {
+            let ctx = egui::Context::default();
+            let id = egui::Id::new("w");
+            let frame = |events: Vec<egui::Event>| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let window = egui::Window::new("w")
+                            .default_pos([300.0, 100.0])
+                            .default_size([500.0, 300.0])
+                            .drag_area(mode);
+                        show_window(ui.ctx(), None, "w", window, |ui| {
+                            ui.horizontal(|ui| {
+                                for i in 0..6 {
+                                    let _ = ui.button(format!("button {i}"));
+                                }
+                            });
+                            for i in 0..8 {
+                                ui.label(format!("line {i}"));
+                            }
+                        });
+                    },
+                )
+                .drop_without_applying_deltas();
+                ctx.memory(|m| m.area_rect(id)).unwrap()
+            };
+            let press = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            for _ in 0..3 {
+                frame(vec![]);
+            }
+            let before = frame(vec![egui::Event::PointerMoved(from)]);
+            frame(vec![press(from, true)]);
+            for i in 1..=20 {
+                frame(vec![egui::Event::PointerMoved(
+                    from.lerp(to, i as f32 / 20.0),
+                )]);
+            }
+            frame(vec![press(to, false)]);
+            let after = frame(vec![]);
+            (before, after)
+        };
+
+        for mode in [egui::WindowDrag::TitleBar, egui::WindowDrag::Anywhere] {
+            let (before, after) = drag(mode, egui::pos2(300.0, 200.0), egui::pos2(1000.0, 200.0));
+            assert!(after.width() < before.width(), "{mode:?}: did not shrink");
+            let moved = (after.right() - before.right()).abs();
+            assert!(
+                moved < 1.0,
+                "{mode:?}: left edge drag moved the right edge by {moved}"
+            );
+            let (before, after) = drag(mode, egui::pos2(500.0, 100.0), egui::pos2(500.0, 700.0));
+            let moved = (after.bottom() - before.bottom()).abs();
+            assert!(
+                moved < 1.0,
+                "{mode:?}: top edge drag moved the bottom edge by {moved}"
+            );
+        }
     }
 
     /// The status bar grows to show an expanded compile error and shrinks
