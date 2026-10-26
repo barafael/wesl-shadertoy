@@ -226,6 +226,11 @@ impl Renderer {
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
             .map_err(|e| e.to_string())?;
+        // A shader the GPU rejects (naga passed it, the backend did not)
+        // comes back as `Err` instead of wgpu's default handler panicking,
+        // which with `panic = "abort"` would take the whole app down from
+        // Drag mode's estimation thread.
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let user_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("user"),
@@ -466,6 +471,9 @@ impl Renderer {
                 format,
             )
         });
+        if let Some(error) = scope.pop().await {
+            return Err(error.to_string());
+        }
 
         Ok(Self {
             device,

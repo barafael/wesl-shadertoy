@@ -1754,9 +1754,6 @@ fn date_uniforms() -> Vec4 {
 mod tests {
     use super::*;
 
-    /// The toolbar and status bar render Lucide icons as private-use-area
-    /// codepoints; guard that the font setup behind [`install_fonts`] can
-    /// actually resolve every icon we use, or they would show as tofu.
     /// A press over a window is UI, a press on the free viewport is canvas.
     #[test]
     fn pointer_on_canvas_excludes_windows() {
@@ -1924,6 +1921,9 @@ mod tests {
         assert_eq!(s.mouse.x, 35.0, "hover alone moves nothing");
     }
 
+    /// The toolbar and status bar render Lucide icons as private-use-area
+    /// codepoints; guard that the font setup behind [`install_fonts`] can
+    /// actually resolve every icon we use, or they would show as tofu.
     #[test]
     fn lucide_icons_resolve_in_proportional_fonts() {
         let ctx = egui::Context::default();

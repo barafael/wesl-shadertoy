@@ -43,6 +43,13 @@ pub fn export(text: &str, title: Option<&str>) -> Result<Crate, String> {
                 .into(),
         );
     }
+    if let Some(binding) = unsupported_binding(&compiled.wgsl) {
+        return Err(format!(
+            "export does not support i_channel_0..i_channel_3 or i_ui (binding {binding}) \
+             yet: Bevy's stock fullscreen material binds only the screen texture, its \
+             sampler and the uniforms"
+        ));
+    }
     let title = title
         .map(str::to_string)
         .or_else(|| source_title(text))
@@ -63,6 +70,19 @@ pub fn export(text: &str, title: Option<&str>) -> Result<Crate, String> {
         name: names.dir.clone(),
         files,
     })
+}
+
+/// The first binding of the linked `wgsl` that Bevy's stock
+/// `FullscreenMaterial` does not provide (it has 0..=2): a buffer channel
+/// read without a buffer pass, or the UI texture.
+fn unsupported_binding(wgsl: &str) -> Option<u32> {
+    let module = naga::front::wgsl::parse_str(wgsl).ok()?;
+    module
+        .global_variables
+        .iter()
+        .filter_map(|(_, var)| var.binding.as_ref())
+        .map(|b| b.binding)
+        .find(|&b| b > 2)
 }
 
 /// The title in an example-style first line, `// Name — summary`.
@@ -197,6 +217,8 @@ const RUST_KEYWORDS: &[&str] = &[
     "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match", "mod",
     "move", "mut", "priv", "pub", "ref", "return", "self", "static", "struct", "super", "trait",
     "true", "try", "type", "unsafe", "use", "where", "while", "yield", "_",
+    // Reserved for future use: also not valid identifiers.
+    "abstract", "become", "do", "final", "macro", "override", "typeof", "unsized", "virtual",
 ];
 
 /// `SEA_HEIGHT` → `sea_height`, `seaHeight` → `sea_height`.
@@ -604,7 +626,15 @@ fn deliver(krate: &Crate) -> Result<String, String> {
     let file = format!("{}.zip", krate.name);
     anchor.set_download(&file);
     anchor.click();
-    let _ = web_sys::Url::revoke_object_url(&url);
+    // Revoking at once can cancel the download that just started in some
+    // browsers; free the URL once it has had time to begin.
+    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000);
+    }
     Ok(format!("downloaded the Bevy crate as {file}"))
 }
 
@@ -752,6 +782,10 @@ fn main_image(p: vec2<f32>) -> vec4<f32> {
         let fluid = examples::by_name("Fluid").unwrap();
         let why = export(fluid.code, Some(fluid.name)).err().unwrap();
         assert!(why.contains("buffer"), "{why}");
+        // Bindings past the stock material's 0..=2 would fail in the crate.
+        let melt = examples::by_name("UI Melt").unwrap();
+        let why = export(melt.code, Some(melt.name)).err().unwrap();
+        assert!(why.contains("i_ui"), "{why}");
         let broken = export("fn main_image(", None).err().unwrap();
         assert!(
             broken.starts_with("export needs a shader that compiles"),

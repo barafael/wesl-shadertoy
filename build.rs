@@ -188,6 +188,9 @@ fn module(
             .filter(|p| p.is_dir() || p.extension().is_some_and(|e| e == "wesl"))
             .filter_map(|p| Some(p.file_stem()?.to_str()?.to_string()))
             .collect();
+        // A file and a directory of the same stem need not be adjacent in
+        // path order (`quat`, `quat-x`, `quat.wesl`), so sort the stems.
+        names.sort();
         names.dedup();
         for child in names {
             let child_file = dir.join(format!("{child}.wesl"));

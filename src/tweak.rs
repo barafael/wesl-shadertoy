@@ -281,9 +281,17 @@ pub fn extract(src: &str) -> Vec<Constant> {
             Tok::Punct(b'{') => depth += 1,
             Tok::Punct(b'}') => depth -= 1,
             Tok::Ident if depth == 0 && text(&tokens[i]) == "const" => {
-                // Not after an attribute (`@if(...) const`), which WESL may
-                // compile away.
-                let attributed = i > 0 && matches!(tokens[i - 1].tok, Tok::Punct(b')'));
+                // Not after an attribute (`@if(...) const`, `@else const`),
+                // which WESL may compile away.
+                let attributed = match tokens.get(i.wrapping_sub(1)).map(|t| t.tok) {
+                    Some(Tok::Punct(b')')) => true,
+                    Some(Tok::Ident) => {
+                        text(&tokens[i - 1]) == "else"
+                            && i > 1
+                            && tokens[i - 2].tok == Tok::Punct(b'@')
+                    }
+                    _ => false,
+                };
                 if let Some((constant, end)) = parse_const(src, &tokens, &comments, i)
                     && !attributed
                 {
@@ -589,6 +597,15 @@ fn f() {
         assert!(by("SEA_COLOR").is_color());
         assert_eq!(by("SPLAT").value, [1.5, 1.5, 0.0, 0.0]);
         assert_eq!(by("PI").hint, Hint::Off);
+    }
+
+    /// Constants under `@if` / `@else` may be compiled away, so neither
+    /// branch's is tweakable.
+    #[test]
+    fn skips_conditional_constants() {
+        let src = "@if(X) const A: f32 = 1.0;\n@else const A: f32 = 2.0;\nconst B: f32 = 3.0;\n";
+        let names: Vec<String> = extract(src).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["B"]);
     }
 
     #[test]
