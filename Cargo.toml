@@ -53,9 +53,14 @@ ab_glyph = "0.2"
 miniz_oxide = "0.8"
 base64 = "0.23"
 
+[features]
+# Fast native dev rebuilds (same trick as omdurman's app crate): Bevy as a
+# dylib. Opt-in, so `cargo build --release` gives a self-contained binary and
+# the release profile's `panic = "abort"` does not clash with the dylib's
+# unwinding. Use `cargo run --features dev` while iterating.
+dev = ["bevy/dynamic_linking"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# Fast native rebuilds (same trick as omdurman's app crate).
-bevy = { version = "0.20", features = ["dynamic_linking"] }
 # Offscreen `--render` smoke shots (src/headless.rs): windowless wgpu, a tiny
 # block_on for the async adapter/device requests, and PNG encoding.
 wgpu = "30"

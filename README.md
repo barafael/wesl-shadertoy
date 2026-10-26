@@ -487,7 +487,8 @@ integration pattern proven in [omdurman](https://github.com/barafael/omdurman).
 ## Development
 
 ```sh
-cargo run              # native (dynamic Bevy, fast rebuilds)
+cargo run --features dev  # native, dynamic Bevy for fast rebuilds
+cargo build --release  # native release binary (static Bevy)
 cargo test             # compile pipeline, examples, highlighter, editor
 cargo run -- --render Plasma out.png [--time 3] [--debugger] [--heat [--heat-max 256]]  # headless PNG
 cargo run -- --render-drag Metaballs 130 80 -20 0  # drag-the-picture check
