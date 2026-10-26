@@ -78,6 +78,11 @@ jobs:
             https://github.com/trunk-rs/trunk/releases/download/v0.22.0/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
+      # Code compiled only for wasm (file pickers, the web analyzer and
+      # export delivery) is linted here; the check job never sees it. The
+      # tests are native-only.
+      - run: cargo clippy -p wesl-shadertoy --target wasm32-unknown-unknown -- -D warnings
+
       - name: Build
         run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
 

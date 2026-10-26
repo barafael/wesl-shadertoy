@@ -541,6 +541,22 @@ pub fn write_back(src: &mut String, constant: &Constant, value: [f32; 4]) -> boo
     true
 }
 
+/// `src` with the initializers of `constants` cut out: the same for two
+/// sources that differ only in those constants' values, as after a slider
+/// write-back.
+pub fn without_values(src: &str, constants: &[Constant]) -> String {
+    let mut ranges: Vec<Range<usize>> = constants.iter().map(|c| c.init.clone()).collect();
+    ranges.sort_by_key(|r| r.start);
+    let mut out = String::with_capacity(src.len());
+    let mut at = 0;
+    for r in ranges {
+        out.push_str(&src[at..r.start]);
+        at = r.end;
+    }
+    out.push_str(&src[at..]);
+    out
+}
+
 /// `src` with the values of the `dirty` slots written back (bit per slot of
 /// `constants`), for sharing or exporting the document while a drag has
 /// not been written into it yet.

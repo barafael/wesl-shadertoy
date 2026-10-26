@@ -750,9 +750,12 @@ pub fn update(mut p: DragParams) {
     };
 
     // Release, or the compile changed under the drag: hand the changed
-    // constants to the write-back and restart the clock.
-    if !down || p.current.generation != grab.generation {
-        for p_ in &grab.params {
+    // constants to the write-back and restart the clock. After a compile
+    // the slots are the new shader's, and the compile already carried the
+    // dragged values over and marked them.
+    let recompiled = p.current.generation != grab.generation;
+    if !down || recompiled {
+        for p_ in grab.params.iter().filter(|_| !recompiled) {
             if p.tweaks.values[p_.slot] != grab.before[p_.slot] {
                 p.tweaks.dirty |= 1 << p_.slot;
             }

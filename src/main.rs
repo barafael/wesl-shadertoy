@@ -224,6 +224,40 @@ struct Tweaks {
     dirty: u32,
 }
 
+impl Tweaks {
+    /// Switch to a new compile's constants. Values start from the source,
+    /// except live values not in it yet (a slider or a drag still held):
+    /// those carry over to the constant of the same name and stay due for
+    /// write-back.
+    fn replace(&mut self, constants: Vec<tweak::Constant>, fixed: Vec<String>) {
+        let live: Vec<(&str, tweak::Kind, Vec4)> = self
+            .constants
+            .iter()
+            .zip(self.values)
+            .filter(|(c, value)| *value != Vec4::from_array(c.value))
+            .map(|(c, value)| (c.name.as_str(), c.kind, value))
+            .collect();
+        let mut values = self.values;
+        let mut dirty = 0;
+        for (slot, c) in constants.iter().enumerate() {
+            let source = Vec4::from_array(c.value);
+            let carried = live
+                .iter()
+                .find(|(name, kind, _)| *name == c.name && *kind == c.kind)
+                .map(|&(_, _, value)| value)
+                .filter(|&value| value != source);
+            if carried.is_some() {
+                dirty |= 1 << slot;
+            }
+            values[slot] = carried.unwrap_or(source);
+        }
+        self.values = values;
+        self.constants = constants;
+        self.fixed = fixed;
+        self.dirty = dirty;
+    }
+}
+
 impl Default for Tweaks {
     fn default() -> Self {
         Self {
@@ -242,8 +276,9 @@ struct RunRequest(bool);
 #[derive(Resource)]
 struct UiWindows {
     examples: bool,
-    /// An example clicked while the editor holds other work: asks first.
-    confirm_example: Option<&'static examples::Example>,
+    /// An example or file to load while the editor holds other work: asks
+    /// first.
+    confirm_replace: Option<Replacement>,
     editor: bool,
     wgsl: bool,
     constants: bool,
@@ -257,11 +292,46 @@ struct UiWindows {
     errors_expanded: bool,
 }
 
+/// What replaces the editor's text once confirmed.
+enum Replacement {
+    Example(&'static examples::Example),
+    /// An opened file: its name and contents.
+    File(String, String),
+}
+
+impl Replacement {
+    fn text(&self) -> &str {
+        match self {
+            Self::Example(example) => example.code,
+            Self::File(_, text) => text,
+        }
+    }
+
+    /// Whether loading it would lose nothing: the editor holds an unchanged
+    /// example, or this very text.
+    fn harmless(&self, doc: &str) -> bool {
+        doc == self.text() || examples::ALL.iter().any(|e| e.code == doc)
+    }
+
+    fn load(
+        self,
+        doc: &mut ShaderDoc,
+        state: &mut ShaderToyState,
+        run: &mut RunRequest,
+        status: &mut CompileStatus,
+    ) {
+        match self {
+            Self::Example(example) => load_example(doc, state, run, example),
+            Self::File(name, text) => open_into(doc, state, run, status, text, &name),
+        }
+    }
+}
+
 impl Default for UiWindows {
     fn default() -> Self {
         Self {
             examples: false,
-            confirm_example: None,
+            confirm_replace: None,
             editor: true,
             wgsl: false,
             constants: false,
@@ -560,14 +630,7 @@ fn compile_and_apply(mut p: CompileParams) {
                 .expect("slot handles stay valid");
             p.current.generation += 1;
             p.current.wgsl = compiled.wgsl;
-            // Start from the values in the source (which already hold any
-            // tweak that was written back).
-            for (slot, c) in compiled.tweaks.iter().enumerate() {
-                p.tweaks.values[slot] = Vec4::from_array(c.value);
-            }
-            p.tweaks.constants = compiled.tweaks;
-            p.tweaks.fixed = compiled.fixed;
-            p.tweaks.dirty = 0;
+            p.tweaks.replace(compiled.tweaks, compiled.fixed);
             // The render world switches to it (and restarts i_frame, the
             // channel clocks and the buffers) once its pipelines are built.
             **p.fragment = ShaderToyFragment {
@@ -620,6 +683,11 @@ fn poll_render_feedback(
 /// one on screen), go back to the last good one (else the black
 /// placeholder), say so in the status bar, and carry on. Out-of-memory and
 /// device loss, and errors the placeholder still produces, keep the default.
+///
+/// wgpu names the command encoder an error came from, which tells two other
+/// sources apart: a thumbnail (an example card, an Evolve cell, a Graph
+/// slot) stops drawing that card alone, and the app's own passes, which
+/// never run the user's shader, keep the default.
 fn on_render_error(
     error: &RenderError,
     main_world: &mut World,
@@ -631,6 +699,16 @@ fn on_render_error(
         RenderErrorPolicy::StopRendering
     };
     if !matches!(error.ty, ErrorType::Validation | ErrorType::Internal) {
+        return quit(main_world);
+    }
+    if let Some((card, generation)) = render::previews::card_from_error(&error.description) {
+        warn!("the GPU rejected thumbnail {card:?}; it is no longer drawn");
+        render_world
+            .resource_mut::<render::previews::PreviewState>()
+            .fail(card, generation);
+        return RenderErrorPolicy::Ignore;
+    }
+    if from_app_pass(&error.description) {
         return quit(main_world);
     }
     let mut views = render_world.query::<(&mut ShaderToyFragment, Option<&ActiveShader>)>();
@@ -661,6 +739,13 @@ fn on_render_error(
         error.description
     ));
     RenderErrorPolicy::Ignore
+}
+
+/// Whether a wgpu error description names the encoder of one of the app's
+/// own passes (Bevy labels each system's encoder with the system's path).
+fn from_app_pass(description: &str) -> bool {
+    const APP_PASSES: [&str; 3] = ["::blur_pass'", "::debugger_blit_pass'", "::ui_clear_pass'"];
+    APP_PASSES.iter().any(|pass| description.contains(pass))
 }
 
 /// Write the document to browser storage whenever it changes: edits,
@@ -765,30 +850,25 @@ fn ui(mut p: UiParams) {
             Err(e) => Some((format!("save failed: {e}"), false)),
         };
     }
+    let mut opened = Vec::new();
     if open {
         match persist::open_now() {
-            Ok(Some(text)) => open_into(
-                &mut p.doc,
-                &mut p.state,
-                &mut p.run,
-                &mut p.status,
-                text,
-                "shader.wesl",
-            ),
+            Ok(Some(text)) => opened.push(("shader.wesl".to_string(), text)),
             // Web: the file dialog is open; the text lands via the queue.
             Ok(None) => {}
             Err(e) => p.status.note = Some((e, false)),
         }
     }
     // Files chosen through the web file dialog arrive here once read.
-    for (name, text) in persist::take_opened() {
-        open_into(
+    opened.extend(persist::take_opened());
+    for (name, text) in opened {
+        replace_doc(
+            Replacement::File(name, text),
+            &mut p.wins.confirm_replace,
             &mut p.doc,
             &mut p.state,
             &mut p.run,
             &mut p.status,
-            text,
-            &name,
         );
     }
 
@@ -1040,26 +1120,32 @@ fn ui(mut p: UiParams) {
             },
         );
         if let Some(example) = picked {
-            // Loading replaces the editor text (and its autosave): ask unless
-            // it is unchanged from an example.
-            if examples::ALL.iter().any(|e| e.code == p.doc.text) {
-                load_example(&mut p.doc, &mut p.state, &mut p.run, example);
-            } else {
-                p.wins.confirm_example = Some(example);
-            }
+            replace_doc(
+                Replacement::Example(example),
+                &mut p.wins.confirm_replace,
+                &mut p.doc,
+                &mut p.state,
+                &mut p.run,
+                &mut p.status,
+            );
         }
     }
-    if let Some(example) = p.wins.confirm_example {
-        let modal = egui::Modal::new(egui::Id::new("confirm_example")).show(ctx, |ui| {
+    if let Some(replacement) = &p.wins.confirm_replace {
+        let name = match replacement {
+            Replacement::Example(example) => example.name,
+            Replacement::File(name, _) => name,
+        };
+        let mut replace = false;
+        let modal = egui::Modal::new(egui::Id::new("confirm_replace")).show(ctx, |ui| {
             ui.set_max_width(340.0);
-            ui.strong(format!("Open {}?", example.name));
+            ui.strong(format!("Open {name}?"));
             ui.label(
                 "This replaces the code in the editor, and your edits are not \
                  saved anywhere else. Ctrl+S saves them to a file first.",
             );
             ui.horizontal(|ui| {
                 if ui.button("Replace").clicked() {
-                    load_example(&mut p.doc, &mut p.state, &mut p.run, example);
+                    replace = true;
                     ui.close();
                 }
                 if ui.button("Cancel").clicked() {
@@ -1067,8 +1153,11 @@ fn ui(mut p: UiParams) {
                 }
             });
         });
-        if modal.should_close() {
-            p.wins.confirm_example = None;
+        if modal.should_close()
+            && let Some(replacement) = p.wins.confirm_replace.take()
+            && replace
+        {
+            replacement.load(&mut p.doc, &mut p.state, &mut p.run, &mut p.status);
         }
     }
 
@@ -1585,6 +1674,25 @@ fn track_mouse(state: &mut ShaderToyState, pos: Option<Vec2>, press: bool, held:
     }
 }
 
+/// Load `replacement` into the editor (it replaces the text and its
+/// autosave), asking first unless that loses nothing. Takes the individual
+/// fields (not `&mut UiParams`) so it can run while `ctx` borrows
+/// `p.contexts`.
+fn replace_doc(
+    replacement: Replacement,
+    confirm: &mut Option<Replacement>,
+    doc: &mut ShaderDoc,
+    state: &mut ShaderToyState,
+    run: &mut RunRequest,
+    status: &mut CompileStatus,
+) {
+    if replacement.harmless(&doc.text) {
+        replacement.load(doc, state, run, status);
+    } else {
+        *confirm = Some(replacement);
+    }
+}
+
 /// Load an opened file into the editor and compile it. Takes the individual
 /// fields (not `&mut UiParams`) so it can run while `ctx` borrows `p.contexts`.
 fn open_into(
@@ -1783,6 +1891,57 @@ mod tests {
         assert!(!pointer_on_canvas(&ctx, canvas, on_toolbar), "toolbar");
         // The old test called this empty spot UI.
         assert!(ctx.input(|i| i.pointer.interact_pos().is_some()));
+    }
+
+    /// GPU errors from the app's own passes are not pinned on the shader;
+    /// those from the passes running it are.
+    #[test]
+    fn app_pass_errors_are_told_apart() {
+        let error =
+            |system: &str| format!("In a CommandEncoder, label = 'wesl_shadertoy::{system}'");
+        assert!(from_app_pass(&error("render::blur::blur_pass")));
+        assert!(from_app_pass(&error("debugger::debugger_blit_pass")));
+        assert!(!from_app_pass(&error("render::ui_pass::ui_melt_pass")));
+        assert!(!from_app_pass(&error(
+            "render::buffers::shadertoy_buffer_pass"
+        )));
+        // `Queue::submit` errors name no encoder: still the shader's.
+        assert!(!from_app_pass(
+            "In Queue::submit\n    In a set_pipeline command"
+        ));
+    }
+
+    /// Opening a file or example only asks when it would lose work.
+    #[test]
+    fn replacing_asks_only_over_work() {
+        let example = &examples::ALL[0];
+        let file = Replacement::File("a.wesl".into(), "fn a() {}".into());
+        assert!(file.harmless(example.code), "an unchanged example");
+        assert!(file.harmless("fn a() {}"), "the same text");
+        assert!(!file.harmless("fn mine() {}"));
+        assert!(!Replacement::Example(example).harmless("fn mine() {}"));
+    }
+
+    /// A compile landing while a slider is held keeps the slider's value
+    /// (on the constant of the same name, now in another slot) and leaves
+    /// it due for write-back; the rest start from the source.
+    #[test]
+    fn compile_keeps_unwritten_tweaks() {
+        let mut tweaks = Tweaks::default();
+        let src = "const A: f32 = 1.0;\nconst B: f32 = 2.0;\n";
+        tweaks.replace(tweak::extract(src), Vec::new());
+        tweaks.values[1].x = 5.0; // B's slider, still held
+        tweaks.dirty = 0b10;
+
+        let src = "const C: f32 = 3.0;\nconst A: f32 = 1.5;\nconst B: f32 = 2.0;\n";
+        tweaks.replace(tweak::extract(src), Vec::new());
+        let names: Vec<&str> = tweaks.constants.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["C", "A", "B"]);
+        assert_eq!(
+            tweaks.values[..3].iter().map(|v| v.x).collect::<Vec<_>>(),
+            [3.0, 1.5, 5.0]
+        );
+        assert_eq!(tweaks.dirty, 0b100);
     }
 
     /// Dragging a window's left (top) edge past what its content needs stops

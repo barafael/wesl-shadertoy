@@ -29,6 +29,7 @@
 //! reported in the UI instead of only in the browser console.
 
 use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 use wesl::error::ResolveError;
@@ -457,24 +458,56 @@ fn compile_variant(
         }
     }
 
-    let wgsl = match compile_instrumented(user_source, buffers, stubs, &tweaks, heat) {
+    // Constants this same code (values aside) could not make live last
+    // time: leave them fixed up front instead of searching again.
+    let key = {
+        let mut h = std::hash::DefaultHasher::new();
+        (tweak::without_values(user_source, &tweaks), heat, stubs).hash(&mut h);
+        h.finish()
+    };
+    let known = known_failing(key);
+    if let Some(known) = &known {
+        let (bad, ok): (Vec<Constant>, _) =
+            tweaks.into_iter().partition(|c| known.contains(&c.name));
+        fixed.extend(bad.into_iter().map(|c| c.name));
+        tweaks = ok;
+    }
+
+    let compile =
+        |tweaks: &[Constant]| compile_instrumented(user_source, buffers, stubs, tweaks, heat);
+    let wgsl = match compile(&tweaks) {
         Ok(wgsl) => wgsl,
         Err(_) if !tweaks.is_empty() => {
             // Report the user's own errors against the plain source.
-            compile_instrumented(user_source, buffers, stubs, &[], heat)?;
-            let (ok, bad): (Vec<Constant>, Vec<Constant>) = tweaks.into_iter().partition(|c| {
-                compile_instrumented(user_source, buffers, stubs, std::slice::from_ref(c), heat)
-                    .is_ok()
-            });
-            fixed.extend(bad.into_iter().map(|c| c.name));
-            tweaks = ok;
-            match compile_instrumented(user_source, buffers, stubs, &tweaks, heat) {
-                Ok(wgsl) => wgsl,
-                Err(_) => {
-                    fixed.extend(tweaks.drain(..).map(|c| c.name));
-                    compile_instrumented(user_source, buffers, stubs, &[], heat)?
-                }
+            compile(&[])?;
+            let mut bad = Vec::new();
+            failing(
+                &tweaks,
+                0..tweaks.len(),
+                &mut |set| compile(set).is_ok(),
+                &mut bad,
+            );
+            let mut failed: Vec<String> = Vec::new();
+            for i in bad.into_iter().rev() {
+                failed.push(tweaks.remove(i).name);
             }
+            let wgsl = match compile(&tweaks) {
+                Ok(wgsl) => wgsl,
+                // Constants that fail only together: none stay live.
+                Err(_) => {
+                    failed.extend(tweaks.drain(..).map(|c| c.name));
+                    compile(&[])?
+                }
+            };
+            remember_failing(
+                key,
+                known
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain(failed.iter().cloned()),
+            );
+            fixed.extend(failed);
+            wgsl
         }
         Err(e) => return Err(e),
     };
@@ -484,6 +517,55 @@ fn compile_variant(
         tweaks,
         fixed,
     })
+}
+
+/// Indices of the constants in `range` of `tweaks`, which together fail
+/// to compile, that fail on their own: halve the range and search the
+/// halves that fail. Each failing constant costs about two compiles per
+/// halving, rather than one compile for every constant.
+fn failing(
+    tweaks: &[Constant],
+    range: std::ops::Range<usize>,
+    compiles: &mut impl FnMut(&[Constant]) -> bool,
+    out: &mut Vec<usize>,
+) {
+    if range.len() == 1 {
+        out.push(range.start);
+        return;
+    }
+    let mid = range.start + range.len() / 2;
+    for half in [range.start..mid, mid..range.end] {
+        if !compiles(&tweaks[half.clone()]) {
+            failing(tweaks, half, compiles, out);
+        }
+    }
+}
+
+/// Constants that could not be made live, per source (values aside, see
+/// [`compile_variant`]). A handful of entries covers the editor and the
+/// examples compiled alongside it.
+static FAILING: std::sync::Mutex<Vec<(u64, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+const FAILING_ENTRIES: usize = 16;
+
+fn known_failing(key: u64) -> Option<Vec<String>> {
+    let cache = FAILING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, names)| names.clone())
+}
+
+fn remember_failing(key: u64, names: impl Iterator<Item = String>) {
+    let mut cache = FAILING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.retain(|(k, _)| *k != key);
+    if cache.len() == FAILING_ENTRIES {
+        cache.remove(0);
+    }
+    cache.push((key, names.collect()));
 }
 
 /// Compile the user source with `tweaks` made live (see [`tweak::instrument`])
@@ -497,6 +579,8 @@ fn compile_instrumented(
     tweaks: &[Constant],
     heat: bool,
 ) -> Result<String, CompileError> {
+    #[cfg(test)]
+    tests::COMPILES.with(|n| n.set(n.get() + 1));
     let pragmas = Pragmas::parse(user_source);
     let mut user = tweak::instrument(user_source, tweaks);
     if heat {
@@ -789,6 +873,50 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         assert_eq!(fixed, ["A", "N", "SEL"]);
         // Every entry point loads the live values before the user code runs.
         assert!(compiled.wgsl.contains("i_tweaks"), "{}", compiled.wgsl);
+    }
+
+    thread_local! {
+        /// Compiles run on this thread, for [`fallback_compiles_little`].
+        pub(super) static COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A constant the rewrite cannot make live, among many, is found by
+    /// halving rather than a compile per constant, and remembered: running
+    /// the same code again, with other values, compiles once.
+    #[test]
+    fn fallback_compiles_little() {
+        let shader = |k: f32| {
+            let mut src = format!("const K: f32 = {k:?};\nconst SEL: i32 = 1;\n");
+            for i in 0..30 {
+                src += &format!("const C{i}: f32 = {i}.0;\n");
+            }
+            src += "fn main_image(p: vec2<f32>) -> vec4<f32> {\n    var x = K";
+            for i in 0..30 {
+                src += &format!(" + C{i}");
+            }
+            src += ";\n    switch i32(p.x) {\n        case SEL: { x = 0.0; }\n        default: {}\n    }\n";
+            src += "    return vec4<f32>(x);\n}\n";
+            src
+        };
+        let compiles = |src: &str| {
+            COMPILES.with(|n| n.set(0));
+            let compiled = compile_user_shader(src).expect("compiles");
+            (compiled, COMPILES.with(std::cell::Cell::get))
+        };
+
+        let (compiled, first) = compiles(&shader(0.5));
+        assert!(
+            compiled.fixed.contains(&"SEL".to_string()),
+            "{:?}",
+            compiled.fixed
+        );
+        assert_eq!(compiled.tweaks.len(), 31);
+        // One compile per constant would be 35.
+        assert!(first <= 16, "{first} compiles");
+
+        let (compiled, again) = compiles(&shader(0.75));
+        assert!(compiled.fixed.contains(&"SEL".to_string()));
+        assert_eq!(again, 1, "the second run searched again");
     }
 
     /// Errors in the user's code are reported against the plain source, not

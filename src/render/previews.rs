@@ -22,8 +22,9 @@ use bevy::render::RenderApp;
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
-    BindGroupEntries, CachedRenderPipelineId, DynamicUniformBuffer, Operations, PipelineCache,
-    RenderPassColorAttachment, RenderPassDescriptor, TextureFormat, TextureView,
+    BindGroupEntries, CachedRenderPipelineId, CommandEncoderDescriptor, DynamicUniformBuffer,
+    Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor, TextureFormat,
+    TextureView,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::GpuImage;
@@ -101,6 +102,50 @@ impl PreviewFeedback {
 pub struct PreviewState {
     cards: HashMap<PreviewKey, Card>,
     uniforms: DynamicUniformBuffer<ShaderToyUniform>,
+    /// Cards the GPU rejected, with the generation it rejected: not drawn
+    /// again until their shader changes.
+    failed: HashMap<PreviewKey, u32>,
+}
+
+impl PreviewState {
+    /// Stop drawing `card` at `generation` (see [`card_from_error`]).
+    pub fn fail(&mut self, card: PreviewKey, generation: u32) {
+        self.failed.insert(card, generation);
+    }
+}
+
+/// Each card records into a command encoder of its own, labelled with this
+/// prefix, the card and its generation. wgpu quotes the label in its
+/// errors, so a GPU error in a thumbnail is pinned on that card rather
+/// than on the editor's shader.
+const ENCODER_PREFIX: &str = "shadertoy_preview:";
+
+fn encoder_label(card: PreviewKey, generation: u32) -> String {
+    let (kind, i) = match card {
+        PreviewKey::Example(i) => ("example", i),
+        PreviewKey::Evolve(i) => ("evolve", i),
+        PreviewKey::Graph(i) => ("graph", i),
+    };
+    format!("{ENCODER_PREFIX}{kind}:{i}:{generation}")
+}
+
+/// The card and generation whose encoder a wgpu error description names.
+pub fn card_from_error(description: &str) -> Option<(PreviewKey, u32)> {
+    let start = description.find(ENCODER_PREFIX)? + ENCODER_PREFIX.len();
+    let mut parts = description[start..].splitn(3, ':');
+    let (kind, i) = (parts.next()?, parts.next()?.parse().ok()?);
+    let generation = parts.next()?;
+    let digits = generation.find(|c: char| !c.is_ascii_digit());
+    let generation = generation[..digits.unwrap_or(generation.len())]
+        .parse()
+        .ok()?;
+    let card = match kind {
+        "example" => PreviewKey::Example(i),
+        "evolve" => PreviewKey::Evolve(i),
+        "graph" => PreviewKey::Graph(i),
+        _ => return None,
+    };
+    Some((card, generation))
 }
 
 #[derive(Default)]
@@ -152,6 +197,9 @@ pub fn preview_pass(
     state.uniforms.clear();
     let mut ready = Vec::new();
     for job in &p.jobs.0 {
+        if state.failed.get(&job.card) == Some(&job.generation) {
+            continue;
+        }
         let Ok(main) = p
             .fullscreen
             .main_pipeline(cache, &job.shader, PREVIEW_FORMAT)
@@ -203,6 +251,10 @@ pub fn preview_pass(
         let channels = card
             .channels
             .get_or_insert_with(|| std::array::from_fn(|_| dummy.clone()));
+        let label = encoder_label(r.job.card, r.job.generation);
+        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some(&label),
+        });
         if r.job.buffers != 0 {
             // Fresh targets on the first frame, on resize and with a new
             // generation.
@@ -219,7 +271,7 @@ pub fn preview_pass(
                 offset: r.offset,
                 dummy,
             }
-            .draw(ctx.command_encoder(), &mut card.targets, channels);
+            .draw(&mut encoder, &mut card.targets, channels);
         }
 
         let bind_group = p.device.create_bind_group(
@@ -237,27 +289,50 @@ pub fn preview_pass(
                 &p.fullscreen.ui_sampler,
             )),
         );
-        let mut pass = ctx
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("preview_pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &image.texture_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations::default(),
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("preview_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &image.texture_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
         pass.set_pipeline(main);
         pass.set_bind_group(0, &bind_group, &[r.offset]);
         pass.draw(0..3, 0..1);
         drop(pass);
+        ctx.add_command_buffer(encoder.finish());
 
         card.frame += 1;
         p.feedback.mark(r.job.card);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The card comes back out of a wgpu error quoting its encoder label.
+    #[test]
+    fn card_survives_the_error_text() {
+        for card in [
+            PreviewKey::Example(12),
+            PreviewKey::Evolve(4),
+            PreviewKey::Graph(0),
+        ] {
+            let description = format!(
+                "Validation Error\n\nCaused by:\n  In a CommandEncoder, label = '{}'\n    \
+                 In a set_pipeline command",
+                encoder_label(card, 37)
+            );
+            assert_eq!(card_from_error(&description), Some((card, 37)));
+        }
+        let main = "In a CommandEncoder, label = 'wesl_shadertoy::render::ui_pass::ui_melt_pass'";
+        assert_eq!(card_from_error(main), None);
     }
 }
