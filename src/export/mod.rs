@@ -1,7 +1,8 @@
-//! Export → Bevy: the document as a tiny standalone crate for Bevy 0.20, so
-//! a look prototyped here drops into a game.
+//! Export: the document as a standalone crate, either a Bevy plugin (below)
+//! or a lock screen for niri ([`lock`]).
 //!
-//! The crate holds the linked WGSL (compiled by
+//! Bevy: a tiny crate for Bevy 0.20, so a look prototyped here drops into a
+//! game. It holds the linked WGSL (compiled by
 //! [`compile::compile_for_export`], so `fragment` is its only entry point),
 //! a `Plugin` that draws it with Bevy's stock
 //! `bevy::core_pipeline::fullscreen_material` (whose bindings 0..=2 are the
@@ -16,11 +17,39 @@
 //! Shaders with buffer passes are refused for now: they need the app's own
 //! ping-pong renderer ([`crate::render::buffers`]), not the stock material.
 //!
-//! Native: the crate is written to `./<name>-bevy/`. Web: it downloads as
-//! `<name>-bevy.zip` (a store-only zip, written by [`zip`]).
+//! Native: the crate is written to `./<name>-bevy/` (or `-lock`). Web: it
+//! downloads as `<name>-bevy.zip` (a store-only zip, written by [`zip`]).
+
+mod lock;
 
 use crate::compile;
 use crate::tweak::{Constant, Hint, Kind, MAX_TWEAKS};
+
+/// What to export the document as.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    /// A Bevy plugin crate.
+    Bevy,
+    /// A lock screen for niri, drawing at most `fps` frames per second
+    /// (0: the display's rate).
+    Lock { fps: u32 },
+}
+
+impl Target {
+    fn suffix(self) -> &'static str {
+        match self {
+            Target::Bevy => "bevy",
+            Target::Lock { .. } => "lock",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Target::Bevy => "Bevy crate",
+            Target::Lock { .. } => "lock screen crate",
+        }
+    }
+}
 
 /// An exported crate: its directory name and `(relative path, contents)`.
 pub struct Crate {
@@ -30,7 +59,7 @@ pub struct Crate {
 
 /// Build the crate for the editor `text`; `title` names it (the example's
 /// name, else the source's first-line title, else "shader").
-pub fn export(text: &str, title: Option<&str>) -> Result<Crate, String> {
+pub fn export(text: &str, title: Option<&str>, target: Target) -> Result<Crate, String> {
     let compiled = compile::compile_for_export(text).map_err(|e| {
         let first = e.to_string();
         let first = first.lines().take(2).collect::<Vec<_>>().join(" ");
@@ -43,18 +72,29 @@ pub fn export(text: &str, title: Option<&str>) -> Result<Crate, String> {
                 .into(),
         );
     }
-    if let Some(binding) = unsupported_binding(&compiled.wgsl) {
+    // Bevy's stock fullscreen material binds the screen texture, its sampler
+    // and the uniforms (0..=2); the lock screen only the uniforms.
+    let bound = |b: u32| match target {
+        Target::Bevy => b <= 2,
+        Target::Lock { .. } => b == 2,
+    };
+    if let Some(binding) = unsupported_binding(&compiled.wgsl, bound) {
         return Err(format!(
             "export does not support i_channel_0..i_channel_3 or i_ui (binding {binding}) \
-             yet: Bevy's stock fullscreen material binds only the screen texture, its \
-             sampler and the uniforms"
+             yet: the exported shader gets only its uniforms"
         ));
     }
     let title = title
         .map(str::to_string)
         .or_else(|| source_title(text))
         .unwrap_or_else(|| "shader".into());
-    let names = Names::new(&title);
+    let names = Names::new(&title, target.suffix());
+    if let Target::Lock { fps } = target {
+        return Ok(Crate {
+            name: names.dir.clone(),
+            files: lock::files(&names, &title, text, compiled.wgsl, &compiled.tweaks, fps),
+        });
+    }
     let fields = fields(&compiled.tweaks);
 
     let files = vec![
@@ -72,17 +112,17 @@ pub fn export(text: &str, title: Option<&str>) -> Result<Crate, String> {
     })
 }
 
-/// The first binding of the linked `wgsl` that Bevy's stock
-/// `FullscreenMaterial` does not provide (it has 0..=2): a buffer channel
-/// read without a buffer pass, or the UI texture.
-fn unsupported_binding(wgsl: &str) -> Option<u32> {
+/// The first binding of the linked `wgsl` that the exported crate does not
+/// provide (`bound` says which it does): a buffer channel read without a
+/// buffer pass, or the UI texture.
+fn unsupported_binding(wgsl: &str, bound: impl Fn(u32) -> bool) -> Option<u32> {
     let module = naga::front::wgsl::parse_str(wgsl).ok()?;
     module
         .global_variables
         .iter()
         .filter_map(|(_, var)| var.binding.as_ref())
         .map(|b| b.binding)
-        .find(|&b| b > 2)
+        .find(|&b| !bound(b))
 }
 
 /// The title in an example-style first line, `// Name — summary`.
@@ -98,7 +138,7 @@ fn source_title(text: &str) -> Option<String> {
 
 /// The identifiers derived from the title.
 struct Names {
-    /// `star-nest-bevy`: the crate and its directory.
+    /// `star-nest-bevy` (or `-lock`): the crate and its directory.
     dir: String,
     /// `star_nest_bevy`: the crate as a Rust path.
     krate: String,
@@ -107,7 +147,7 @@ struct Names {
 }
 
 impl Names {
-    fn new(title: &str) -> Self {
+    fn new(title: &str, suffix: &str) -> Self {
         let words: Vec<String> = title
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -127,8 +167,8 @@ impl Names {
             .map(|w| w[..1].to_ascii_uppercase() + &w[1..])
             .collect();
         Self {
-            dir: format!("{}-bevy", words.join("-")),
-            krate: format!("{}_bevy", words.join("_")),
+            dir: format!("{}-{suffix}", words.join("-")),
+            krate: format!("{}_{suffix}", words.join("_")),
             ty,
         }
     }
@@ -372,7 +412,8 @@ pub struct {ty}Shader {{
     /// xy: pointer while the left button is held, zw: where it was
     /// pressed, negated once released. Origin bottom-left.
     pub mouse: Vec4,
-    /// x: year, y: month (1-12), z: day of month, w: seconds since midnight.
+    /// x: year, y: month (0 = January), z: day of month, w: seconds since
+    /// midnight, in local time.
     pub date: Vec4,
     pub sample_rate: f32,
     pub frame_rate: f32,
@@ -509,12 +550,7 @@ fn setup(mut commands: Commands) {{
 
 fn readme(names: &Names, title: &str, source: &str) -> String {
     let Names { ty, krate, dir } = names;
-    let lygia = if source.contains("lygia::") {
-        "\nIt links parts of [LYGIA](https://lygia.xyz), under the Prosperity \
-         License 3.0.0 or the Patron License.\n"
-    } else {
-        ""
-    };
+    let lygia = lygia_note(source);
     format!(
         r#"# {dir}
 
@@ -540,6 +576,16 @@ See the header of `src/shader.wesl` for the shader's author and license.{lygia}
     )
 }
 
+/// The README's note on LYGIA's license, when `source` uses it.
+fn lygia_note(source: &str) -> &'static str {
+    if source.contains("lygia::") {
+        "\nIt links parts of [LYGIA](https://lygia.xyz), under the Prosperity \
+         License 3.0.0 or the Patron License.\n"
+    } else {
+        ""
+    }
+}
+
 /// A stable UUID for the shader handle, from a hash of the crate name.
 fn uuid_for(name: &str) -> String {
     // FNV-1a, twice with different seeds for 128 bits.
@@ -562,9 +608,9 @@ fn uuid_for(name: &str) -> String {
 
 // --- delivery ---------------------------------------------------------------------
 
-/// Export `text` and deliver it; returns the status-bar note.
-pub fn export_now(text: &str, title: Option<&str>) -> (String, bool) {
-    match export(text, title).and_then(|c| deliver(&c)) {
+/// Export `text` as `target` and deliver it; returns the status-bar note.
+pub fn export_now(text: &str, title: Option<&str>, target: Target) -> (String, bool) {
+    match export(text, title, target).and_then(|c| deliver(&c, target.noun())) {
         Ok(note) => (note, true),
         Err(e) => (e, false),
     }
@@ -572,12 +618,12 @@ pub fn export_now(text: &str, title: Option<&str>) -> (String, bool) {
 
 /// Native: write the crate to `./<name>/`.
 #[cfg(not(target_arch = "wasm32"))]
-fn deliver(krate: &Crate) -> Result<String, String> {
+fn deliver(krate: &Crate, noun: &str) -> Result<String, String> {
     let dir = std::env::current_dir()
         .map_err(|e| e.to_string())?
         .join(&krate.name);
     write_to(krate, &dir)?;
-    Ok(format!("exported the Bevy crate to {}", dir.display()))
+    Ok(format!("exported the {noun} to {}", dir.display()))
 }
 
 /// Write the crate's files under `dir`, replacing earlier exports.
@@ -595,7 +641,7 @@ pub fn write_to(krate: &Crate, dir: &std::path::Path) -> Result<(), String> {
 
 /// Web: download the crate as `<name>.zip`.
 #[cfg(target_arch = "wasm32")]
-fn deliver(krate: &Crate) -> Result<String, String> {
+fn deliver(krate: &Crate, noun: &str) -> Result<String, String> {
     use wasm_bindgen::JsCast;
 
     let files: Vec<(String, &[u8])> = krate
@@ -632,7 +678,7 @@ fn deliver(krate: &Crate) -> Result<String, String> {
         let _ = window
             .set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000);
     }
-    Ok(format!("downloaded the Bevy crate as {file}"))
+    Ok(format!("downloaded the {noun} as {file}"))
 }
 
 /// A store-only (uncompressed) zip archive of `files`: small text files,
@@ -728,17 +774,18 @@ fn main_image(p: vec2<f32>) -> vec4<f32> {
 
     #[test]
     fn names_follow_the_title() {
-        let n = Names::new("Star Nest");
+        let n = Names::new("Star Nest", "bevy");
         assert_eq!(
             (n.dir.as_str(), n.krate.as_str(), n.ty.as_str()),
             ("star-nest-bevy", "star_nest_bevy", "StarNest")
         );
-        let n = Names::new("2D noise / zoo!");
+        let n = Names::new("2D noise / zoo!", "bevy");
         assert_eq!(
             (n.dir.as_str(), n.ty.as_str()),
             ("shader-2d-noise-zoo-bevy", "Shader2dNoiseZoo")
         );
-        assert_eq!(Names::new("\u{2014}").ty, "Shader");
+        assert_eq!(Names::new("\u{2014}", "bevy").ty, "Shader");
+        assert_eq!(Names::new("Star Nest", "lock").dir, "star-nest-lock");
         assert_eq!(source_title(KINDS).as_deref(), Some("Kinds"));
         assert_eq!(source_title("fn main_image"), None);
         assert_eq!(snake_case("SEA_HEIGHT"), "sea_height");
@@ -747,7 +794,7 @@ fn main_image(p: vec2<f32>) -> vec4<f32> {
 
     #[test]
     fn constants_become_resource_fields() {
-        let krate = export(KINDS, None).expect("exports");
+        let krate = export(KINDS, None, Target::Bevy).expect("exports");
         assert_eq!(krate.name, "kinds-bevy");
         let lib = file(&krate, "src/lib.rs");
         for field in [
@@ -777,13 +824,17 @@ fn main_image(p: vec2<f32>) -> vec4<f32> {
     #[test]
     fn refuses_what_it_cannot_export() {
         let fluid = examples::by_name("Fluid").unwrap();
-        let why = export(fluid.code, Some(fluid.name)).err().unwrap();
+        let why = export(fluid.code, Some(fluid.name), Target::Bevy)
+            .err()
+            .unwrap();
         assert!(why.contains("buffer"), "{why}");
         // Bindings past the stock material's 0..=2 would fail in the crate.
         let melt = examples::by_name("UI Melt").unwrap();
-        let why = export(melt.code, Some(melt.name)).err().unwrap();
+        let why = export(melt.code, Some(melt.name), Target::Bevy)
+            .err()
+            .unwrap();
         assert!(why.contains("i_ui"), "{why}");
-        let broken = export("fn main_image(", None).err().unwrap();
+        let broken = export("fn main_image(", None, Target::Bevy).err().unwrap();
         assert!(
             broken.starts_with("export needs a shader that compiles"),
             "{broken}"
@@ -809,6 +860,92 @@ fn main_image(p: vec2<f32>) -> vec4<f32> {
         assert_eq!(crc, crc32(b"hello"));
     }
 
+    #[test]
+    fn lock_screen_bakes_in_the_constants_and_cap() {
+        let krate = export(KINDS, None, Target::Lock { fps: 24 }).expect("exports");
+        assert_eq!(krate.name, "kinds-lock");
+        let config = file(&krate, "src/config.rs");
+        for line in [
+            "pub const TITLE: &str = \"Kinds\";",
+            "pub const DEFAULT_FPS: u32 = 24;",
+            &format!("pub const TWEAKS: [[f32; 4]; {MAX_TWEAKS}] = ["),
+            "    [1.5, 0.0, 0.0, 0.0], // SPEED",
+            "    [-3.0, 0.0, 0.0, 0.0], // COUNT",
+            "    [0.25, -0.5, 0.0, 0.0], // OFFSET",
+            "    [0.1, 0.2, 0.3, 0.4], // TYPE",
+        ] {
+            assert!(config.contains(line), "missing `{line}` in\n{config}");
+        }
+        assert_eq!(config.matches("    [").count(), MAX_TWEAKS, "{config}");
+        assert_eq!(file(&krate, "src/main.rs"), lock::MAIN_RS);
+        assert!(file(&krate, "Cargo.toml").contains("name = \"kinds-lock\""));
+        let wgsl = file(&krate, "src/shader.wgsl");
+        assert_eq!(wgsl.matches("@fragment").count(), 1, "{wgsl}");
+    }
+
+    /// The locker's own shaders are valid, and its vertex stage feeds the
+    /// exported `fragment` what it takes.
+    #[test]
+    fn lock_screen_shaders_validate() {
+        let validate = |src: &str| {
+            let module = naga::front::wgsl::parse_str(src).expect("parses");
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .expect("validates");
+            module
+        };
+        let vertex = validate(lock::VERTEX_WGSL);
+        let indicator = validate(lock::INDICATOR_WGSL);
+        let entries = |m: &naga::Module| -> Vec<String> {
+            m.entry_points.iter().map(|e| e.name.clone()).collect()
+        };
+        assert_eq!(entries(&vertex), ["vertex"]);
+        assert_eq!(entries(&indicator), ["indicator", "plain"]);
+        // The uniform block the locker fills: 40 words, then the tweaks.
+        let krate = export(KINDS, None, Target::Lock { fps: 0 }).expect("exports");
+        let shader = validate(file(&krate, "src/shader.wgsl"));
+        let (_, uniforms) = shader
+            .global_variables
+            .iter()
+            .find(|(_, v)| v.binding.as_ref().is_some_and(|b| b.binding == 2))
+            .expect("uniforms at binding 2");
+        let size = shader.types[uniforms.ty].inner.size(shader.to_ctx());
+        assert_eq!(size as usize, (40 + 4 * MAX_TWEAKS) * 4);
+    }
+
+    /// The exported lock screen is formatted and builds, warnings denied.
+    /// It needs crates
+    /// this repository does not (PAM, smithay-client-toolkit's session
+    /// lock), so it goes online, and is opt-in:
+    /// `cargo test -- --ignored exported_lock_screen_builds`.
+    #[test]
+    #[ignore]
+    fn exported_lock_screen_builds() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let base = root.join("target/export-check");
+        let plasma = examples::by_name("Plasma").unwrap();
+        let krate =
+            export(plasma.code, Some(plasma.name), Target::Lock { fps: 30 }).expect("exports");
+        let dir = base.join(&krate.name);
+        write_to(&krate, &dir).expect("writes");
+        // Formatted too: `locker/main.rs` is outside `cargo fmt`'s reach here.
+        for args in [
+            &["fmt", "--check"][..],
+            &["clippy", "--quiet", "--", "-Dwarnings"],
+        ] {
+            let status = std::process::Command::new(env!("CARGO"))
+                .args(args)
+                .current_dir(&dir)
+                .env("CARGO_TARGET_DIR", base.join("target-lock"))
+                .status()
+                .expect("runs cargo");
+            assert!(status.success(), "{} fails `cargo {}`", krate.name, args[0]);
+        }
+    }
+
     /// The exported crates build against Bevy 0.20: Plasma, Seascape (int
     /// and color constants) and every kind of constant, warnings denied.
     /// Offline, with this crate's lockfile, in `target/export-check`; the
@@ -826,7 +963,7 @@ fn main_image(p: vec2<f32>) -> vec4<f32> {
             (seascape.code, Some(seascape.name)),
             (KINDS, None),
         ] {
-            let krate = export(text, title).expect("exports");
+            let krate = export(text, title, Target::Bevy).expect("exports");
             let dir = base.join(&krate.name);
             write_to(&krate, &dir).expect("writes");
             std::fs::copy(root.join("Cargo.lock"), dir.join("Cargo.lock")).expect("lockfile");

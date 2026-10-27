@@ -14,7 +14,7 @@ Runs natively and in the browser as WASM.
 | Compile & apply | **Compile WESL Shader** button or **Ctrl/Cmd+Enter** |
 | Save / open | **Ctrl/Cmd+S** (browser storage, or `shader.wesl` natively) · **Ctrl/Cmd+O** (file picker / `shader.wesl`) |
 | Share | **Share** button: copies a link that *is* the shader (see [Share links](#share-links)) |
-| Export | **Export** button: the shader as a standalone Bevy 0.20 plugin crate (see [Export to Bevy](#export-to-bevy)) |
+| Export | **Export** menu: the shader as a standalone Bevy 0.20 plugin crate (see [Export to Bevy](#export-to-bevy)) or a lock screen for niri (see [Export to a lock screen](#export-to-a-lock-screen)) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
 | Examples | `Examples` window — 41 examples (a seven-part tutorial, Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails, the tutorial and other beginner examples first; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
@@ -72,7 +72,7 @@ Natively, `--open-link <url>` opens a link the same way.
 
 ### Export to Bevy
 
-**Export** turns the document into a tiny crate for Bevy 0.20, so a look
+**Export → Bevy plugin** turns the document into a tiny crate for Bevy 0.20, so a look
 prototyped here drops into a game:
 
 ```
@@ -96,6 +96,36 @@ an inspector, changes the shader live. Natively the crate is written to
 `./<name>-bevy/` (existing files are replaced); the web build downloads it
 as `<name>-bevy.zip`. Shaders with buffer passes are not exported yet: they
 need this app's ping-pong renderer, so Export says so instead.
+
+### Export to a lock screen
+
+**Export → niri lock screen** turns the document into a lock screen program
+for niri and the other compositors with `ext-session-lock-v1` (sway,
+Hyprland; KDE and GNOME lack the protocol):
+
+```
+<name>-lock/
+  Cargo.toml          wgpu, smithay-client-toolkit, pam-client, ab_glyph; no Bevy
+  src/main.rs         the locker, the same for every export
+  src/config.rs       the title, the frame-rate cap and the constants' values
+  src/shader.wgsl     the linked WGSL
+  src/vertex.wgsl     the fullscreen triangle
+  src/indicator.wgsl  the password dots drawn over the shader
+  src/shader.wesl     the source it was compiled from, for reference
+```
+
+It locks the session, covers every output with the shader and checks the
+password with PAM in a thread, so the shader keeps running meanwhile. Typing
+shows a dot per character; the rim turns blue while PAM checks and red after
+a wrong password, and a bar warns about Caps Lock. PAM's messages (an
+account locked after failed attempts, with the minutes left) show under it,
+rasterized with ab_glyph in the system font. The number beside the menu
+entry is the frame-rate cap baked in as the default (0 draws at the display's
+rate); `--fps` overrides it. The constants are baked in as set in the editor,
+and `iMouse` stays zero. Same limits as the Bevy export: no buffer passes, no
+channels. Install it with `cargo install --path .` and bind it in niri's
+config; the crate's README has the details, the PAM setup and how to recover
+if it ever crashes (the compositor keeps the session locked).
 
 ## The shader dialect
 
@@ -382,8 +412,11 @@ src/
   wesl_scan.rs  lexical scans of WESL text (import trees, `@if` flags,
                 `constants::` names), shared with build.rs
   persist.rs    document/settings IO: localStorage, shader.wesl, file picker
-  export.rs     Export → Bevy: the standalone plugin crate (templates with
-                the WGSL and constants spliced in), written to disk or zipped
+  export/       Export: standalone crates written to disk or zipped
+    mod.rs      → Bevy: the plugin crate (templates with the WGSL and
+                constants spliced in)
+    lock.rs     → lock screen: the niri locker crate; locker/ holds its
+                program, shared by every export
   share.rs      share links: the document deflated + base64url in the URL
                 fragment, the Share button, opening links at startup
   theme.rs      Gruvbox dark egui Visuals + the syntax palette
@@ -502,6 +535,7 @@ cargo run -- --example Plasma --graph    # start with the Graph window open
 cargo run -- --open-link '<share link>'  # open a share link
 WGSL_ANALYZER=/path/to/wgsl-analyzer cargo test -- --ignored  # + live server
 cargo test -- --ignored exported_crates_build  # exported crates build (slow)
+cargo test -- --ignored exported_lock_screen_builds  # the lock screen too (online)
 cargo test -p backend-diff                # every example on Vulkan vs GL + naga writers
 cargo run -p backend-diff -- --fuzz 200   # the same as a table, plus fuzz shaders
 cargo run -p backend-diff -- --fuzz-int 200  # plus integer fuzz shaders (edge values, bit builtins)

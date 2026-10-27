@@ -357,6 +357,8 @@ struct Settings {
     /// Frosted glass: how blurred the shader shows through windows and
     /// panels, as the blur's sigma in points; 0 is off (opaque UI).
     blur: f32,
+    /// The exported lock screen's frame-rate cap; 0 is the display's rate.
+    lock_fps: u32,
 }
 
 impl Settings {
@@ -367,13 +369,14 @@ impl Settings {
             random_example: true,
             analyzer: true,
             blur: 12.0,
+            lock_fps: 30,
         }
     }
 
     fn encode(&self) -> String {
         format!(
-            "random={};analyzer={};blur_px={}",
-            self.random_example as u8, self.analyzer as u8, self.blur
+            "random={};analyzer={};blur_px={};lock_fps={}",
+            self.random_example as u8, self.analyzer as u8, self.blur, self.lock_fps
         )
     }
 
@@ -383,6 +386,11 @@ impl Settings {
             match part.split_once('=') {
                 Some(("random", r)) => out.random_example = r == "1",
                 Some(("analyzer", a)) => out.analyzer = a == "1",
+                Some(("lock_fps", f)) => {
+                    if let Ok(f) = f.parse::<u32>() {
+                        out.lock_fps = f.min(240);
+                    }
+                }
                 Some(("blur_px", b)) => {
                     if let Ok(b) = b.parse::<f32>() {
                         out.blur = b.clamp(0.0, MAX_BLUR);
@@ -922,15 +930,56 @@ fn ui(mut p: UiParams) {
             {
                 p.status.note = Some(share::copy_link(ctx, &p.doc.text, &p.tweaks));
             }
-            if ui
-                .button("Export")
-                .on_hover_text("Export as a Bevy plugin crate")
-                .clicked()
-            {
+            let mut target = None;
+            ui.menu_button("Export", |ui| {
+                if ui
+                    .button("Bevy plugin")
+                    .on_hover_text("A crate with a Bevy 0.20 plugin that draws the shader")
+                    .clicked()
+                {
+                    target = Some(export::Target::Bevy);
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("niri lock screen")
+                        .on_hover_text(
+                            "A lock screen program for niri, sway and Hyprland \
+                             (ext-session-lock) that draws the shader",
+                        )
+                        .clicked()
+                    {
+                        target = Some(export::Target::Lock {
+                            fps: p.settings.lock_fps,
+                        });
+                    }
+                    let cap = ui
+                        .add(
+                            egui::DragValue::new(&mut p.settings.lock_fps)
+                                .range(0..=240)
+                                .suffix(" fps")
+                                .custom_formatter(|v, _| {
+                                    if v == 0.0 {
+                                        "display".into()
+                                    } else {
+                                        format!("{v:.0}")
+                                    }
+                                }),
+                        )
+                        .on_hover_text(
+                            "The lock screen's frame-rate cap; 0 draws at the display's rate. \
+                         Also its --fps option.",
+                        );
+                    // Saved once a drag ends, not on every step of it.
+                    if (cap.changed() && !cap.dragged()) || cap.drag_stopped() {
+                        persist::save_settings(&p.settings.encode());
+                    }
+                });
+            });
+            if let Some(target) = target {
                 let values = p.tweaks.values.map(|v| v.to_array());
                 let text =
                     tweak::written_back(&p.doc.text, &p.tweaks.constants, &values, p.tweaks.dirty);
-                p.status.note = Some(export::export_now(&text, p.state.example));
+                p.status.note = Some(export::export_now(&text, p.state.example, target));
             }
 
             ui.separator();
