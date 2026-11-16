@@ -1026,7 +1026,7 @@ fn bytes(words: &[u32]) -> Vec<u8> {
 /// shadertoy's `iDate`, in local time: year, month (0 = January), day of
 /// month, seconds since midnight.
 fn date() -> [f32; 4] {
-    let now = jiff::Zoned::now();
+    let now = jiff::ZonedDateTime::now();
     let seconds = f64::from(now.hour()) * 3600.0
         + f64::from(now.minute()) * 60.0
         + f64::from(now.second())

@@ -1910,7 +1910,7 @@ fn date_uniforms() -> Vec4 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let now = jiff::Zoned::now();
+        let now = jiff::ZonedDateTime::now();
         local_date(now.datetime())
     }
 }

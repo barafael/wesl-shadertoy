@@ -301,7 +301,7 @@ bevy = {{ version = "0.20", default-features = false, features = [
     "bevy_core_pipeline",
 ] }}
 # `iDate` in local time, as on shadertoy.
-jiff = "0.2"
+jiff = "1.0"
 
 # A workspace of its own, so the crate builds wherever it is unpacked.
 [workspace]
@@ -488,7 +488,7 @@ fn update_uniforms(
 /// shadertoy's `iDate`, in local time: year, month (0 = January), day of
 /// month, seconds since midnight.
 fn date() -> Vec4 {{
-    let now = jiff::Zoned::now();
+    let now = jiff::ZonedDateTime::now();
     let seconds = f64::from(now.hour()) * 3600.0
         + f64::from(now.minute()) * 60.0
         + f64::from(now.second())

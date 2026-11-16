@@ -62,7 +62,7 @@ zeroize = "1"
 ab_glyph = "0.2"
 libc = "0.2"
 # `iDate` in local time, as on shadertoy.
-jiff = "0.2"
+jiff = "1.0"
 
 [profile.release]
 # A panic must not unwind through PAM or Wayland's C code; the compositor
