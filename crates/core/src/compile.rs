@@ -633,7 +633,11 @@ fn compile_variant(
     heat: bool,
     stubs: bool,
 ) -> Result<CompiledShader, CompileError> {
-    let (buffers, compute) = detect_passes(user_source)?;
+    let (buffers, passes) = detect_passes(user_source)?;
+    let mut compute = Compute {
+        passes,
+        ..Compute::default()
+    };
 
     let in_const_context = tweak::const_context_names(user_source);
     let mut fixed = Vec::new();
@@ -667,8 +671,8 @@ fn compile_variant(
     let compile = |tweaks: &[Constant]| {
         compile_instrumented(user_source, buffers, &compute, stubs, tweaks, heat)
     };
-    let wgsl = match compile(&tweaks) {
-        Ok(wgsl) => wgsl,
+    let (wgsl, storage) = match compile(&tweaks) {
+        Ok(compiled) => compiled,
         Err(_) if !tweaks.is_empty() => {
             // Report the user's own errors against the plain source.
             compile(&[])?;
@@ -683,8 +687,8 @@ fn compile_variant(
             for i in bad.into_iter().rev() {
                 failed.push(tweaks.remove(i).name);
             }
-            let wgsl = match compile(&tweaks) {
-                Ok(wgsl) => wgsl,
+            let compiled = match compile(&tweaks) {
+                Ok(compiled) => compiled,
                 // Constants that fail only together: none stay live.
                 Err(_) => {
                     failed.extend(tweaks.drain(..).map(|c| c.name));
@@ -699,10 +703,11 @@ fn compile_variant(
                     .chain(failed.iter().cloned()),
             );
             fixed.extend(failed);
-            wgsl
+            compiled
         }
         Err(e) => return Err(e),
     };
+    compute.storage = storage;
     Ok(CompiledShader {
         wgsl,
         buffers,
@@ -764,7 +769,7 @@ fn remember_failing(key: u64, names: impl Iterator<Item = String>) {
 /// Compile the user source with `tweaks` made live (see [`tweak::instrument`])
 /// and, with `heat` on, its loops counted (see [`heat::instrument`]) into
 /// a validated WGSL module, under the flags and constants its pragma lines
-/// set ([`crate::pragmas`]).
+/// set ([`crate::pragmas`]), with the sizes of its storage buffers.
 fn compile_instrumented(
     user_source: &str,
     buffers: u8,
@@ -772,7 +777,7 @@ fn compile_instrumented(
     stubs: bool,
     tweaks: &[Constant],
     heat: bool,
-) -> Result<String, CompileError> {
+) -> Result<(String, [Option<StorageSize>; STORAGE_SLOTS]), CompileError> {
     #[cfg(test)]
     tests::COMPILES.with(|n| n.set(n.get() + 1));
     let pragmas = Pragmas::parse(user_source);
@@ -806,7 +811,8 @@ fn compile_instrumented(
         .validate(&module)
         .map_err(|e| CompileError::WgslValidate(e.emit_to_string(&wgsl)))?;
     check_bindings(&module)?;
-    Ok(wgsl)
+    let storage = storage_sizes(&module)?;
+    Ok((wgsl, storage))
 }
 
 /// Reject resource bindings the pipeline layout does not provide: anything
@@ -865,10 +871,242 @@ fn is_read_write_storage(space: naga::AddressSpace) -> bool {
         if access.contains(naga::StorageAccess::LOAD | naga::StorageAccess::STORE))
 }
 
-/// Compile `package::user` on its own and report which buffer passes
-/// (`fn buffer_a`..`buffer_d`) and compute passes (`fn compute_a`..
-/// `compute_d`) it defines, and the storage buffers it declares.
-fn detect_passes(user_source: &str) -> Result<(u8, Compute), CompileError> {
+/// The buffer passes (bit per [`BUFFER_NAMES`] entry) and compute passes
+/// the user source defines.
+///
+/// Usually a scan of the source's own syntax tree is enough ([`scan`]);
+/// where it is not (conditional compilation, type aliases, an array length
+/// it cannot read), the user module is compiled on its own and inspected
+/// with naga ([`declared_by_compile`]). The scan saves a whole compile:
+/// about half of what a compile costs.
+fn detect_passes(user_source: &str) -> Result<(u8, [Option<Dispatch>; 4]), CompileError> {
+    let declared = match scan(user_source) {
+        Some(declared) => declared,
+        None => declared_by_compile(user_source)?,
+    };
+    Ok((declared.buffers, passes(user_source, &declared)?))
+}
+
+/// What decides the passes, read by either detector.
+#[derive(Debug, PartialEq)]
+struct Declared {
+    /// Bit per [`BUFFER_NAMES`] entry.
+    buffers: u8,
+    /// Per [`COMPUTE_NAMES`] entry the source defines, its signature.
+    computes: [Option<Signature>; 4],
+    /// The `var<storage, read_write>` array at `@group(1) @binding(0)`:
+    /// `Some(Some(n))` with `n` elements, `Some(None)` runtime-sized, `None`
+    /// if there is no such array.
+    binding0: Option<Option<u32>>,
+}
+
+/// The signature of a compute pass function.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Signature {
+    /// `(i: u32)`.
+    Index,
+    /// `(p: vec2<u32>)`.
+    Pixel,
+    /// Any other parameter list.
+    Other,
+    /// It returns a value.
+    Returns,
+}
+
+/// The passes `declared` makes, with the errors a pass's signature or
+/// `// dispatch:` line earns.
+fn passes(user_source: &str, declared: &Declared) -> Result<[Option<Dispatch>; 4], CompileError> {
+    let mut passes = [None; 4];
+    for (i, name) in COMPUTE_NAMES.iter().enumerate() {
+        let Some(signature) = declared.computes[i] else {
+            continue;
+        };
+        let hint = dispatch_hint(user_source, name)?;
+        let pass = match signature {
+            Signature::Returns => {
+                return Err(CompileError::Compute(format!(
+                    "`{name}` must not return a value: it writes its results into \
+                     storage buffers."
+                )));
+            }
+            Signature::Index => match (hint, declared.binding0) {
+                (Some(n), _) | (None, Some(Some(n))) => Dispatch::Count(n),
+                (None, Some(None)) => Dispatch::PixelCount,
+                (None, None) => {
+                    return Err(CompileError::Compute(format!(
+                        "`{name}(i: u32)` runs once per element of the array at \
+                         @group(1) @binding(0), but there is no `var<storage, \
+                         read_write>` array there. Declare one, or put a \
+                         `// dispatch: N` line above the function."
+                    )));
+                }
+            },
+            Signature::Pixel => {
+                if hint.is_some() {
+                    return Err(CompileError::Compute(format!(
+                        "`{name}(p: vec2<u32>)` runs once per pixel; `// dispatch:` only \
+                         applies to `{name}(i: u32)`."
+                    )));
+                }
+                Dispatch::Pixels
+            }
+            Signature::Other => {
+                return Err(CompileError::Compute(format!(
+                    "`{name}` takes one parameter: `i: u32` (once per array element) or \
+                     `p: vec2<u32>` (once per pixel)."
+                )));
+            }
+        };
+        if pass == Dispatch::Count(0) {
+            return Err(CompileError::Compute(format!(
+                "`{name}` would run zero times."
+            )));
+        }
+        passes[i] = Some(pass);
+    }
+    Ok(passes)
+}
+
+/// [`Declared`] from the user source's syntax tree alone, or `None` where
+/// that cannot be sure: a source that does not parse (the compile reports
+/// it), `@if`/`@elif`/`@else` on a declaration (flags decide what exists),
+/// a parameter type it does not recognize (an alias, say), or, when a
+/// `compute_x(i: u32)` needs it, a binding-0 array length that is not a
+/// literal or a literal `const` of the same source.
+fn scan(user_source: &str) -> Option<Declared> {
+    use wesl::syntax::{
+        AccessMode, AddressSpace, Attribute, DeclarationKind, Expression, GlobalDeclaration,
+        LiteralExpression, TranslationUnit, TypeExpression,
+    };
+    let unit: TranslationUnit = user_source.parse().ok()?;
+    let conditional = |attributes: &[wesl::syntax::AttributeNode]| {
+        attributes
+            .iter()
+            .any(|a| matches!(**a, Attribute::If(_) | Attribute::Elif(_) | Attribute::Else))
+    };
+    let literal = |e: &Expression| match e {
+        Expression::Literal(LiteralExpression::AbstractInt(n)) => u32::try_from(*n).ok(),
+        Expression::Literal(LiteralExpression::U32(n)) => Some(*n),
+        Expression::Literal(LiteralExpression::I32(n)) => u32::try_from(*n).ok(),
+        _ => None,
+    };
+    let is = |ty: &TypeExpression, name: &str| ty.path.is_none() && *ty.ident.name() == name;
+    let plain = |ty: &TypeExpression, name: &str| is(ty, name) && ty.template_args.is_none();
+
+    let mut declared = Declared {
+        buffers: 0,
+        computes: [None; 4],
+        binding0: None,
+    };
+    // Binding 0's type, and the source's literal constants, for its length.
+    let mut binding0_ty = None;
+    let mut constants = Vec::new();
+    for declaration in &unit.global_declarations {
+        match &**declaration {
+            GlobalDeclaration::Function(f) => {
+                if conditional(&f.attributes) {
+                    return None;
+                }
+                let name = f.ident.name();
+                if let Some(i) = BUFFER_NAMES.iter().position(|n| *n == *name) {
+                    declared.buffers |= 1 << i;
+                }
+                let Some(i) = COMPUTE_NAMES.iter().position(|n| *n == *name) else {
+                    continue;
+                };
+                declared.computes[i] = Some(match f.parameters.as_slice() {
+                    _ if f.return_type.is_some() => Signature::Returns,
+                    [p] if plain(&p.ty, "u32") => Signature::Index,
+                    [p] if plain(&p.ty, "vec2u") => Signature::Pixel,
+                    [p] if is(&p.ty, "vec2") => {
+                        let arg = p.ty.template_args.as_deref()?;
+                        match arg {
+                            [a] if matches!(&*a.expression, Expression::TypeOrIdentifier(t) if plain(t, "u32")) => {
+                                Signature::Pixel
+                            }
+                            _ => return None,
+                        }
+                    }
+                    [_] => return None,
+                    _ => Signature::Other,
+                });
+            }
+            GlobalDeclaration::Declaration(d) => {
+                if conditional(&d.attributes) {
+                    return None;
+                }
+                if d.kind == DeclarationKind::Const
+                    && let Some(n) = d.initializer.as_ref().and_then(|e| literal(e))
+                {
+                    constants.push((d.ident.name().clone(), n));
+                }
+                let attribute = |want: fn(&Attribute) -> Option<&wesl::syntax::ExpressionNode>| {
+                    d.attributes
+                        .iter()
+                        .find_map(|a| want(a))
+                        .map(|e| literal(e))
+                };
+                let group = attribute(|a| match a {
+                    Attribute::Group(e) => Some(e),
+                    _ => None,
+                });
+                let binding = attribute(|a| match a {
+                    Attribute::Binding(e) => Some(e),
+                    _ => None,
+                });
+                match (group, binding) {
+                    (None, None) => {}
+                    (Some(Some(g)), Some(Some(b))) => {
+                        let read_write = d.kind
+                            == DeclarationKind::Var(Some((
+                                AddressSpace::Storage,
+                                Some(AccessMode::ReadWrite),
+                            )));
+                        if g == STORAGE_GROUP && b == 0 && read_write {
+                            binding0_ty = d.ty.clone();
+                        }
+                    }
+                    // An attribute that is not a literal: let the compile read it.
+                    _ => return None,
+                }
+            }
+            GlobalDeclaration::Compound(_) => return None,
+            GlobalDeclaration::Struct(s) if conditional(&s.attributes) => return None,
+            GlobalDeclaration::TypeAlias(a) if conditional(&a.attributes) => return None,
+            _ => {}
+        }
+    }
+
+    // Only an index pass without a `// dispatch:` line needs binding 0.
+    let needed = COMPUTE_NAMES
+        .iter()
+        .zip(&declared.computes)
+        .any(|(name, s)| {
+            *s == Some(Signature::Index) && !matches!(dispatch_hint(user_source, name), Ok(Some(_)))
+        });
+    if needed && let Some(ty) = binding0_ty {
+        if !is(&ty, "array") {
+            return None; // a struct, an alias, …: the compile knows
+        }
+        declared.binding0 = Some(match ty.template_args.as_deref()? {
+            [_] => None,
+            [_, len] => Some(match &*len.expression {
+                Expression::TypeOrIdentifier(name) if name.template_args.is_none() => {
+                    let name = name.ident.name();
+                    constants.iter().find(|(c, _)| *c == *name)?.1
+                }
+                e => literal(e)?,
+            }),
+            _ => return None,
+        });
+    }
+    Some(declared)
+}
+
+/// [`Declared`] by compiling `package::user` on its own (imports resolved,
+/// flags applied) and reading the result with naga: what [`scan`] leaves to
+/// the compiler.
+fn declared_by_compile(user_source: &str) -> Result<Declared, CompileError> {
     let pragmas = Pragmas::parse(user_source);
     let resolver = Modules::new(user_source.into(), [], &pragmas);
 
@@ -895,15 +1133,66 @@ fn detect_passes(user_source: &str) -> Result<(u8, Compute), CompileError> {
             .find(|(_, f)| f.name.as_deref() == Some(name))
             .map(|(_, f)| f)
     };
-    let mut buffers = 0u8;
+    let mut declared = Declared {
+        buffers: 0,
+        computes: [None; 4],
+        binding0: None,
+    };
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
         if function(name).is_some() {
-            buffers |= 1 << i;
+            declared.buffers |= 1 << i;
         }
     }
+    for (_, var) in module.global_variables.iter() {
+        let Some(binding) = &var.binding else {
+            continue;
+        };
+        if binding.group == STORAGE_GROUP
+            && binding.binding == 0
+            && is_read_write_storage(var.space)
+        {
+            declared.binding0 = match module.types[var.ty].inner {
+                naga::TypeInner::Array {
+                    size: naga::ArraySize::Dynamic,
+                    ..
+                } => Some(None),
+                naga::TypeInner::Array {
+                    size: naga::ArraySize::Constant(n),
+                    ..
+                } => Some(Some(n.get())),
+                _ => None,
+            };
+        }
+    }
+    let u32 = naga::Scalar::U32;
+    for (i, name) in COMPUTE_NAMES.iter().enumerate() {
+        let Some(f) = function(name) else {
+            continue;
+        };
+        let param = match f.arguments.as_slice() {
+            [arg] => Some(&module.types[arg.ty].inner),
+            _ => None,
+        };
+        declared.computes[i] = Some(match param {
+            _ if f.result.is_some() => Signature::Returns,
+            Some(naga::TypeInner::Scalar(s)) if *s == u32 => Signature::Index,
+            Some(naga::TypeInner::Vector {
+                size: naga::VectorSize::Bi,
+                scalar,
+            }) if *scalar == u32 => Signature::Pixel,
+            _ => Signature::Other,
+        });
+    }
+    Ok(declared)
+}
 
-    let mut compute = Compute::default();
-    let mut binding0_len = None;
+/// The size of each user storage buffer (`var<storage, read_write>` at
+/// `@group(1) @binding(0..4)`) of the final, validated `module`. Buffers
+/// no entry point uses are stripped by then, so they get none.
+fn storage_sizes(
+    module: &naga::Module,
+) -> Result<[Option<StorageSize>; STORAGE_SLOTS], CompileError> {
+    let mut sizes = [None; STORAGE_SLOTS];
     let mut layouter = naga::proc::Layouter::default();
     layouter
         .update(module.to_ctx())
@@ -913,27 +1202,23 @@ fn detect_passes(user_source: &str) -> Result<(u8, Compute), CompileError> {
             continue;
         };
         let slot = binding.binding as usize;
-        // Anything else is reported by `check_bindings`, with the rest.
+        // Anything else is reported by `check_bindings`.
         if binding.group != STORAGE_GROUP
             || slot >= STORAGE_SLOTS
             || !is_read_write_storage(var.space)
         {
             continue;
         }
-        let name = var.name.as_deref().unwrap_or("?");
-        let (size, len) = match module.types[var.ty].inner {
+        let mangled = var.name.as_deref().unwrap_or("?");
+        let name = EscapeMangler
+            .unmangle(mangled)
+            .map_or_else(|| mangled.to_string(), |(_, item)| item);
+        let size = match module.types[var.ty].inner {
             naga::TypeInner::Array {
                 size: naga::ArraySize::Dynamic,
                 stride,
                 ..
-            } => (StorageSize::PerPixel { stride }, Some(None)),
-            naga::TypeInner::Array {
-                size: naga::ArraySize::Constant(n),
-                ..
-            } => (
-                StorageSize::Bytes(u64::from(layouter[var.ty].size)),
-                Some(Some(n.get())),
-            ),
+            } => StorageSize::PerPixel { stride },
             naga::TypeInner::Struct { ref members, .. }
                 if members.last().is_some_and(|m| {
                     matches!(
@@ -950,7 +1235,7 @@ fn detect_passes(user_source: &str) -> Result<(u8, Compute), CompileError> {
                      (`array<T>`, one element per pixel) or give it a length."
                 )));
             }
-            _ => (StorageSize::Bytes(u64::from(layouter[var.ty].size)), None),
+            _ => StorageSize::Bytes(u64::from(layouter[var.ty].size)),
         };
         if let StorageSize::Bytes(n) = size
             && n > MAX_STORAGE_BYTES
@@ -961,69 +1246,9 @@ fn detect_passes(user_source: &str) -> Result<(u8, Compute), CompileError> {
                 MAX_STORAGE_BYTES >> 20
             )));
         }
-        compute.storage[slot] = Some(size);
-        if slot == 0 {
-            binding0_len = len;
-        }
+        sizes[slot] = Some(size);
     }
-
-    for (i, name) in COMPUTE_NAMES.iter().enumerate() {
-        let Some(f) = function(name) else {
-            continue;
-        };
-        let hint = dispatch_hint(user_source, name)?;
-        let param = match f.arguments.as_slice() {
-            [arg] => Some(&module.types[arg.ty].inner),
-            _ => None,
-        };
-        let u32 = naga::Scalar::U32;
-        let pass = match param {
-            _ if f.result.is_some() => {
-                return Err(CompileError::Compute(format!(
-                    "`{name}` must not return a value: it writes its results into \
-                     storage buffers."
-                )));
-            }
-            Some(naga::TypeInner::Scalar(s)) if *s == u32 => match (hint, binding0_len) {
-                (Some(n), _) => Dispatch::Count(n),
-                (None, Some(Some(n))) => Dispatch::Count(n),
-                (None, Some(None)) => Dispatch::PixelCount,
-                (None, None) => {
-                    return Err(CompileError::Compute(format!(
-                        "`{name}(i: u32)` runs once per element of the array at \
-                         @group(1) @binding(0), but there is no `var<storage, \
-                         read_write>` array there. Declare one, or put a \
-                         `// dispatch: N` line above the function."
-                    )));
-                }
-            },
-            Some(naga::TypeInner::Vector {
-                size: naga::VectorSize::Bi,
-                scalar,
-            }) if *scalar == u32 => {
-                if hint.is_some() {
-                    return Err(CompileError::Compute(format!(
-                        "`{name}(p: vec2<u32>)` runs once per pixel; `// dispatch:` only \
-                         applies to `{name}(i: u32)`."
-                    )));
-                }
-                Dispatch::Pixels
-            }
-            _ => {
-                return Err(CompileError::Compute(format!(
-                    "`{name}` takes one parameter: `i: u32` (once per array element) or \
-                     `p: vec2<u32>` (once per pixel)."
-                )));
-            }
-        };
-        if pass == Dispatch::Count(0) {
-            return Err(CompileError::Compute(format!(
-                "`{name}` would run zero times."
-            )));
-        }
-        compute.passes[i] = Some(pass);
-    }
-    Ok((buffers, compute))
+    Ok(sizes)
 }
 
 /// The `N` of a `// dispatch: N` line right above `fn {name}`, if any.
@@ -1360,6 +1585,48 @@ fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(cells[0]); }
         let src = "// compute_a is only mentioned here.\n\
                    fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0); }\n";
         assert!(!compile_user_shader(src).unwrap().compute.is_used());
+    }
+
+    /// The syntax scan answers for every example (it is the fast path),
+    /// and wherever it answers it agrees with the compile it replaces.
+    #[test]
+    fn scan_agrees_with_the_compile() {
+        let sources = crate::examples::ALL
+            .iter()
+            .map(|e| (e.name, e.code.to_string()))
+            .chain([
+                ("particles test", PARTICLES.to_string()),
+                (
+                    "runtime binding 0",
+                    "@group(1) @binding(0) var<storage, read_write> c: array<f32>;\n\
+                     fn compute_a(i: u32) { c[i] = 1.0; }\n\
+                     fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(c[0]); }"
+                        .to_string(),
+                ),
+                (
+                    "const length, vec2u",
+                    "const N: u32 = 300;\n\
+                     @group(1) @binding(0) var<storage, read_write> c: array<f32, N>;\n\
+                     fn compute_a(i: u32) { c[i] = 1.0; }\n\
+                     fn compute_b(p: vec2u) { c[0] = 2.0; }\n\
+                     fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(c[0]); }"
+                        .to_string(),
+                ),
+            ]);
+        for (name, source) in sources {
+            let scanned = scan(&source).unwrap_or_else(|| panic!("{name}: scan gave up"));
+            let compiled = declared_by_compile(&source).expect(name);
+            assert_eq!(scanned, compiled, "{name}");
+        }
+        // Where it cannot be sure, it leaves it to the compile.
+        for unsure in [
+            "alias Idx = u32;\nfn compute_a(i: Idx) {}\n",
+            "@if(FLAG) fn buffer_a(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.0); }\n",
+            "@group(1) @binding(0) var<storage, read_write> c: array<f32, 2 * 8>;\n\
+             fn compute_a(i: u32) { c[i] = 1.0; }\n",
+        ] {
+            assert_eq!(scan(unsure), None, "{unsure}");
+        }
     }
 
     #[test]
