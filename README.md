@@ -23,7 +23,7 @@ Runs natively and in the browser as WASM.
 | Feature flags | `Flags` window: a checkbox per WESL `@if` flag your code and its LYGIA imports test, a value per `constants::` setting they read; changes recompile (see [Feature flags and constants](#feature-flags-and-constants)) |
 | Dataflow graph | `Graph` window (or `--graph` natively): the naga IR of `main_image` (or any other function of yours, buffer passes included) as a left-to-right node graph — `named lets` shows only `let`s, `var`s and returns, each with the formula it computes; `all expressions` one node per operation. Drag to pan, scroll to zoom, hover for the full formula. The `let`s of `main_image` carry live thumbnails of their value (scalars: orange positive, blue negative) |
 | Drag the picture *(experimental, native only)* | toolbar hand, or **Alt+drag** on the canvas: grab a spot of the image and drag it; the float constant that moves that spot best along the drag follows the pointer (with time frozen), and the code changes on release (see [Dragging the picture](#dragging-the-picture-experimental)) |
-| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Flags`, `LYGIA`, `Graph` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off), `?` about |
+| Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Flags`, `LYGIA`, `Graph` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off; the GPU backend in use and, on the web, a WebGPU switch that reloads the page on WebGL2 or back, keeping the document), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
 | Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
@@ -303,7 +303,8 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
 Compute needs WebGPU: native builds have it on Vulkan, Metal and DX12 (not on
 an OpenGL-only adapter, which the app checks at startup), and the web build uses
-WebGPU when the browser has it and WebGL2 otherwise. On WebGL2 a shader with
+WebGPU when the browser has it and WebGL2 otherwise (the settings window
+can turn WebGPU off, to compare the two). On WebGL2 a shader with
 compute passes or storage buffers does not compile ("needs WebGPU"), and its
 Examples card says so. The **Particles** example is the full version of the
 sketch above.

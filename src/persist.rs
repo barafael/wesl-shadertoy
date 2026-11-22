@@ -115,6 +115,19 @@ pub fn save_settings(text: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_settings(_text: &str) {}
 
+/// Reload the page, with `fragment` (a share link's, without `#`) in the
+/// URL if given.
+#[cfg(target_arch = "wasm32")]
+pub fn reload(fragment: Option<String>) {
+    let Some(location) = web_sys::window().map(|w| w.location()) else {
+        return;
+    };
+    if let Some(fragment) = fragment {
+        let _ = location.set_hash(&fragment);
+    }
+    let _ = location.reload();
+}
+
 // --- web file dialog -----------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]

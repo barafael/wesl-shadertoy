@@ -76,10 +76,16 @@ fn main() {
     // WebGPU where the browser really has it, else WebGL2. Asking for an
     // adapter is the only reliable test (Chrome on Linux has `navigator.gpu`
     // but no adapter), and it is async, so the app starts once it answers.
+    // The settings can turn WebGPU off (to compare, or to dodge a browser's
+    // WebGPU bugs); switching reloads the page.
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_futures::spawn_local(async {
         use bevy::render::settings::Backends;
-        let webgpu = wgpu::util::is_browser_webgpu_supported().await;
+        let prefer = persist::load_settings()
+            .map(|s| Settings::decode(&s))
+            .unwrap_or_else(Settings::fallback)
+            .webgpu;
+        let webgpu = prefer && wgpu::util::is_browser_webgpu_supported().await;
         run(Some(if webgpu {
             Backends::BROWSER_WEBGPU
         } else {
@@ -388,6 +394,9 @@ struct Settings {
     blur: f32,
     /// The exported lock screen's frame-rate cap; 0 is the display's rate.
     lock_fps: u32,
+    /// Web: render with WebGPU where the browser has it (else WebGL2).
+    /// Read once at startup; the settings window reloads on a change.
+    webgpu: bool,
 }
 
 impl Settings {
@@ -399,13 +408,18 @@ impl Settings {
             analyzer: true,
             blur: 12.0,
             lock_fps: 30,
+            webgpu: true,
         }
     }
 
     fn encode(&self) -> String {
         format!(
-            "random={};analyzer={};blur_px={};lock_fps={}",
-            self.random_example as u8, self.analyzer as u8, self.blur, self.lock_fps
+            "random={};analyzer={};blur_px={};lock_fps={};webgpu={}",
+            self.random_example as u8,
+            self.analyzer as u8,
+            self.blur,
+            self.lock_fps,
+            self.webgpu as u8
         )
     }
 
@@ -415,6 +429,7 @@ impl Settings {
             match part.split_once('=') {
                 Some(("random", r)) => out.random_example = r == "1",
                 Some(("analyzer", a)) => out.analyzer = a == "1",
+                Some(("webgpu", w)) => out.webgpu = w == "1",
                 Some(("lock_fps", f)) => {
                     if let Ok(f) = f.parse::<u32>() {
                         out.lock_fps = f.min(240);
@@ -842,8 +857,50 @@ struct UiParams<'w, 's> {
     heat: ResMut<'w, heatmap::Heat>,
     graph: ResMut<'w, graph::GraphView>,
     shared: ResMut<'w, share::Shared>,
+    /// Which GPU backend renders (shown in the settings window).
+    adapter: Option<Res<'w, bevy::render::renderer::RenderAdapterInfo>>,
     /// egui's id for the blurred image, registered on the first frame.
     blur_texture: Local<'s, Option<egui::TextureId>>,
+}
+
+/// The settings window's renderer line: the backend in use and, on the
+/// web, the WebGPU switch. Switching saves the setting and reloads the page,
+/// since the backend is chosen once at startup.
+#[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+fn renderer_settings(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    adapter: Option<&bevy::render::renderer::RenderAdapterInfo>,
+    doc: &ShaderDoc,
+    tweaks: &Tweaks,
+) {
+    let backend = adapter.map_or("…".to_string(), |a| format!("{:?}", a.backend));
+    ui.label(format!("renderer: {backend}"))
+        .on_hover_text("Compute passes need WebGPU, Vulkan, Metal or DX12");
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut webgpu = settings.webgpu;
+        ui.checkbox(&mut webgpu, "use WebGPU where the browser has it")
+            .on_hover_text(
+                "Off: WebGL2 even where WebGPU works (no compute passes). Reloads the \
+                 page; the document is kept",
+            );
+        if webgpu != settings.webgpu {
+            settings.webgpu = webgpu;
+            persist::save_settings(&settings.encode());
+            // A document that is not the saved one (a share link opened and
+            // not edited) comes back through the URL, like a share link,
+            // without replacing the saved work.
+            let text = tweak::written_back(
+                &doc.text,
+                &tweaks.constants,
+                &tweaks.values.map(|v| v.to_array()),
+                tweaks.dirty,
+            );
+            let saved = persist::load_doc();
+            persist::reload((saved.as_deref() != Some(&text)).then(|| share::fragment(&text)));
+        }
+    }
 }
 
 /// Keep wgsl-analyzer (live diagnostics) in sync with the document and the
@@ -1306,6 +1363,8 @@ fn ui(mut p: UiParams) {
                 .on_hover_text(
                     "How far the shader behind the UI is blurred (Gaussian sigma); 0 turns the glass off",
                 );
+                ui.separator();
+                renderer_settings(ui, &mut p.settings, p.adapter.as_deref(), &p.doc, &p.tweaks);
                 ui.separator();
                 ui.weak("Ctrl+S saves · Ctrl+O opens a .wesl file");
                 let after = (
