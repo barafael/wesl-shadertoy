@@ -157,6 +157,7 @@ fn run(backends: Option<bevy::render::settings::Backends>) {
                 autosave,
                 browser::update_previews,
                 evolve::update_previews.after(browser::update_previews),
+                evolve::cover_canvas,
                 graph::update_thumbnails.after(browser::update_previews),
             ),
         )

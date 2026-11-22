@@ -663,6 +663,15 @@ impl MainPassTarget<'_> {
         }
     }
 
+    /// The size of [`Self::view`]'s target, given the view's.
+    pub fn size(&self, view_size: UVec2) -> UVec2 {
+        if self.redirected() {
+            self.image.size
+        } else {
+            view_size
+        }
+    }
+
     pub fn view<'a>(&'a self, view_destination: &'a TextureView) -> &'a TextureView {
         if self.redirected() {
             &self.image.view

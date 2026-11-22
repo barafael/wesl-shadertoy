@@ -294,6 +294,7 @@ pub struct BufferPassParams<'w> {
     data_uniforms: Res<'w, ComponentUniforms<ShaderToyUniform>>,
     render_device: Res<'w, RenderDevice>,
     playback: Res<'w, Playback>,
+    covered: Res<'w, super::CanvasCovered>,
     channels: ResMut<'w, ChannelViews>,
     targets: ResMut<'w, BufferTargets>,
     pipelines: ResMut<'w, BufferPipelines>,
@@ -334,9 +335,9 @@ pub fn shadertoy_buffer_pass(
             *slot = dummy.clone();
         }
     }
-    // Paused: keep the last results on show (a fresh reset still renders
-    // once, so the channels never show freed textures).
-    if p.playback.paused && !fresh {
+    // Paused or covered: keep the last results on show (a fresh reset
+    // still renders once, so the channels never show freed textures).
+    if (p.playback.paused || p.covered.0) && !fresh {
         return;
     }
     p.targets.advance();

@@ -126,5 +126,6 @@ pub fn ui_melt_pass(
         post_process.source,
         Some(post_process.source),
         post_process.destination,
+        None,
     );
 }

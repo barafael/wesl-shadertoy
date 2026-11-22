@@ -14,7 +14,7 @@ use bevy::ecs::component::Component;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::math::Vec4;
 use bevy::render::extract_component::ExtractComponent;
-use bevy::render::extract_resource::ExtractResourcePlugin;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::ShaderType;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
@@ -80,6 +80,14 @@ pub fn uniform_bytes(uniform: &ShaderToyUniform) -> Vec<u8> {
     buffer.into_inner()
 }
 
+/// Whether something opaque covers the canvas (Evolve's grid): the main
+/// shader then draws only the strips under the toolbar and status bar,
+/// whose frosted glass shows it blurred, and its buffer and compute passes
+/// hold still as if paused.
+#[derive(bevy::ecs::resource::Resource, ExtractResource, Clone, Copy, Default, PartialEq, Eq)]
+#[extract_app(RenderApp)]
+pub struct CanvasCovered(pub bool);
+
 impl FullscreenMaterial for ShaderToyUniform {
     // Runs in Core3d post-process; with an empty scene the fullscreen triangle
     // simply shades the cleared view target.
@@ -88,6 +96,10 @@ impl FullscreenMaterial for ShaderToyUniform {
     /// rendered by [`super::buffers::shadertoy_buffer_pass`] instead.
     fn fragment_entry_point() -> Option<&'static str> {
         Some(crate::compile::MAIN_ENTRY)
+    }
+
+    fn overlay_rows(&self) -> [f32; 2] {
+        [self.overlay_top, self.overlay_bottom]
     }
 }
 
@@ -104,11 +116,13 @@ impl Plugin for ShaderToyRenderPlugin {
             ExtractResourcePlugin::<blur::Blur>::default(),
             ExtractResourcePlugin::<previews::PreviewJobs>::default(),
             ExtractResourcePlugin::<crate::ui_texture::UiTexture>::default(),
+            ExtractResourcePlugin::<CanvasCovered>::default(),
         ));
         // Feedback channels, shared (not extracted) by both worlds.
         let feedback = active::ShaderFeedback::default();
         let preview_feedback = previews::PreviewFeedback::default();
         app.init_resource::<active::Playback>()
+            .init_resource::<CanvasCovered>()
             .init_resource::<compute::GpuCompute>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .init_resource::<previews::PreviewJobs>()
@@ -133,6 +147,7 @@ impl Plugin for ShaderToyRenderPlugin {
             .init_resource::<buffers::BufferTargets>()
             .init_resource::<buffers::BufferPipelines>()
             .init_resource::<compute::MainStorage>()
+            .init_resource::<CanvasCovered>()
             .init_resource::<compute::ComputePipelines>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .init_resource::<crate::ui_texture::UiTexture>()

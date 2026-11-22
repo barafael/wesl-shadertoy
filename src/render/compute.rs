@@ -281,6 +281,7 @@ pub struct ComputePassParams<'w> {
     data_uniforms: Res<'w, ComponentUniforms<ShaderToyUniform>>,
     render_device: Res<'w, RenderDevice>,
     playback: Res<'w, Playback>,
+    covered: Res<'w, super::CanvasCovered>,
     channels: Res<'w, ChannelViews>,
     storage: ResMut<'w, MainStorage>,
     pipelines: ResMut<'w, ComputePipelines>,
@@ -320,8 +321,9 @@ pub fn shadertoy_compute_pass(
         .bind_group(device, &cache.get_bind_group_layout(layout), dummy);
     p.storage.bind_group = Some(storage.clone());
 
-    // Paused: hold still (a fresh start still runs once, to initialise).
-    if compute.mask() == 0 || (p.playback.paused && !fresh) {
+    // Paused or covered: hold still (a fresh start still runs once, to
+    // initialise).
+    if compute.mask() == 0 || ((p.playback.paused || p.covered.0) && !fresh) {
         return;
     }
     let ids = p.pipelines.ids_for(

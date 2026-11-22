@@ -38,6 +38,7 @@ use bevy::ecs::error::BevyError;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::{IntoScheduleConfigs, ScheduleConfigs, ScheduleLabel};
 use bevy::ecs::system::{BoxedSystem, Commands, Local, Res, SystemParam};
+use bevy::math::UVec2;
 use bevy::platform::collections::HashMap;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{
@@ -132,6 +133,12 @@ pub trait FullscreenMaterial:
     /// `None` lets wgpu pick the module's only entry point.
     fn fragment_entry_point() -> Option<&'static str> {
         None
+    }
+
+    /// Physical pixel rows at the top and bottom of the view that stay
+    /// visible while [`super::CanvasCovered`] (wesl-shadertoy addition).
+    fn overlay_rows(&self) -> [f32; 2] {
+        [0.0, 0.0]
     }
 }
 
@@ -410,6 +417,7 @@ type MaterialView<'w, 's, T> = ViewQuery<
         &'static ViewTarget,
         &'static DynamicUniformIndex<T>,
         &'static FullscreenMaterialPipelineId<T>,
+        &'static T,
     ),
 >;
 
@@ -435,7 +443,9 @@ impl<T: FullscreenMaterial> MainPassParams<'_, T> {
 
     /// Record the main pass of `pipeline_id` into `destination`, reading
     /// `source` at binding 0 and `ui` as `i_ui` (the transparent dummy for
-    /// `None`). Does nothing while the pipeline is still compiling.
+    /// `None`). With `strips` (`[top, bottom]` rows of a `size` target), only
+    /// those rows are shaded. Does nothing while the pipeline is still
+    /// compiling.
     #[allow(clippy::too_many_arguments)] // one pass, described in full
     pub fn draw(
         &self,
@@ -446,6 +456,7 @@ impl<T: FullscreenMaterial> MainPassParams<'_, T> {
         source: &TextureView,
         ui: Option<&TextureView>,
         destination: &TextureView,
+        strips: Option<([u32; 2], UVec2)>,
     ) {
         let Some(pipeline) = self.pipeline_cache.get_render_pipeline(pipeline_id) else {
             return;
@@ -494,7 +505,18 @@ impl<T: FullscreenMaterial> MainPassParams<'_, T> {
         if let Some(storage) = storage {
             render_pass.set_bind_group(1, storage, &[]);
         }
-        render_pass.draw(0..3, 0..1);
+        match strips {
+            None => render_pass.draw(0..3, 0..1),
+            Some(([top, bottom], size)) => {
+                let (top, bottom) = (top.min(size.y), bottom.min(size.y));
+                for (y, height) in [(0, top), (size.y - bottom, bottom)] {
+                    if height > 0 && size.x > 0 {
+                        render_pass.set_scissor_rect(0, y, size.x, height);
+                        render_pass.draw(0..3, 0..1);
+                    }
+                }
+            }
+        }
         pass_span.end(&mut render_pass);
     }
 }
@@ -508,13 +530,14 @@ pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
     p: MainPassParams<T>,
     ui_texture: Res<crate::ui_texture::UiTexture>,
     target: crate::debugger::MainPassTarget,
+    covered: Res<super::CanvasCovered>,
     mut ctx: RenderContext,
     mut pass_label: Local<String>,
 ) {
     if ui_texture.on {
         return;
     }
-    let (view_target, settings_index, pipeline_id) = view.into_inner();
+    let (view_target, settings_index, pipeline_id, material) = view.into_inner();
     if !p.ready(pipeline_id.0) {
         return;
     }
@@ -523,6 +546,12 @@ pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
     // While the debugger is on, render into its offscreen image target;
     // `debugger_blit_pass` then draws it plus the overlay to the view.
     let destination = target.view(post_process.destination);
+    // Under a covered canvas only the strips the glass blurs are shaded.
+    let strips = covered.0.then(|| {
+        let size = post_process.destination_texture.size();
+        let size = target.size(UVec2::new(size.width, size.height));
+        (material.overlay_rows().map(|r| r.ceil() as u32), size)
+    });
 
     if pass_label.is_empty() {
         *pass_label = format!("fullscreen_material_pass<{}>", type_name::<T>());
@@ -535,5 +564,6 @@ pub fn fullscreen_material_system<'w, 's, T: FullscreenMaterial>(
         post_process.source,
         None,
         destination,
+        strips,
     );
 }

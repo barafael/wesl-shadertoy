@@ -22,7 +22,7 @@ use bevy_egui::{EguiContexts, egui};
 use crate::render::previews::{
     PREVIEW_FORMAT, PreviewFeedback, PreviewJob, PreviewJobs, PreviewKey,
 };
-use crate::render::{ShaderToyFragment, ShaderToyUniform};
+use crate::render::{CanvasCovered, ShaderToyFragment, ShaderToyUniform};
 use crate::tweak::{Constant, Hint, Kind, MAX_TWEAKS};
 
 /// Tweak values, slot = index (like [`crate::Tweaks::values`]).
@@ -260,6 +260,12 @@ impl Rng {
         let sum: f32 = (0..4).map(|_| self.unit()).sum();
         (sum - 2.0) * 3f32.sqrt()
     }
+}
+
+/// While the grid is up it hides the canvas, so the main shader only needs
+/// to feed the toolbar's and status bar's frosted glass ([`CanvasCovered`]).
+pub fn cover_canvas(evolve: Res<Evolve>, mut covered: ResMut<CanvasCovered>) {
+    covered.set_if_neq(CanvasCovered(evolve.on));
 }
 
 /// Allocate the cells' images at the size the grid was laid out with and
