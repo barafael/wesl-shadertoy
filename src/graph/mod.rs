@@ -117,18 +117,24 @@ struct Built {
 }
 
 /// A thumbnail's shader: the compile with `main_image` returning one `let`.
+/// Not validated until it is loaded ([`update_thumbnails`]): a compile with
+/// the Graph open would otherwise validate the whole shader once more per
+/// thumbnail, all in one frame.
 struct Variant {
+    /// The `let` it shows.
+    name: String,
     wgsl: String,
     /// Of `wgsl`, so a slot can tell cheaply whether it holds this variant.
     hash: u64,
 }
 
 impl Variant {
-    fn new(wgsl: String) -> Self {
+    fn new(name: String, wgsl: String) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::hash::DefaultHasher::new();
         wgsl.hash(&mut hasher);
         Self {
+            name,
             hash: hasher.finish(),
             wgsl,
         }
@@ -227,7 +233,7 @@ fn build(
                 && let Some(variant) = thumbnail_variant(wgsl, module, info, *handle, expr)
             {
                 built.thumbs[i] = Some(built.variants.len());
-                built.variants.push(Some(Variant::new(variant)));
+                built.variants.push(Some(variant));
             }
         }
     }
@@ -270,15 +276,16 @@ fn reachable_from_arguments(graph: &Graph) -> Vec<bool> {
 
 /// The composed shader, changed so that `main_image` returns the value of
 /// the named `let` `expr` (as a color) right after declaring it. `None`
-/// for values with no sensible color (structs, arrays, matrices) or if the
-/// rewrite does not validate.
+/// for values with no sensible color (structs, arrays, matrices). Not yet
+/// validated: the early return can break uniformity rules (a derivative
+/// after it), which [`update_thumbnails`] checks before loading it.
 fn thumbnail_variant(
     wgsl: &str,
     module: &naga::Module,
     info: &naga::valid::ModuleInfo,
     function: naga::Handle<naga::Function>,
     expr: naga::Handle<naga::Expression>,
-) -> Option<String> {
+) -> Option<Variant> {
     let func = &module.functions[function];
     let name = func.named_expressions.get(&expr)?;
     // The span covers the initializer; the declaration ends at the next `;`
@@ -314,13 +321,7 @@ fn thumbnail_variant(
         &wgsl[..at],
         &wgsl[at..]
     );
-    match parse(&variant) {
-        Ok(_) => Some(variant),
-        Err(e) => {
-            warn!("no thumbnail for `{name}`: {e}");
-            None
-        }
-    }
+    Some(Variant::new(name.clone(), variant))
 }
 
 /// Appended to every thumbnail variant: scalars as a diverging palette,
@@ -641,7 +642,9 @@ pub fn update_thumbnails(
     if !std::mem::take(&mut view.shown) {
         return;
     }
-    let Some(built) = &view.built else { return };
+    let Some(built) = view.built.as_mut() else {
+        return;
+    };
     let wanted = built.variants.len();
     while view.slots.len() < wanted {
         let image = images.add(Image::new_target_texture(
@@ -667,22 +670,32 @@ pub fn update_thumbnails(
     let holds = |slot: &Slot, variant: &Option<Variant>| {
         variant.as_ref().is_some_and(|v| slot.holds == Some(v.hash))
     };
-    // Load at most one changed variant per frame: each is a pipeline build.
-    if let Some((k, Some(variant))) = built
-        .variants
-        .iter()
-        .enumerate()
-        .find(|(k, v)| v.is_some() && !holds(&view.slots[*k], v))
-    {
-        let slot = &mut view.slots[k];
-        let path = format!("shadertoy://graph/{k}");
-        shaders
-            .insert(&slot.shader, Shader::from_wgsl(variant.wgsl.clone(), path))
-            .expect("slot handles stay valid");
-        slot.buffers = built.buffers;
-        slot.compute = built.compute;
-        slot.holds = Some(variant.hash);
-        slot.generation += 1;
+    // Load at most one changed variant per frame: each is a validation and
+    // a pipeline build. One that does not validate is dropped (its node
+    // keeps an empty thumbnail box).
+    let next = (0..wanted).find(|&k| {
+        let v = &built.variants[k];
+        v.is_some() && !holds(&view.slots[k], v)
+    });
+    if let Some(k) = next {
+        let variant = built.variants[k].as_ref().expect("found above");
+        match parse(&variant.wgsl) {
+            Err(e) => {
+                warn!("no thumbnail for `{}`: {e}", variant.name);
+                built.variants[k] = None;
+            }
+            Ok(_) => {
+                let slot = &mut view.slots[k];
+                let path = format!("shadertoy://graph/{k}");
+                shaders
+                    .insert(&slot.shader, Shader::from_wgsl(variant.wgsl.clone(), path))
+                    .expect("slot handles stay valid");
+                slot.buffers = built.buffers;
+                slot.compute = built.compute;
+                slot.holds = Some(variant.hash);
+                slot.generation += 1;
+            }
+        }
     }
 
     let ready: Vec<usize> = (0..wanted)
@@ -812,7 +825,7 @@ mod tests {
     }
 
     /// Every example's `main_image` gets a graph, and every thumbnail
-    /// variant that is offered validates (checked inside).
+    /// variant it offers validates (else its box would stay empty).
     #[test]
     fn every_example_builds_a_graph() {
         for example in crate::examples::ALL {
@@ -825,6 +838,11 @@ mod tests {
                 let built = view.built.as_ref().unwrap();
                 assert!(built.result.is_ok(), "{}", example.name);
                 assert!(built.variants.len() <= MAX_THUMBS);
+                for v in built.variants.iter().flatten() {
+                    if let Err(e) = parse(&v.wgsl) {
+                        panic!("{}: `{}` does not validate: {e}", example.name, v.name);
+                    }
+                }
             }
         }
     }
