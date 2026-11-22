@@ -20,7 +20,9 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use bevy::log::{debug, info, warn};
+use bevy::platform::time::Instant;
 use bevy::prelude::Resource;
+use core::time::Duration;
 use serde_json::{Value, json};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -235,6 +237,11 @@ fn remap(diagnostics: &mut Vec<Diagnostic>, old: &str, new: &str) {
     });
 }
 
+/// How long the text must rest before an edit goes to the server: typing
+/// sends once per pause, not once per keystroke (each send is a full-text
+/// change the server analyzes from scratch).
+const DEBOUNCE: Duration = Duration::from_millis(150);
+
 /// The LSP client: initialize handshake, full-text document sync, and
 /// `publishDiagnostics` for the editor document. Anything else the server
 /// asks for gets an empty answer, so it never waits on us.
@@ -247,6 +254,12 @@ struct Client<L> {
     /// Version and text of the document as the server has it.
     version: i32,
     synced: Option<String>,
+    /// The text the diagnostics' ranges refer to: the editor's latest, so
+    /// marks follow edits at once, before the server sees them.
+    seen: Option<String>,
+    /// When `seen` last changed, for [`DEBOUNCE`].
+    changed: Option<Instant>,
+    debounce: Duration,
 }
 
 impl<L: Link> Client<L> {
@@ -258,11 +271,24 @@ impl<L: Link> Client<L> {
             initialized: false,
             version: 0,
             synced: None,
+            seen: None,
+            changed: None,
+            debounce: DEBOUNCE,
         }
     }
 
     /// Returns whether the server is initialized; `Err` when it is gone.
     fn step(&mut self, text: &str, diagnostics: &mut Vec<Diagnostic>) -> Result<bool, String> {
+        self.step_at(text, diagnostics, Instant::now())
+    }
+
+    /// [`Self::step`] at time `now`.
+    fn step_at(
+        &mut self,
+        text: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+        now: Instant,
+    ) -> Result<bool, String> {
         match self.link.state() {
             LinkState::Starting => return Ok(false),
             LinkState::Failed(why) => return Err(why),
@@ -292,15 +318,26 @@ impl<L: Link> Client<L> {
         for message in self.link.recv() {
             self.handle(message, diagnostics)?;
         }
-        if self.initialized && self.synced.as_deref() != Some(text) {
+        if !self.initialized {
+            return Ok(false);
+        }
+        if self.seen.as_deref() != Some(text) {
             // Until the server reports on the new text, keep the old marks
             // on the characters they were about, not on the same indices.
-            if let Some(old) = &self.synced {
+            if let Some(old) = &self.seen {
                 remap(diagnostics, old, text);
             }
+            self.seen = Some(text.to_owned());
+            self.changed = Some(now);
+        }
+        // The document opens at once; edits go out once typing pauses.
+        let settled = self
+            .changed
+            .is_none_or(|at| now.saturating_duration_since(at) >= self.debounce);
+        if self.synced.as_deref() != Some(text) && (self.synced.is_none() || settled) {
             self.sync(text);
         }
-        Ok(self.initialized)
+        Ok(true)
     }
 
     fn handle(&mut self, message: Value, diagnostics: &mut Vec<Diagnostic>) -> Result<(), String> {
@@ -344,6 +381,10 @@ impl<L: Link> Client<L> {
                         .as_array()
                         .map(|list| list.iter().filter_map(|d| convert(text, d)).collect())
                         .unwrap_or_default();
+                    // Typed since it was sent: carry the marks along.
+                    if let Some(seen) = self.seen.as_deref().filter(|s| *s != text) {
+                        remap(diagnostics, text, seen);
+                    }
                 }
             }
             (None, Some(method)) => debug!("wgsl-analyzer: {method} {}", message["params"]),
@@ -581,6 +622,7 @@ mod tests {
     #[test]
     fn handshake_sync_and_diagnostics() {
         let mut client = Client::new(Fake::default());
+        client.debounce = Duration::ZERO;
         let mut diags = Vec::new();
         let text = "let a = 1;\n// — é\nlet b: u32 = 1.0;\n";
 
@@ -650,6 +692,70 @@ mod tests {
             "unchanged text is not resent"
         );
         assert_eq!(diags[0].range, 31..34, "stale report applied");
+    }
+
+    /// Edits wait for a pause in typing; the marks follow them meanwhile,
+    /// and a report on the text sent lands on the text shown.
+    #[test]
+    fn edits_are_debounced() {
+        let mut client = Client::new(Fake::default());
+        let mut diags = Vec::new();
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let text = "let a = 1.0;\n";
+        client.step_at(text, &mut diags, t0).unwrap();
+        let init_id = client.link.sent[0]["id"].clone();
+        client
+            .link
+            .inbox
+            .push_back(json!({ "jsonrpc": "2.0", "id": init_id, "result": {} }));
+        client.step_at(text, &mut diags, ms(1)).unwrap();
+        assert_eq!(
+            methods(&client.link.sent).last(),
+            Some(&"textDocument/didOpen")
+        );
+
+        // Three keystrokes in quick succession: nothing sent yet.
+        let sent = client.link.sent.len();
+        for (i, typed) in ["// x\nlet a = 1.0;\n", "// xy\nlet a = 1.0;\n"]
+            .iter()
+            .enumerate()
+        {
+            client
+                .step_at(typed, &mut diags, ms(10 + 50 * i as u64))
+                .unwrap();
+        }
+        let typed = "// xyz\nlet a = 1.0;\n";
+        client.step_at(typed, &mut diags, ms(110)).unwrap();
+        assert_eq!(client.link.sent.len(), sent, "sent while typing");
+
+        // The server reports on version 1 (`1.0` at line 0, 8..11) now: the
+        // mark lands where `1.0` is in the text shown.
+        client.link.inbox.push_back(json!({
+            "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+                "uri": "file:///ws/shaders/user.wesl", "version": 1, "diagnostics": [{
+                    "range": { "start": { "line": 0, "character": 8 },
+                               "end": { "line": 0, "character": 11 } },
+                    "severity": 1, "message": "f32",
+                }],
+            },
+        }));
+        client.step_at(typed, &mut diags, ms(200)).unwrap();
+        assert_eq!(
+            client.link.sent.len(),
+            sent,
+            "sent before the pause was long"
+        );
+        let shown: Vec<char> = typed.chars().collect();
+        let r = diags[0].range.clone();
+        assert_eq!(shown[r].iter().collect::<String>(), "1.0");
+
+        // 150 ms after the last keystroke it goes out, once.
+        client.step_at(typed, &mut diags, ms(260)).unwrap();
+        client.step_at(typed, &mut diags, ms(300)).unwrap();
+        let changes: Vec<_> = client.link.sent[sent..].iter().collect();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["params"]["contentChanges"][0]["text"], typed);
     }
 
     #[test]
