@@ -8,7 +8,7 @@
 
 use bevy_egui::egui::Color32;
 use bevy_egui::egui::FontId;
-use bevy_egui::egui::text::{LayoutJob, TextFormat};
+use bevy_egui::egui::text::{ByteIndex, LayoutJob, TextFormat};
 
 use crate::theme::Syntax;
 
@@ -222,18 +222,28 @@ struct Token {
     kind: Kind,
 }
 
+/// Every word of the lists above with its kind, the first list winning, as
+/// `classify_word` checked them in order (one hash lookup per identifier
+/// instead of scanning ~150 words).
+static WORD_KINDS: std::sync::LazyLock<std::collections::HashMap<&'static str, Kind>> =
+    std::sync::LazyLock::new(|| {
+        let mut kinds = std::collections::HashMap::new();
+        let lists = [
+            (KEYWORDS, Kind::Keyword),
+            (IMPORT_KEYWORDS, Kind::Import),
+            (TYPES, Kind::Type),
+            (BUILTINS, Kind::Builtin),
+        ];
+        for (words, kind) in lists {
+            for &word in words {
+                kinds.entry(word).or_insert(kind);
+            }
+        }
+        kinds
+    });
+
 fn classify_word(word: &str) -> Kind {
-    if KEYWORDS.contains(&word) {
-        Kind::Keyword
-    } else if IMPORT_KEYWORDS.contains(&word) {
-        Kind::Import
-    } else if TYPES.contains(&word) {
-        Kind::Type
-    } else if BUILTINS.contains(&word) {
-        Kind::Builtin
-    } else {
-        Kind::Default
-    }
+    WORD_KINDS.get(word).copied().unwrap_or(Kind::Default)
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -388,12 +398,24 @@ pub fn highlight_job(
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     for token in tokenize(src) {
+        let color = token.kind.color(default_color, pal);
+        // Neighbours of the same color (an identifier and the punctuation
+        // after it) share one section: egui clones and hashes the whole job
+        // every frame, so fewer sections is cheaper on every frame, not
+        // only when the text changes.
+        if let Some(last) = job.sections.last_mut()
+            && last.format.color == color
+        {
+            job.text.push_str(&src[token.range]);
+            last.byte_range.end = ByteIndex(job.text.len());
+            continue;
+        }
         job.append(
             &src[token.range],
             0.0,
             TextFormat {
                 font_id: font_id.clone(),
-                color: token.kind.color(default_color, pal),
+                color,
                 ..Default::default()
             },
         );

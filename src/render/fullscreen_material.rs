@@ -230,11 +230,12 @@ impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
         shader: &Handle<Shader>,
         target_format: TextureFormat,
     ) -> Result<CachedRenderPipelineId, BevyError> {
-        let layout = self.layouts();
-        let variants = self.variants.entry(shader.id()).or_insert_with(|| {
+        // Called per view and per thumbnail every frame: build the layout
+        // list only for a handle seen for the first time.
+        if !self.variants.contains_key(&shader.id()) {
             let desc = RenderPipelineDescriptor {
                 label: Some(format!("fullscreen_material_pipeline<{}>", type_name::<T>()).into()),
-                layout,
+                layout: self.layouts(),
                 vertex: self.vertex.clone(),
                 fragment: Some(FragmentState {
                     shader: shader.clone(),
@@ -248,8 +249,12 @@ impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
                 }),
                 ..Default::default()
             };
-            Variants::new(FullscreenMaterialPipelineSpecializer, desc)
-        });
+            self.variants.insert(
+                shader.id(),
+                Variants::new(FullscreenMaterialPipelineSpecializer, desc),
+            );
+        }
+        let variants = self.variants.get_mut(&shader.id()).expect("inserted above");
         variants.specialize(
             pipeline_cache,
             FullscreenMaterialPipelineKey { target_format },

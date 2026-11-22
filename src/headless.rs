@@ -865,10 +865,11 @@ impl Renderer {
                 pass.draw(0..3, 0..1);
             }
 
+            // No wait per frame: the queue runs submissions (and the
+            // uniform write before each) in order, and `read` waits once
+            // for all of them. Drag renders 1 + 2 per constant frames per
+            // estimate, each of which used to block here and again there.
             self.queue.submit(std::iter::once(encoder.finish()));
-            self.device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }

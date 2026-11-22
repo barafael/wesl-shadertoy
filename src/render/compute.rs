@@ -75,6 +75,9 @@ type StorageKey = ([Option<StorageSize>; STORAGE_SLOTS], UVec2, (u32, u32));
 pub(crate) struct StorageBuffers {
     key: Option<StorageKey>,
     buffers: [Option<Buffer>; STORAGE_SLOTS],
+    /// The storage group over `buffers`, built on first use after they
+    /// change (the layout and the dummy never do).
+    bind_group: Option<BindGroup>,
 }
 
 impl StorageBuffers {
@@ -100,6 +103,7 @@ impl StorageBuffers {
             return false;
         }
         self.key = Some(key);
+        self.bind_group = None;
         let max = device.limits().max_storage_buffer_binding_size;
         self.buffers = std::array::from_fn(|i| {
             let bytes = storage[i]?.bytes(size.x, size.y);
@@ -128,23 +132,25 @@ impl StorageBuffers {
     }
 
     /// The storage group, with `dummy` in the slots the shader leaves empty.
+    /// Built once per [`Self::prepare`] that (re)creates the buffers, not
+    /// every frame.
     pub fn bind_group(
-        &self,
+        &mut self,
         device: &RenderDevice,
         layout: &BindGroupLayout,
         dummy: &Buffer,
     ) -> BindGroup {
-        let slot = |i: usize| {
-            self.buffers[i]
-                .as_ref()
-                .unwrap_or(dummy)
-                .as_entire_binding()
-        };
-        device.create_bind_group(
-            "shadertoy_storage_bind_group",
-            layout,
-            &BindGroupEntries::sequential((slot(0), slot(1), slot(2), slot(3))),
-        )
+        let buffers = &self.buffers;
+        self.bind_group
+            .get_or_insert_with(|| {
+                let slot = |i: usize| buffers[i].as_ref().unwrap_or(dummy).as_entire_binding();
+                device.create_bind_group(
+                    "shadertoy_storage_bind_group",
+                    layout,
+                    &BindGroupEntries::sequential((slot(0), slot(1), slot(2), slot(3))),
+                )
+            })
+            .clone()
     }
 }
 

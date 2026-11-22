@@ -222,6 +222,8 @@ struct CurrentShader {
     generation: u32,
     /// Its composed WGSL, for the WGSL window.
     wgsl: String,
+    /// Whether it reads `i_ui` ([`ui_texture::uses_ui`]), for the toolbar.
+    uses_ui: bool,
     /// Its buffer passes, bit per pass, and its compute passes and storage
     /// (for the Graph's thumbnails).
     buffers: u8,
@@ -693,6 +695,7 @@ fn compile_and_apply(mut p: CompileParams) {
                 .insert(&handle, Shader::from_wgsl(compiled.wgsl.clone(), path))
                 .expect("slot handles stay valid");
             p.current.generation += 1;
+            p.current.uses_ui = ui_texture::uses_ui(&compiled.wgsl);
             p.current.wgsl = compiled.wgsl;
             p.current.buffers = compiled.buffers;
             p.current.compute = compiled.compute;
@@ -820,6 +823,11 @@ fn from_app_pass(description: &str) -> bool {
 /// saves). Comparing against the last saved text is cheap next to a frame
 /// and catches every path that changes the document.
 fn autosave(doc: Res<ShaderDoc>, mut saved: Local<Option<String>>) {
+    // Natively `save_doc` does nothing: skip the compare and the copy of
+    // the document on every edit.
+    if cfg!(not(target_arch = "wasm32")) {
+        return;
+    }
     match saved.as_deref() {
         // The startup document (an example or the restored save) is not an edit.
         None => *saved = Some(doc.text.clone()),
@@ -1100,7 +1108,7 @@ fn ui(mut p: UiParams) {
             drag::toggle(ui, &mut p.drag);
             ui.toggle_value(&mut p.state.debugger, icon(lucide_icons::Icon::Bug))
                 .on_hover_text("In-shader debugger: crosshair, probe boxes, fps");
-            ui_texture::toolbar_toggle(ui, &mut p.ui_texture, &p.current.wgsl);
+            ui_texture::toolbar_toggle(ui, &mut p.ui_texture, p.current.uses_ui);
             if ui
                 .toggle_value(&mut p.heat.on, icon(lucide_icons::Icon::Flame))
                 .on_hover_text("Cost heatmap: loop iterations per pixel")

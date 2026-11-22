@@ -72,10 +72,10 @@ pub fn uses_ui(wgsl: &str) -> bool {
     wgsl.contains(&format!("@binding({UI_BINDING})"))
 }
 
-/// The toolbar toggle. `wgsl` is the latest compile: a shader that does not
+/// The toolbar toggle. `usable` is [`uses_ui`] of the latest compile
+/// (worked out once per compile, not per frame): a shader that does not
 /// read `i_ui` cannot switch the mode on, and switches it off.
-pub fn toolbar_toggle(ui: &mut egui::Ui, ui_texture: &mut UiTexture, wgsl: &str) {
-    let usable = uses_ui(wgsl);
+pub fn toolbar_toggle(ui: &mut egui::Ui, ui_texture: &mut UiTexture, usable: bool) {
     if !usable && ui_texture.on {
         ui_texture.on = false;
     }
@@ -149,7 +149,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         let wgsl = format!("@group(0) @binding({UI_BINDING}) var i_ui: texture_2d<f32>;");
         let frame = |state: &mut UiTexture, wgsl: &str| {
             ctx.run_ui(egui::RawInput::default(), |ui| {
-                toolbar_toggle(ui, state, wgsl);
+                toolbar_toggle(ui, state, uses_ui(wgsl));
             })
             .drop_without_applying_deltas();
         };

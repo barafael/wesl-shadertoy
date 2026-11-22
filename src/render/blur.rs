@@ -78,10 +78,9 @@ fn gaussian(uv: vec2<f32>, direction: vec2<f32>) -> vec4<f32> {
     let step = direction / vec2<f32>(textureDimensions(src));
     var sum = vec3<f32>(0.);
     var weights = 0.;
-    for (var i = -MAX_RADIUS; i <= MAX_RADIUS; i = i + 1) {
-        if (abs(i) > radius) {
-            continue;
-        }
+    // Only the taps within `radius` (uniform across the draw), not all
+    // 2 * MAX_RADIUS + 1 of them with most skipped.
+    for (var i = -radius; i <= radius; i = i + 1) {
         let x = f32(i);
         let w = exp(-x * x / (2. * sigma * sigma));
         sum = sum + w * textureSampleLevel(src, src_sampler, uv + x * step, 0.).rgb;
@@ -278,8 +277,12 @@ pub fn blur_pass(view: BlurView<'_, '_>, mut p: BlurParams, mut ctx: RenderConte
         p.res.scratch = Some((size, texture, view));
     }
     let sigma = (p.blur.sigma / DOWNSCALE as f32).min(MAX_SIGMA);
-    p.res.params.set(Vec4::new(sigma, 0.0, 0.0, 0.0));
-    p.res.params.write_buffer(&p.device, &p.queue);
+    // Uploaded only when the slider moved (or before the first frame).
+    let params = Vec4::new(sigma, 0.0, 0.0, 0.0);
+    if p.res.params.buffer().is_none() || *p.res.params.get() != params {
+        p.res.params.set(params);
+        p.res.params.write_buffer(&p.device, &p.queue);
+    }
     let (Some((_, _, scratch)), Some(params)) = (&p.res.scratch, p.res.params.binding()) else {
         return;
     };

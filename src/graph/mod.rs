@@ -249,12 +249,19 @@ fn reachable_from_arguments(graph: &Graph) -> Vec<bool> {
         .iter()
         .map(|n| n.kind == Kind::Argument)
         .collect();
+    // Successor lists, so the walk is linear in the graph rather than a
+    // scan of every edge per node ("all expressions" graphs run to
+    // thousands of both).
+    let mut succs = vec![Vec::new(); reached.len()];
+    for e in &graph.edges {
+        succs[e.from].push(e.to);
+    }
     let mut stack: Vec<usize> = (0..reached.len()).filter(|&i| reached[i]).collect();
     while let Some(n) = stack.pop() {
-        for e in graph.edges.iter().filter(|e| e.from == n) {
-            if !reached[e.to] {
-                reached[e.to] = true;
-                stack.push(e.to);
+        for &to in &succs[n] {
+            if !reached[to] {
+                reached[to] = true;
+                stack.push(to);
             }
         }
     }
@@ -496,7 +503,7 @@ pub fn show(
         if route.back {
             painter.extend(egui::Shape::dashed_line(&curve, stroke, 6.0, 4.0));
         } else {
-            painter.add(egui::Shape::line(curve.clone(), stroke));
+            painter.add(egui::Shape::line(curve, stroke));
         }
         if let Some(&tip) = points.last() {
             let s = 5.0 * zoom.max(0.4);
@@ -515,6 +522,11 @@ pub fn show(
     let fill = ui.visuals().extreme_bg_color;
     let text_color = ui.visuals().text_color();
     let weak_text = ui.visuals().weak_text_color();
+    // egui rasterizes glyphs per exact font size: scaling the text with
+    // every step of a smooth zoom would fill the font atlas with sizes used
+    // for one frame each and lay every label out anew. Half-point steps
+    // (rounded down, so text never outgrows its box) bound that.
+    let font = egui::FontId::monospace(((FONT * zoom) * 2.0).floor().max(1.0) / 2.0);
     for (i, (node, r)) in graph.nodes.iter().zip(&layout.rects).enumerate() {
         let screen = egui::Rect::from_min_max(to_screen(r.min), to_screen(r.max));
         if !screen.intersects(rect) {
@@ -546,7 +558,7 @@ pub fn show(
                 to_screen(egui::pos2(r.min.x + PAD, y)),
                 egui::Align2::LEFT_TOP,
                 line,
-                egui::FontId::monospace(FONT * zoom),
+                font.clone(),
                 c,
             );
             y += LINE;
