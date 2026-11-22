@@ -5,8 +5,10 @@
 //! into a shader asset of its own and, every frame, lists the cards to draw
 //! as [`PreviewJobs`]: the hovered card plus a few of the visible ones in
 //! turn. [`crate::evolve`] adds its nine variants of the editor's shader.
-//! Here each job runs its shader's buffer passes (A→D, with their own
-//! ping-pong targets per card) and its image pass into the card's image,
+//! Here each job runs its shader's compute passes (with storage buffers of
+//! their own per card, [`super::compute`]), its buffer passes (A→D, with
+//! their own ping-pong targets per card) and its image pass into the card's
+//! image,
 //! which egui shows. The pipelines come from the same caches as the main
 //! shader's, keyed by the shader handle.
 
@@ -22,9 +24,9 @@ use bevy::render::RenderApp;
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
-    BindGroupEntries, CachedRenderPipelineId, CommandEncoderDescriptor, DynamicUniformBuffer,
-    Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor, TextureFormat,
-    TextureView,
+    CachedComputePipelineId, CachedRenderPipelineId, CommandEncoderDescriptor,
+    DynamicUniformBuffer, Operations, PipelineCache, RenderPassColorAttachment,
+    RenderPassDescriptor, TextureFormat, TextureView,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::GpuImage;
@@ -32,6 +34,7 @@ use bevy::shader::Shader;
 
 use super::ShaderToyUniform;
 use super::buffers::{BufferPass, BufferPipelines, BufferTargets};
+use super::compute::{ComputePass, ComputePipelines, StorageBuffers, compute_group0};
 use super::fullscreen_material::{
     ChannelViews, FullscreenMaterialPipeline, FullscreenMaterialPipelineId,
 };
@@ -67,6 +70,8 @@ pub struct PreviewJob {
     pub shader: Handle<Shader>,
     /// Bit per buffer pass the example defines.
     pub buffers: u8,
+    /// Its compute passes and storage buffers.
+    pub compute: crate::compile::Compute,
     /// Its uniforms; `frame` is filled in here, per card.
     pub uniform: ShaderToyUniform,
 }
@@ -166,6 +171,7 @@ struct Card {
     generation: u32,
     targets: BufferTargets,
     channels: Option<[TextureView; 4]>,
+    storage: StorageBuffers,
 }
 
 #[derive(SystemParam)]
@@ -176,6 +182,7 @@ pub struct PreviewParams<'w> {
     pipeline_cache: Res<'w, PipelineCache>,
     fullscreen: ResMut<'w, FullscreenMaterialPipeline<ShaderToyUniform>>,
     buffer_pipelines: ResMut<'w, BufferPipelines>,
+    compute_pipelines: ResMut<'w, ComputePipelines>,
     channels: Res<'w, ChannelViews>,
     images: Res<'w, RenderAssets<GpuImage>>,
     device: Res<'w, RenderDevice>,
@@ -187,6 +194,7 @@ struct Ready<'a> {
     job: &'a PreviewJob,
     main: CachedRenderPipelineId,
     buffers: [Option<CachedRenderPipelineId>; 4],
+    computes: [Option<CachedComputePipelineId>; 4],
     offset: u32,
 }
 
@@ -222,10 +230,20 @@ pub fn preview_pass(
         let buffers = p
             .buffer_pipelines
             .ids_for(cache, &p.fullscreen, &job.shader, job.buffers);
-        let built = std::iter::once(Some(main))
-            .chain(buffers)
-            .flatten()
-            .all(|id| cache.get_render_pipeline(id).is_some());
+        let computes =
+            p.compute_pipelines
+                .ids_for(cache, &p.fullscreen, &job.shader, job.compute.mask());
+        // A shader that needs compute where there is none never builds.
+        let runnable = p.fullscreen.storage.is_some() || !job.compute.is_used();
+        let built = runnable
+            && std::iter::once(Some(main))
+                .chain(buffers)
+                .flatten()
+                .all(|id| cache.get_render_pipeline(id).is_some())
+            && computes
+                .into_iter()
+                .flatten()
+                .all(|id| cache.get_compute_pipeline(id).is_some());
         if !built || p.images.get(job.image).is_none() {
             continue;
         }
@@ -242,6 +260,7 @@ pub fn preview_pass(
             job,
             main,
             buffers,
+            computes,
             offset,
         });
     }
@@ -252,8 +271,12 @@ pub fn preview_pass(
     let Some(uniforms) = state.uniforms.binding() else {
         return;
     };
-    let layout = cache.get_bind_group_layout(&p.fullscreen.layout);
     let dummy = &p.channels.dummy;
+    let storage_layout = p
+        .fullscreen
+        .storage
+        .as_ref()
+        .map(|s| (cache.get_bind_group_layout(&s.layout), &s.dummy));
 
     for r in ready {
         let (Some(image), Some(main)) =
@@ -268,6 +291,43 @@ pub fn preview_pass(
         let label = encoder_label(r.job.card, r.job.generation);
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some(&label),
+        });
+        // Storage and compute passes, like the main view's (but never
+        // paused): fresh with a new generation, and on resize if sized by it.
+        let storage = storage_layout.as_ref().map(|(layout, storage_dummy)| {
+            let fresh = card.storage.prepare(
+                &p.device,
+                &r.job.compute.storage,
+                r.job.size,
+                (r.job.generation, 0),
+            );
+            let group = card.storage.bind_group(&p.device, layout, storage_dummy);
+            if r.job.compute.mask() != 0 {
+                let channels = if fresh {
+                    [dummy; 4]
+                } else {
+                    channels.each_ref()
+                };
+                let group0 = compute_group0(
+                    &p.device,
+                    cache,
+                    &p.fullscreen,
+                    uniforms.clone(),
+                    channels,
+                    dummy,
+                );
+                ComputePass {
+                    pipeline_cache: cache,
+                    ids: r.computes,
+                    compute: &r.job.compute,
+                    size: r.job.size,
+                    group0: &group0,
+                    offset: r.offset,
+                    storage: &group,
+                }
+                .dispatch(&mut encoder);
+            }
+            group
         });
         if r.job.buffers != 0 {
             // Fresh targets on the first frame, on resize and with a new
@@ -284,24 +344,19 @@ pub fn preview_pass(
                 uniforms: uniforms.clone(),
                 offset: r.offset,
                 dummy,
+                storage: storage.as_ref(),
             }
             .draw(&mut encoder, &mut card.targets, channels);
         }
 
-        let bind_group = p.device.create_bind_group(
+        let bind_group = p.fullscreen.bind_group(
+            &p.device,
+            cache,
             "preview_bind_group",
-            &layout,
-            &BindGroupEntries::sequential((
-                dummy,
-                &p.fullscreen.sampler,
-                uniforms.clone(),
-                &channels[0],
-                &channels[1],
-                &channels[2],
-                &channels[3],
-                &p.fullscreen.ui_dummy,
-                &p.fullscreen.ui_sampler,
-            )),
+            dummy,
+            uniforms.clone(),
+            channels.each_ref(),
+            None,
         );
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("preview_pass"),
@@ -318,6 +373,9 @@ pub fn preview_pass(
         });
         pass.set_pipeline(main);
         pass.set_bind_group(0, &bind_group, &[r.offset]);
+        if let Some(storage) = &storage {
+            pass.set_bind_group(1, storage, &[]);
+        }
         pass.draw(0..3, 0..1);
         drop(pass);
         ctx.add_command_buffer(encoder.finish());

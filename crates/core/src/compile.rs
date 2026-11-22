@@ -19,6 +19,11 @@
 //!   draws into that channel's offscreen target before the main pass; those
 //!   entries pass `@builtin(position)` through unflipped (texel space), so
 //!   `textureLoad` reads line up with the writes (see [`main_module_for`]).
+//!   Each `compute_a`..`compute_d` the user defines gets an `@compute`
+//!   `entry_compute_*` entry point the same way, run before the buffer
+//!   passes; storage buffers the user declares at `@group(1)` are reflected
+//!   into [`Compute`] so the renderer can allocate them (see
+//!   [`detect_passes`]).
 //!
 //! User code may also import the bundled [LYGIA](https://lygia.xyz) shader
 //! library as the external WESL package `lygia` (`import
@@ -290,6 +295,120 @@ pub fn buffer_entry(name: &str) -> String {
     format!("fragment_{name}")
 }
 
+/// Names of the optional per-frame compute passes, run A→D before the
+/// buffer passes. A `compute_x(i: u32)` runs once per element (see
+/// [`Dispatch`]), a `compute_x(p: vec2<u32>)` once per pixel.
+pub const COMPUTE_NAMES: [&str; 4] = ["compute_a", "compute_b", "compute_c", "compute_d"];
+
+/// The compute entry point that runs pass `name` (`compute_a` ..
+/// `compute_d`); shared by [`main_module_for`] and the renderers.
+pub fn compute_entry(name: &str) -> String {
+    format!("entry_{name}")
+}
+
+/// Workgroup size of a [`Dispatch::Count`] / [`Dispatch::PixelCount`] pass.
+pub const LINEAR_WORKGROUP: u32 = 64;
+/// Workgroup size (per axis) of a [`Dispatch::Pixels`] pass.
+pub const PIXEL_WORKGROUP: u32 = 8;
+/// Most workgroups along one dispatch axis (WebGPU's default limit). A
+/// linear pass with more spills into rows, see [`Dispatch::workgroups`].
+pub const MAX_WORKGROUPS_PER_AXIS: u32 = 65535;
+/// Storage group the user's `var<storage, read_write>` globals live in.
+pub const STORAGE_GROUP: u32 = 1;
+/// How many storage bindings (`@binding(0..STORAGE_SLOTS)`) a shader may use.
+pub const STORAGE_SLOTS: usize = 4;
+/// Largest storage buffer, in bytes: WebGPU's default
+/// `maxStorageBufferBindingSize`.
+pub const MAX_STORAGE_BYTES: u64 = 128 << 20;
+
+/// How many invocations one compute pass runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dispatch {
+    /// `fn compute_x(p: vec2<u32>)`: one per pixel of the viewport.
+    Pixels,
+    /// `fn compute_x(i: u32)`, `i` in `0..n`: the length of the
+    /// `@binding(0)` array, or a `// dispatch: n` line above the function.
+    Count(u32),
+    /// `fn compute_x(i: u32)` over a runtime-sized `@binding(0)` array: one
+    /// per pixel, `i` in `0..width * height`.
+    PixelCount,
+}
+
+impl Dispatch {
+    /// The `dispatch_workgroups` arguments for a `width × height` viewport.
+    pub fn workgroups(self, width: u32, height: u32) -> [u32; 3] {
+        let linear = |n: u32| {
+            let groups = n.div_ceil(LINEAR_WORKGROUP);
+            let rows = groups.div_ceil(MAX_WORKGROUPS_PER_AXIS).max(1);
+            [groups.min(MAX_WORKGROUPS_PER_AXIS), rows, 1]
+        };
+        match self {
+            Dispatch::Pixels => [
+                width.div_ceil(PIXEL_WORKGROUP),
+                height.div_ceil(PIXEL_WORKGROUP),
+                1,
+            ],
+            Dispatch::Count(n) => linear(n),
+            Dispatch::PixelCount => linear(width.saturating_mul(height)),
+        }
+    }
+}
+
+/// The size of one storage buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageSize {
+    /// A fixed-size type: exactly this many bytes.
+    Bytes(u64),
+    /// A runtime-sized `array<T>`: one element of `stride` bytes per pixel.
+    PerPixel { stride: u32 },
+}
+
+impl StorageSize {
+    /// Bytes for a `width × height` viewport.
+    pub fn bytes(self, width: u32, height: u32) -> u64 {
+        match self {
+            StorageSize::Bytes(n) => n,
+            StorageSize::PerPixel { stride } => {
+                u64::from(stride) * u64::from(width.max(1)) * u64::from(height.max(1))
+            }
+        }
+    }
+}
+
+/// The compute passes and storage buffers a shader uses. `Copy` and made of
+/// plain values, so `build.rs` can write it out as Rust (its `Debug` form,
+/// with this module's types in scope).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Compute {
+    /// Per [`COMPUTE_NAMES`] entry the shader defines, how it dispatches.
+    pub passes: [Option<Dispatch>; 4],
+    /// Per `@group(1) @binding(i)` the shader declares, its size.
+    pub storage: [Option<StorageSize>; STORAGE_SLOTS],
+}
+
+impl Compute {
+    /// Bit per [`COMPUTE_NAMES`] entry the shader defines.
+    pub fn mask(&self) -> u8 {
+        self.passes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_some())
+            .fold(0, |m, (i, _)| m | 1 << i)
+    }
+
+    /// Whether the shader needs compute or storage support at all.
+    pub fn is_used(&self) -> bool {
+        self.mask() != 0 || self.storage.iter().any(Option::is_some)
+    }
+
+    /// Whether any storage buffer is sized by the viewport.
+    pub fn per_pixel(&self) -> bool {
+        self.storage
+            .iter()
+            .any(|s| matches!(s, Some(StorageSize::PerPixel { .. })))
+    }
+}
+
 /// The fixed part of the hidden entry module `package::main`; buffer entry
 /// points are appended by [`main_module_for`].
 const MAIN_MODULE_HEAD: &str = r#"import package::shadertoy::FullscreenVertexOutput;
@@ -326,11 +445,22 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 ///
 /// With `heat` on, the image entry shows the cost heatmap instead
 /// ([`heat::MAIN_MODULE_HEAD`]); buffer entries stay as they are.
-fn main_module_for(buffers: u8, heat: bool, stubs: bool) -> String {
+///
+/// Each compute pass gets a `@compute` entry that skips invocations past
+/// its [`Dispatch`] range, loads the live constants and calls the user's
+/// function; undefined passes get empty stubs under `stubs`, for the same
+/// slot reuse. Stubs are harmless where compute is unsupported: wgpu only
+/// checks for compute support when a compute pipeline is created.
+fn main_module_for(buffers: u8, compute: &Compute, heat: bool, stubs: bool) -> String {
     let mut wgsl = String::new();
     // Imports must come first
     for (i, name) in BUFFER_NAMES.iter().enumerate() {
         if buffers & (1 << i) != 0 {
+            wgsl.push_str(&format!("import package::user::{name};\n"));
+        }
+    }
+    for (name, pass) in COMPUTE_NAMES.iter().zip(compute.passes) {
+        if pass.is_some() {
             wgsl.push_str(&format!("import package::user::{name};\n"));
         }
     }
@@ -364,6 +494,61 @@ fn main_module_for(buffers: u8, heat: bool, stubs: bool) -> String {
             buffer_entry(name)
         ));
     }
+    wgsl.push_str(&compute_entries(compute, stubs));
+    wgsl
+}
+
+/// The `@compute` entries of [`main_module_for`]. The user's `st_load_tweaks`
+/// and `i_resolution` are called by full path, so these entries need no
+/// imports of their own (the image entry's heads already import them).
+fn compute_entries(compute: &Compute, stubs: bool) -> String {
+    let mut wgsl = String::new();
+    for (name, pass) in COMPUTE_NAMES.iter().zip(compute.passes) {
+        let entry = compute_entry(name);
+        let Some(pass) = pass else {
+            if stubs {
+                wgsl.push_str(&format!(
+                    "\n// No compute pass: stub entry, never dispatched.\n\
+                     @compute @workgroup_size(1)\nfn {entry}() {{}}\n"
+                ));
+            }
+            continue;
+        };
+        let res = "vec2<u32>(package::shadertoy::i_resolution().xy)";
+        let (size, args, body) = match pass {
+            Dispatch::Pixels => (
+                format!("{PIXEL_WORKGROUP}, {PIXEL_WORKGROUP}"),
+                "@builtin(global_invocation_id) id: vec3<u32>",
+                format!(
+                    "\x20   let res = {res};\n\
+                     \x20   if id.x >= res.x || id.y >= res.y {{ return; }}\n\
+                     \x20   package::user::st_load_tweaks();\n\
+                     \x20   {name}(id.xy);\n"
+                ),
+            ),
+            Dispatch::Count(_) | Dispatch::PixelCount => {
+                let count = match pass {
+                    Dispatch::Count(n) => format!("{n}u"),
+                    _ => format!("{res}.x * {res}.y"),
+                };
+                (
+                    LINEAR_WORKGROUP.to_string(),
+                    "@builtin(global_invocation_id) id: vec3<u32>, \
+                     @builtin(num_workgroups) groups: vec3<u32>",
+                    format!(
+                        "\x20   // Long passes spill into rows of workgroups.\n\
+                         \x20   let i = id.x + id.y * groups.x * {LINEAR_WORKGROUP}u;\n\
+                         \x20   if i >= {count} {{ return; }}\n\
+                         \x20   package::user::st_load_tweaks();\n\
+                         \x20   {name}(i);\n"
+                    ),
+                )
+            }
+        };
+        wgsl.push_str(&format!(
+            "\n@compute @workgroup_size({size})\nfn {entry}({args}) {{\n{body}}}\n"
+        ));
+    }
     wgsl
 }
 
@@ -374,6 +559,8 @@ pub struct CompiledShader {
     pub wgsl: String,
     /// Bit per [`BUFFER_NAMES`] entry the shader defines.
     pub buffers: u8,
+    /// Its compute passes and storage buffers.
+    pub compute: Compute,
     /// The constants the Constants window can tweak live; slot = index.
     pub tweaks: Vec<Constant>,
     /// Literal constants that cannot be tweaked live because WGSL needs them
@@ -392,6 +579,8 @@ pub enum CompileError {
     WgslValidate(String),
     /// The shader binds a resource the pipeline does not provide.
     Binding(String),
+    /// A compute pass or storage buffer the renderer cannot run.
+    Compute(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -401,6 +590,7 @@ impl std::fmt::Display for CompileError {
             CompileError::WgslParse(s) => write!(f, "WGSL parse error:\n{s}"),
             CompileError::WgslValidate(s) => write!(f, "Shader validation error:\n{s}"),
             CompileError::Binding(s) => write!(f, "Binding error:\n{s}"),
+            CompileError::Compute(s) => write!(f, "Compute error:\n{s}"),
         }
     }
 }
@@ -431,8 +621,8 @@ pub fn compile_user_shader_with(
 }
 
 /// [`compile_user_shader`] without the stub entry points of undefined
-/// buffer passes, which only the app's shader slot reuse needs: a shader
-/// without buffers then has `fragment` as its only entry point, which is
+/// buffer and compute passes, which only the app's shader slot reuse needs:
+/// a shader without them then has `fragment` as its only entry point, which is
 /// what exported crates (Bevy's stock fullscreen material) expect.
 pub fn compile_for_export(user_source: &str) -> Result<CompiledShader, CompileError> {
     compile_variant(user_source, false, false)
@@ -443,7 +633,7 @@ fn compile_variant(
     heat: bool,
     stubs: bool,
 ) -> Result<CompiledShader, CompileError> {
-    let buffers = detect_buffers(user_source)?;
+    let (buffers, compute) = detect_passes(user_source)?;
 
     let in_const_context = tweak::const_context_names(user_source);
     let mut fixed = Vec::new();
@@ -474,8 +664,9 @@ fn compile_variant(
         tweaks = ok;
     }
 
-    let compile =
-        |tweaks: &[Constant]| compile_instrumented(user_source, buffers, stubs, tweaks, heat);
+    let compile = |tweaks: &[Constant]| {
+        compile_instrumented(user_source, buffers, &compute, stubs, tweaks, heat)
+    };
     let wgsl = match compile(&tweaks) {
         Ok(wgsl) => wgsl,
         Err(_) if !tweaks.is_empty() => {
@@ -515,6 +706,7 @@ fn compile_variant(
     Ok(CompiledShader {
         wgsl,
         buffers,
+        compute,
         tweaks,
         fixed,
     })
@@ -576,6 +768,7 @@ fn remember_failing(key: u64, names: impl Iterator<Item = String>) {
 fn compile_instrumented(
     user_source: &str,
     buffers: u8,
+    compute: &Compute,
     stubs: bool,
     tweaks: &[Constant],
     heat: bool,
@@ -589,7 +782,10 @@ fn compile_instrumented(
     }
     let resolver = Modules::new(
         user.into(),
-        [("main", main_module_for(buffers, heat, stubs).into())],
+        [(
+            "main",
+            main_module_for(buffers, compute, heat, stubs).into(),
+        )],
         &pragmas,
     );
     let compiler = Compiler::new_with_resolver(compile_options(&pragmas), resolver);
@@ -613,30 +809,42 @@ fn compile_instrumented(
     Ok(wgsl)
 }
 
-/// Reject resource bindings that `package::shadertoy` does not declare.
+/// Reject resource bindings the pipeline layout does not provide: anything
+/// but `package::shadertoy`'s resources and the user's storage buffers
+/// (`var<storage, read_write>` at `@group(1) @binding(0..4)`, see
+/// [`Compute::storage`]).
 ///
-/// The pipeline layout provides exactly the hidden module's resources. naga
-/// accepts any binding, but wgpu rejects a pipeline whose shader uses a slot
-/// the layout lacks or types differently, and Bevy's default render error
-/// handler quits the app on that error, taking unsaved edits with it.
+/// naga accepts any binding, but wgpu rejects a pipeline whose shader uses a
+/// slot the layout lacks or types differently, and Bevy's default render
+/// error handler quits the app on that error, taking unsaved edits with it.
 fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
     let env = package_path("shadertoy");
+    let user = package_path("user");
     let foreign: Vec<String> = module
         .global_variables
         .iter()
         .filter_map(|(_, var)| {
             let binding = var.binding.as_ref()?;
             let mangled = var.name.as_deref().unwrap_or("?");
-            let (from_env, item) = match EscapeMangler.unmangle(mangled) {
-                Some((path, item)) => (path == env, item),
-                None => (false, mangled.to_string()),
+            let (path, item) = match EscapeMangler.unmangle(mangled) {
+                Some((path, item)) => (Some(path), item),
+                None => (None, mangled.to_string()),
             };
-            (!from_env).then(|| {
-                format!(
-                    "`{item}` at @group({}) @binding({})",
-                    binding.group, binding.binding
-                )
-            })
+            if path.as_ref() == Some(&env) {
+                return None;
+            }
+            let slot = binding.binding as usize;
+            if path.as_ref() == Some(&user)
+                && binding.group == STORAGE_GROUP
+                && slot < STORAGE_SLOTS
+                && is_read_write_storage(var.space)
+            {
+                return None;
+            }
+            Some(format!(
+                "`{item}` at @group({}) @binding({})",
+                binding.group, binding.binding
+            ))
         })
         .collect();
     if foreign.is_empty() {
@@ -645,14 +853,22 @@ fn check_bindings(module: &naga::Module) -> Result<(), CompileError> {
     Err(CompileError::Binding(format!(
         "{} binds resources wesl-shadertoy does not provide. Import them from \
          package::shadertoy instead (i_sampler, i_channel_0..i_channel_3, i_ui; the \
-         uniforms through i_time() and friends).",
+         uniforms through i_time() and friends). Storage buffers of your own go at \
+         @group(1) @binding(0) .. @binding(3), declared `var<storage, read_write>`.",
         foreign.join(", ")
     )))
 }
 
-/// Compile `package::user` on its own and report which buffer passes it
-/// defines, by looking for `fn buffer_a`..`buffer_d` in the output.
-fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
+/// `var<storage, read_write>`.
+fn is_read_write_storage(space: naga::AddressSpace) -> bool {
+    matches!(space, naga::AddressSpace::Storage { access }
+        if access.contains(naga::StorageAccess::LOAD | naga::StorageAccess::STORE))
+}
+
+/// Compile `package::user` on its own and report which buffer passes
+/// (`fn buffer_a`..`buffer_d`) and compute passes (`fn compute_a`..
+/// `compute_d`) it defines, and the storage buffers it declares.
+fn detect_passes(user_source: &str) -> Result<(u8, Compute), CompileError> {
     let pragmas = Pragmas::parse(user_source);
     let resolver = Modules::new(user_source.into(), [], &pragmas);
 
@@ -672,17 +888,174 @@ fn detect_buffers(user_source: &str) -> Result<u8, CompileError> {
     let module = naga::front::wgsl::parse_str(&wgsl)
         .map_err(|e| CompileError::WgslParse(e.emit_to_string(&wgsl)))?;
 
-    let mut buffers = 0u8;
-    for (i, name) in BUFFER_NAMES.iter().enumerate() {
-        if module
+    let function = |name: &str| {
+        module
             .functions
             .iter()
-            .any(|(_, f)| f.name.as_deref() == Some(*name))
-        {
+            .find(|(_, f)| f.name.as_deref() == Some(name))
+            .map(|(_, f)| f)
+    };
+    let mut buffers = 0u8;
+    for (i, name) in BUFFER_NAMES.iter().enumerate() {
+        if function(name).is_some() {
             buffers |= 1 << i;
         }
     }
-    Ok(buffers)
+
+    let mut compute = Compute::default();
+    let mut binding0_len = None;
+    let mut layouter = naga::proc::Layouter::default();
+    layouter
+        .update(module.to_ctx())
+        .map_err(|e| CompileError::Compute(e.to_string()))?;
+    for (_, var) in module.global_variables.iter() {
+        let Some(binding) = &var.binding else {
+            continue;
+        };
+        let slot = binding.binding as usize;
+        // Anything else is reported by `check_bindings`, with the rest.
+        if binding.group != STORAGE_GROUP
+            || slot >= STORAGE_SLOTS
+            || !is_read_write_storage(var.space)
+        {
+            continue;
+        }
+        let name = var.name.as_deref().unwrap_or("?");
+        let (size, len) = match module.types[var.ty].inner {
+            naga::TypeInner::Array {
+                size: naga::ArraySize::Dynamic,
+                stride,
+                ..
+            } => (StorageSize::PerPixel { stride }, Some(None)),
+            naga::TypeInner::Array {
+                size: naga::ArraySize::Constant(n),
+                ..
+            } => (
+                StorageSize::Bytes(u64::from(layouter[var.ty].size)),
+                Some(Some(n.get())),
+            ),
+            naga::TypeInner::Struct { ref members, .. }
+                if members.last().is_some_and(|m| {
+                    matches!(
+                        module.types[m.ty].inner,
+                        naga::TypeInner::Array {
+                            size: naga::ArraySize::Dynamic,
+                            ..
+                        }
+                    )
+                }) =>
+            {
+                return Err(CompileError::Compute(format!(
+                    "`{name}` ends in a runtime-sized array. Declare the array itself \
+                     (`array<T>`, one element per pixel) or give it a length."
+                )));
+            }
+            _ => (StorageSize::Bytes(u64::from(layouter[var.ty].size)), None),
+        };
+        if let StorageSize::Bytes(n) = size
+            && n > MAX_STORAGE_BYTES
+        {
+            return Err(CompileError::Compute(format!(
+                "`{name}` takes {} MiB; storage buffers can be at most {} MiB.",
+                n >> 20,
+                MAX_STORAGE_BYTES >> 20
+            )));
+        }
+        compute.storage[slot] = Some(size);
+        if slot == 0 {
+            binding0_len = len;
+        }
+    }
+
+    for (i, name) in COMPUTE_NAMES.iter().enumerate() {
+        let Some(f) = function(name) else {
+            continue;
+        };
+        let hint = dispatch_hint(user_source, name)?;
+        let param = match f.arguments.as_slice() {
+            [arg] => Some(&module.types[arg.ty].inner),
+            _ => None,
+        };
+        let u32 = naga::Scalar::U32;
+        let pass = match param {
+            _ if f.result.is_some() => {
+                return Err(CompileError::Compute(format!(
+                    "`{name}` must not return a value: it writes its results into \
+                     storage buffers."
+                )));
+            }
+            Some(naga::TypeInner::Scalar(s)) if *s == u32 => match (hint, binding0_len) {
+                (Some(n), _) => Dispatch::Count(n),
+                (None, Some(Some(n))) => Dispatch::Count(n),
+                (None, Some(None)) => Dispatch::PixelCount,
+                (None, None) => {
+                    return Err(CompileError::Compute(format!(
+                        "`{name}(i: u32)` runs once per element of the array at \
+                         @group(1) @binding(0), but there is no `var<storage, \
+                         read_write>` array there. Declare one, or put a \
+                         `// dispatch: N` line above the function."
+                    )));
+                }
+            },
+            Some(naga::TypeInner::Vector {
+                size: naga::VectorSize::Bi,
+                scalar,
+            }) if *scalar == u32 => {
+                if hint.is_some() {
+                    return Err(CompileError::Compute(format!(
+                        "`{name}(p: vec2<u32>)` runs once per pixel; `// dispatch:` only \
+                         applies to `{name}(i: u32)`."
+                    )));
+                }
+                Dispatch::Pixels
+            }
+            _ => {
+                return Err(CompileError::Compute(format!(
+                    "`{name}` takes one parameter: `i: u32` (once per array element) or \
+                     `p: vec2<u32>` (once per pixel)."
+                )));
+            }
+        };
+        if pass == Dispatch::Count(0) {
+            return Err(CompileError::Compute(format!(
+                "`{name}` would run zero times."
+            )));
+        }
+        compute.passes[i] = Some(pass);
+    }
+    Ok((buffers, compute))
+}
+
+/// The `N` of a `// dispatch: N` line right above `fn {name}`, if any.
+fn dispatch_hint(user_source: &str, name: &str) -> Result<Option<u32>, CompileError> {
+    let mut previous = "";
+    for line in user_source.lines() {
+        let line = line.trim();
+        let declares = line
+            .strip_prefix("fn ")
+            .and_then(|rest| rest.trim_start().strip_prefix(name))
+            .is_some_and(|rest| rest.trim_start().starts_with('('));
+        if declares {
+            let Some(value) = previous.strip_prefix("// dispatch:") else {
+                return Ok(None);
+            };
+            let value = value.trim();
+            return value
+                .replace('_', "")
+                .trim_end_matches('u')
+                .parse()
+                .map(Some)
+                .map_err(|_| {
+                    CompileError::Compute(format!(
+                        "`// dispatch: {value}` above `{name}` is not a count."
+                    ))
+                });
+        }
+        if !line.is_empty() {
+            previous = line;
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -831,6 +1204,177 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         assert_eq!(wgsl.matches("@fragment").count(), 1, "{wgsl}");
         let wgsl = compile_user_shader(src).expect("should compile").wgsl;
         assert_eq!(wgsl.matches("@fragment").count(), 5, "{wgsl}");
+        assert_eq!(wgsl.matches("@compute").count(), 4, "{wgsl}");
+        let wgsl = compile_for_export(src).expect("should compile").wgsl;
+        assert!(!wgsl.contains("@compute"), "{wgsl}");
+    }
+
+    /// A particle shader: two linear passes (one sized by its array, one by
+    /// a hint), a per-pixel pass and a per-pixel atomic grid read by the
+    /// image pass.
+    const PARTICLES: &str = r#"
+import package::shadertoy::{i_resolution, i_time_delta};
+
+struct Particle { pos: vec2<f32>, vel: vec2<f32> }
+@group(1) @binding(0) var<storage, read_write> particles: array<Particle, 1000>;
+@group(1) @binding(1) var<storage, read_write> density: array<atomic<u32>>;
+@group(1) @binding(2) var<storage, read_write> stats: vec4<f32>;
+
+const GRAVITY: f32 = 9.8;
+
+fn cell(p: vec2<u32>) -> u32 { return p.y * u32(i_resolution().x) + p.x; }
+
+fn compute_a(i: u32) {
+    particles[i].vel.y -= GRAVITY * i_time_delta();
+    particles[i].pos += particles[i].vel * i_time_delta();
+    atomicAdd(&density[cell(vec2<u32>(particles[i].pos))], 1u);
+}
+
+// dispatch: 1_024
+fn compute_b(i: u32) {
+    if i == 0u { stats.x += 1.0; }
+}
+
+fn compute_d(p: vec2<u32>) {
+    atomicStore(&density[cell(p)], atomicLoad(&density[cell(p)]) / 2u);
+}
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    let n = atomicLoad(&density[cell(vec2<u32>(frag_coord))]);
+    return vec4<f32>(vec3<f32>(f32(n) * 0.1), 1.0);
+}
+"#;
+
+    #[test]
+    fn detects_compute_passes_and_storage() {
+        let compiled = compile_user_shader(PARTICLES).expect("should compile");
+        let c = compiled.compute;
+        assert_eq!(c.mask(), 0b1011);
+        assert_eq!(
+            c.passes,
+            [
+                Some(Dispatch::Count(1000)),
+                Some(Dispatch::Count(1024)),
+                None,
+                Some(Dispatch::Pixels)
+            ]
+        );
+        // vec2 + vec2 = 16 bytes per particle.
+        assert_eq!(
+            c.storage,
+            [
+                Some(StorageSize::Bytes(16_000)),
+                Some(StorageSize::PerPixel { stride: 4 }),
+                Some(StorageSize::Bytes(16)),
+                None
+            ]
+        );
+        assert!(c.is_used() && c.per_pixel());
+        assert_eq!(compiled.tweaks.len(), 1, "GRAVITY stays live in compute");
+
+        let wgsl = &compiled.wgsl;
+        let entry = |name: &str| {
+            wgsl.split(&format!("fn {}(", compute_entry(name)))
+                .nth(1)
+                .unwrap_or_else(|| panic!("no entry for {name}:\n{wgsl}"))
+                .split("\n}")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let a = entry("compute_a");
+        assert!(a.contains("if i >= 1000u"), "{a}");
+        assert!(a.contains("st_load_tweaks"), "{a}");
+        assert!(entry("compute_b").contains("if i >= 1024u"));
+        assert!(entry("compute_d").contains("id.y >= res.y"));
+        // compute_c is a stub, so slot reuse finds every entry.
+        assert!(wgsl.contains(&format!("fn {}()", compute_entry("compute_c"))));
+        assert!(wgsl.contains("@workgroup_size(64)"));
+        assert!(wgsl.contains("@workgroup_size(8, 8)"));
+    }
+
+    #[test]
+    fn runtime_sized_binding0_dispatches_per_pixel() {
+        let src = r#"
+@group(1) @binding(0) var<storage, read_write> cells: array<f32>;
+fn compute_a(i: u32) { cells[i] += 1.0; }
+fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(cells[0]); }
+"#;
+        let c = compile_user_shader(src).expect("should compile").compute;
+        assert_eq!(c.passes[0], Some(Dispatch::PixelCount));
+        assert_eq!(c.storage[0], Some(StorageSize::PerPixel { stride: 4 }));
+    }
+
+    #[test]
+    fn compute_errors_name_the_problem() {
+        let err = |src: &str| compile_user_shader(src).unwrap_err().to_string();
+        let main = "fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0); }\n";
+
+        let msg = err(&format!("fn compute_a(i: u32) {{}}\n{main}"));
+        assert!(msg.contains("// dispatch: N"), "{msg}");
+
+        let msg = err(&format!("fn compute_a(x: f32) {{}}\n{main}"));
+        assert!(msg.contains("one parameter"), "{msg}");
+
+        let msg = err(&format!(
+            "// dispatch: 8\nfn compute_a(p: vec2<u32>) {{}}\n{main}"
+        ));
+        assert!(msg.contains("once per pixel"), "{msg}");
+
+        let msg = err(&format!(
+            "// dispatch: lots\nfn compute_a(i: u32) {{}}\n{main}"
+        ));
+        assert!(msg.contains("not a count"), "{msg}");
+
+        let msg = err(&format!(
+            "@group(1) @binding(0) var<storage, read_write> big: array<vec4<f32>, 10000000>;\n\
+             fn compute_a(i: u32) {{ big[i] = vec4<f32>(0.0); }}\n{main}"
+        ));
+        assert!(msg.contains("at most 128 MiB"), "{msg}");
+
+        // Read-only storage and a slot past 3 (naga rejects shared slots).
+        let msg = err(&format!(
+            "@group(1) @binding(0) var<storage> ro: array<f32, 4>;\n\
+             @group(1) @binding(4) var<storage, read_write> far: array<f32, 4>;\n\
+             // dispatch: 4\n\
+             fn compute_a(i: u32) {{ far[i] = ro[i]; }}\n{main}"
+        ));
+        assert!(msg.starts_with("Binding error"), "{msg}");
+        assert!(msg.contains("`ro`") && msg.contains("`far`"), "{msg}");
+    }
+
+    #[test]
+    fn dispatch_hints_and_names_in_comments() {
+        assert_eq!(
+            dispatch_hint("// dispatch: 64u\nfn compute_a (i: u32) {}", "compute_a").unwrap(),
+            Some(64)
+        );
+        assert_eq!(
+            dispatch_hint("// dispatch: 64\n\nfn compute_a(i: u32) {}", "compute_a").unwrap(),
+            Some(64)
+        );
+        assert_eq!(
+            dispatch_hint("// dispatch: 64\nfn compute_ab(i: u32) {}", "compute_a").unwrap(),
+            None
+        );
+        let src = "// compute_a is only mentioned here.\n\
+                   fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0); }\n";
+        assert!(!compile_user_shader(src).unwrap().compute.is_used());
+    }
+
+    #[test]
+    fn workgroups_cover_the_dispatch() {
+        assert_eq!(Dispatch::Pixels.workgroups(17, 8), [3, 1, 1]);
+        assert_eq!(Dispatch::Count(1000).workgroups(1, 1), [16, 1, 1]);
+        // 4K: more workgroups than one axis allows spill into rows.
+        let [x, y, _] = Dispatch::PixelCount.workgroups(3840, 2160);
+        assert_eq!((x, y), (MAX_WORKGROUPS_PER_AXIS, 2));
+        assert!(u64::from(x) * u64::from(y) * 64 >= 3840 * 2160);
+    }
+
+    #[test]
+    fn compute_shaders_compile_in_heat_mode() {
+        compile_user_shader_with(PARTICLES, true).expect("heat compile");
     }
 
     #[test]

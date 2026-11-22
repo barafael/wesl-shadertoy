@@ -16,7 +16,7 @@ Runs natively and in the browser as WASM.
 | Share | **Share** button: copies a link that *is* the shader (see [Share links](#share-links)) |
 | Export | **Export** menu: the shader as a standalone Bevy 0.20 plugin crate (see [Export to Bevy](#export-to-bevy)) or a lock screen for niri (see [Export to a lock screen](#export-to-a-lock-screen)) |
 | Clock speed, pause, reset | toolbar speed slider (0 pauses) and reset button (reset also restarts `i_frame` and clears the buffers) |
-| Examples | `Examples` window — 41 examples (a seven-part tutorial, Plasma, Seascape, Fluid, a dozen LYGIA demos, …) as live thumbnails, the tutorial and other beginner examples first; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
+| Examples | `Examples` window — 42 examples (a seven-part tutorial, Plasma, Seascape, Fluid, Particles, a dozen LYGIA demos, …) as live thumbnails, the tutorial and other beginner examples first; search or filter by tag, hover to play with one (the pointer drives its `iMouse`), click to open it. Fresh sessions roll a random one |
 | Tweak constants | `Constants` window: a slider or color picker per literal module-level constant, live while you drag (see [Tweakable constants](#tweakable-constants)) |
 | Evolve | toolbar `Evolve`: the canvas becomes a 3×3 grid, the current constants in the middle and eight mutations around them, all running live (hover one to drive its `iMouse`). Click a variant to breed from it (the centre rolls eight new ones), **Ctrl/Cmd+Z** or the undo button walks back the lineage, the slider sets how far mutations stray. **Keep** writes the centre's constants into the code; **Discard** or **Escape** leaves it unchanged |
 | Browse LYGIA | `LYGIA` window: search the ~380 bundled modules by path, function name or description, filter by directory; each entry shows the module's doc text and its WGSL declarations, an **import** button per declaration adds the `import lygia::…;` line to your code, **source** opens the module read-only |
@@ -94,8 +94,9 @@ a `<Name>Shader`. The live constants become `<Name>Tweaks`, a
 uniform slots the Constants window drives, so changing a field, by hand or in
 an inspector, changes the shader live. Natively the crate is written to
 `./<name>-bevy/` (existing files are replaced); the web build downloads it
-as `<name>-bevy.zip`. Shaders with buffer passes are not exported yet: they
-need this app's ping-pong renderer, so Export says so instead.
+as `<name>-bevy.zip`. Shaders with buffer passes, compute passes or storage
+buffers are not exported yet: they need this app's renderer, so Export says
+so instead.
 
 ### Export to a lock screen
 
@@ -122,8 +123,8 @@ account locked after failed attempts, with the minutes left) show under it,
 rasterized with ab_glyph in the system font. The number beside the menu
 entry is the frame-rate cap baked in as the default (0 draws at the display's
 rate); `--fps` overrides it. The constants are baked in as set in the editor,
-and `iMouse` stays zero. Same limits as the Bevy export: no buffer passes, no
-channels. Install it with `cargo install --path .` and bind it in niri's
+and `iMouse` stays zero. Same limits as the Bevy export: no buffer or compute
+passes, no channels. Install it with `cargo install --path .` and bind it in niri's
 config; the crate's README has the details, the PAM setup and how to recover
 if it ever crashes (the compositor keeps the session locked).
 
@@ -230,7 +231,8 @@ Raymarchers light up where they work hardest — silhouettes, grazing angles,
 fog — which is where a bounding volume, a lower step count or an earlier
 exit pays off. Helper functions count too, and nested loops multiply. Only
 the editor's own loops are counted (not LYGIA's), only the image pass is
-shown (buffer passes keep running as usual), and constants stay tweakable.
+shown (buffer and compute passes keep running as usual), and constants stay
+tweakable.
 
 ### Buffers (multipass)
 
@@ -258,6 +260,53 @@ sees that buffer's current frame. Buffers are unfilterable float textures:
 read them with `textureLoad`, or nearest-sample them through the
 `i_sampler` global. They start out black and are cleared on every compile,
 on Reset and on resize.
+
+### Compute passes and storage buffers
+
+Fragment passes can only write their own pixel. For anything that scatters —
+particles, splatting points into a grid, histograms, simulations on structs —
+declare storage buffers and define any of `compute_a` … `compute_d`:
+
+```rust
+import package::shadertoy::{i_resolution, i_time_delta};
+
+struct Particle { pos: vec2<f32>, vel: vec2<f32> }
+@group(1) @binding(0) var<storage, read_write> particles: array<Particle, 16384>;
+@group(1) @binding(1) var<storage, read_write> glow: array<atomic<u32>>; // one per pixel
+
+fn cell(p: vec2<u32>) -> u32 { return p.y * u32(i_resolution().x) + p.x; }
+
+fn compute_a(i: u32) {                        // once per particle
+    particles[i].pos += particles[i].vel * i_time_delta();
+    atomicAdd(&glow[cell(vec2<u32>(particles[i].pos))], 1u);
+}
+
+fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(vec3<f32>(f32(atomicLoad(&glow[cell(vec2<u32>(frag_coord))]))), 1.0);
+}
+```
+
+* **Storage buffers**: up to four, `var<storage, read_write>` at `@group(1)
+  @binding(0)` … `@binding(3)`, of any type. Every pass (compute, buffer,
+  image) can read and write them. A fixed-size type gets exactly its size
+  (at most 128 MiB); a runtime-sized `array<T>` gets one element per pixel
+  of the view.
+* **How many invocations**: `compute_x(p: vec2<u32>)` runs once per pixel
+  (`p` in the same pixel space as `frag_coord`). `compute_x(i: u32)` runs
+  once per element of the array at `@binding(0)` — or `n` times with a
+  `// dispatch: n` line right above the function.
+* **Order**: compute A → D, then buffer A → D, then the image, every frame.
+  Compute passes read the channels as the previous frame left them.
+* **State**: storage starts zeroed and is zeroed again on every compile, on
+  Reset and (if one is sized by the view) on resize; compute passes hold
+  still while paused, like buffer passes.
+
+Compute needs WebGPU: native builds have it on Vulkan, Metal and DX12 (not on
+an OpenGL-only adapter, which the app checks at startup), and the web build uses
+WebGPU when the browser has it and WebGL2 otherwise. On WebGL2 a shader with
+compute passes or storage buffers does not compile ("needs WebGPU"), and its
+Examples card says so. The **Particles** example is the full version of the
+sketch above.
 
 ### The UI as a texture
 
@@ -432,9 +481,12 @@ src/
                               channel clocks and buffers on the switch
     buffers.rs                the buffer_a..buffer_d passes (ping-pong
                               Rgba32Float targets behind i_channel_0..3)
+    compute.rs                the compute_a..compute_d passes and the
+                              storage buffers at @group(1), where the GPU
+                              runs compute (not WebGL2)
     previews.rs               live thumbnails (example browser, Evolve,
-                              Graph window): each job's buffer and image
-                              passes into a small image of its own
+                              Graph window): each job's compute, buffer and
+                              image passes into a small image of its own
     blur.rs                   frosted-glass backdrop: the finished frame,
                               downsampled 4x and Gaussian-blurred into an
                               image egui paints under windows and panels
@@ -500,10 +552,14 @@ web/
 
 Rendering is the vendored Bevy `fullscreen_material` plugin: the user shader
 runs as a fullscreen pass in `Core3d`'s post-process stage with
-`Tonemapping::None`, so colors hit the screen untouched, after the buffer
-passes. Per-frame uniforms ride in a dynamic uniform buffer bound at
-`@group(0) @binding(2)`, the buffer channels at bindings 3..6, `i_ui` and
-its bilinear sampler at 7 and 8. In the UI texture mode the image pass moves
+`Tonemapping::None`, so colors hit the screen untouched, after the compute
+and buffer passes. Per-frame uniforms ride in a dynamic uniform buffer bound
+at `@group(0) @binding(2)`, the buffer channels at bindings 3..6, `i_ui` and
+its bilinear sampler at 7 and 8. Where the GPU runs compute, every pipeline
+also has `@group(1)`: four untyped storage buffer slots, whatever each shader
+declares there, so one layout serves every shader. The web build probes for
+WebGPU before it starts (`wgpu::util::is_browser_webgpu_supported`) and asks
+Bevy for that backend, else WebGL2. In the UI texture mode the image pass moves
 behind egui instead: the view is cleared to transparent, egui draws into it,
 and the user shader reads that as `i_ui` and writes the frame; egui's input
 and layout are untouched, which is why clicks still hit the undistorted UI.
@@ -550,7 +606,8 @@ wasm-opt needs told about).
 
 The repository is a Cargo workspace: the app is the root package, and
 `crates/backend-diff` is a test harness for naga and wesl. It composes each
-shader exactly as the app does, renders it (buffer passes included) on every
+shader exactly as the app does, renders it (buffer passes included; compute
+passes not yet, so those examples are only translated) on every
 wgpu adapter the machine offers — Vulkan, and GL through EGL, which runs
 naga's GLSL ES output like WebGL2 does — and diffs each render against the
 Vulkan one in the sRGB bytes the screen shows: a pixel differs when a channel

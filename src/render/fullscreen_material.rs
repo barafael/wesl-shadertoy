@@ -23,6 +23,9 @@
 //!   bilinear sampler for it (`i_ui`, see [`super::ui_pass`]). While that
 //!   mode is on, [`fullscreen_material_system`] stands aside and the same
 //!   pass is recorded after egui instead.
+//! * Where the GPU runs compute ([`super::compute::GpuCompute`]), group 0 is
+//!   also visible to compute passes and every pipeline gets a second group:
+//!   the user's storage buffers ([`StorageLayout`], see [`super::compute`]).
 
 use core::any::type_name;
 use core::marker::PhantomData;
@@ -41,11 +44,14 @@ use bevy::render::extract_component::{
     ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
     UniformComponentPlugin,
 };
-use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
+use bevy::render::render_resource::binding_types::{
+    sampler, storage_buffer_sized, texture_2d, uniform_buffer,
+};
 use bevy::render::render_resource::encase::internal::WriteInto;
 use bevy::render::render_resource::{
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId,
-    Canonical, ColorTargetState, ColorWrites, Extent3d, FragmentState, Operations, PipelineCache,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+    BindingResource, Buffer, BufferDescriptor, BufferUsages, CachedRenderPipelineId, Canonical,
+    ColorTargetState, ColorWrites, Extent3d, FragmentState, Operations, PipelineCache,
     RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
     Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType, Specializer,
     SpecializerKey, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
@@ -64,6 +70,8 @@ pub struct ShaderToyFragment {
     pub handle: Handle<Shader>,
     /// Bit per [`crate::compile::BUFFER_NAMES`] entry the shader defines.
     pub buffers: u8,
+    /// Its compute passes and storage buffers.
+    pub compute: crate::compile::Compute,
     /// Bumped by every successful compile (0 is the placeholder). Tells two
     /// compiles into the same handle apart, and keys resets on activation.
     pub generation: u32,
@@ -155,13 +163,63 @@ pub struct FullscreenMaterialPipeline<T: FullscreenMaterial> {
     /// `i_ui_sampler`: bilinear, clamp-to-edge.
     pub(crate) ui_sampler: Sampler,
     pub(crate) vertex: VertexState,
+    /// Group 1, where the GPU runs compute passes.
+    pub(crate) storage: Option<StorageLayout>,
     /// One specialization cache per fragment shader handle.
     variants:
         HashMap<AssetId<Shader>, Variants<RenderPipeline, FullscreenMaterialPipelineSpecializer>>,
     _marker: PhantomData<T>,
 }
 
+/// The storage group (`@group(1)`): four untyped read-write storage
+/// buffers, whatever each shader declares there, so one layout serves every
+/// shader and the slot handles' pipelines can be rebuilt in place.
+pub(crate) struct StorageLayout {
+    pub layout: BindGroupLayoutDescriptor,
+    /// Bound to the slots a shader leaves empty.
+    pub dummy: Buffer,
+}
+
 impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
+    /// The pipeline layout every shadertoy pipeline uses: group 0, plus the
+    /// storage group where compute runs.
+    pub(crate) fn layouts(&self) -> Vec<BindGroupLayoutDescriptor> {
+        std::iter::once(self.layout.clone())
+            .chain(self.storage.as_ref().map(|s| s.layout.clone()))
+            .collect()
+    }
+
+    /// Group 0 for one pass: `source` at binding 0 (the dummy for passes
+    /// without one), the uniforms, the four channels and `i_ui` (the
+    /// transparent dummy for `None`).
+    #[allow(clippy::too_many_arguments)] // one bind group, described in full
+    pub(crate) fn bind_group(
+        &self,
+        device: &RenderDevice,
+        cache: &PipelineCache,
+        label: &str,
+        source: &TextureView,
+        uniforms: BindingResource,
+        channels: [&TextureView; 4],
+        ui: Option<&TextureView>,
+    ) -> BindGroup {
+        device.create_bind_group(
+            label,
+            &cache.get_bind_group_layout(&self.layout),
+            &BindGroupEntries::sequential((
+                source,
+                &self.sampler,
+                uniforms,
+                channels[0],
+                channels[1],
+                channels[2],
+                channels[3],
+                ui.unwrap_or(&self.ui_dummy),
+                &self.ui_sampler,
+            )),
+        )
+    }
+
     /// The main-pass pipeline for `shader` rendering into `target_format`,
     /// queued on first request. Queuing again for the same handle and format
     /// returns the same id: when the handle's shader asset is replaced, Bevy
@@ -172,10 +230,11 @@ impl<T: FullscreenMaterial> FullscreenMaterialPipeline<T> {
         shader: &Handle<Shader>,
         target_format: TextureFormat,
     ) -> Result<CachedRenderPipelineId, BevyError> {
+        let layout = self.layouts();
         let variants = self.variants.entry(shader.id()).or_insert_with(|| {
             let desc = RenderPipelineDescriptor {
                 label: Some(format!("fullscreen_material_pipeline<{}>", type_name::<T>()).into()),
-                layout: vec![self.layout.clone()],
+                layout,
                 vertex: self.vertex.clone(),
                 fragment: Some(FragmentState {
                     shader: shader.clone(),
@@ -228,11 +287,19 @@ fn init_pipeline<T: FullscreenMaterial>(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     fullscreen_shader: Res<FullscreenShader>,
+    adapter: Res<bevy::render::renderer::RenderAdapter>,
 ) {
+    let compute = super::compute::supported(&adapter, &render_device);
+    commands.insert_resource(super::compute::GpuCompute(compute));
+    let stages = if compute {
+        ShaderStages::FRAGMENT | ShaderStages::COMPUTE
+    } else {
+        ShaderStages::FRAGMENT
+    };
     let layout = BindGroupLayoutDescriptor::new(
         "fullscreen_material_bind_group_layout",
         &BindGroupLayoutEntries::sequential(
-            ShaderStages::FRAGMENT,
+            stages,
             (
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 // `i_sampler`. Non-filtering, so shaders may pair it with the
@@ -256,6 +323,27 @@ fn init_pipeline<T: FullscreenMaterial>(
             ),
         ),
     );
+    let storage = compute.then(|| StorageLayout {
+        layout: BindGroupLayoutDescriptor::new(
+            "shadertoy_storage_layout",
+            &BindGroupLayoutEntries::sequential(
+                stages,
+                (
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                ),
+            ),
+        ),
+        // Zeroed by wgpu; never written, since no shader declares the slot.
+        dummy: render_device.create_buffer(&BufferDescriptor {
+            label: Some("shadertoy_storage_dummy"),
+            size: 16,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }),
+    });
     let sampler = render_device.create_sampler(&SamplerDescriptor::default());
     let (ui_dummy, ui_sampler) = super::ui_pass::ui_bindings(&render_device);
 
@@ -288,6 +376,7 @@ fn init_pipeline<T: FullscreenMaterial>(
         ui_dummy,
         ui_sampler,
         vertex: fullscreen_shader.to_vertex_state(),
+        storage,
         variants: HashMap::default(),
         _marker: PhantomData,
     });
@@ -328,6 +417,7 @@ pub struct MainPassParams<'w, T: FullscreenMaterial> {
     render_device: Res<'w, RenderDevice>,
     data_uniforms: Res<'w, ComponentUniforms<T>>,
     channels: Res<'w, ChannelViews>,
+    storage: Res<'w, super::compute::MainStorage>,
 }
 
 impl<T: FullscreenMaterial> MainPassParams<'_, T> {
@@ -359,22 +449,19 @@ impl<T: FullscreenMaterial> MainPassParams<'_, T> {
             return;
         };
         let fullscreen = &self.fullscreen_pipeline;
-        let bind_group = self.render_device.create_bind_group(
+        // Where the layout has a storage group, it must be bound.
+        let storage = self.storage.bind_group.as_ref();
+        if fullscreen.storage.is_some() && storage.is_none() {
+            return;
+        }
+        let bind_group = fullscreen.bind_group(
+            &self.render_device,
+            &self.pipeline_cache,
             "fullscreen_material_bind_group",
-            &self
-                .pipeline_cache
-                .get_bind_group_layout(&fullscreen.layout),
-            &BindGroupEntries::sequential((
-                source,
-                &fullscreen.sampler,
-                settings_binding,
-                &self.channels.views[0],
-                &self.channels.views[1],
-                &self.channels.views[2],
-                &self.channels.views[3],
-                ui.unwrap_or(&fullscreen.ui_dummy),
-                &fullscreen.ui_sampler,
-            )),
+            source,
+            settings_binding,
+            self.channels.views.each_ref(),
+            ui,
         );
 
         let pass_descriptor = RenderPassDescriptor {
@@ -399,6 +486,9 @@ impl<T: FullscreenMaterial> MainPassParams<'_, T> {
 
         render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, &bind_group, &[settings_index]);
+        if let Some(storage) = storage {
+            render_pass.set_bind_group(1, storage, &[]);
+        }
         render_pass.draw(0..3, 0..1);
         pass_span.end(&mut render_pass);
     }

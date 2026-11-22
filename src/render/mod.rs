@@ -3,6 +3,7 @@
 pub mod active;
 pub mod blur;
 pub mod buffers;
+pub mod compute;
 pub mod fullscreen_material;
 pub mod previews;
 pub mod ui_pass;
@@ -108,6 +109,7 @@ impl Plugin for ShaderToyRenderPlugin {
         let feedback = active::ShaderFeedback::default();
         let preview_feedback = previews::PreviewFeedback::default();
         app.init_resource::<active::Playback>()
+            .init_resource::<compute::GpuCompute>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .init_resource::<previews::PreviewJobs>()
             .init_resource::<crate::ui_texture::UiTexture>()
@@ -130,6 +132,8 @@ impl Plugin for ShaderToyRenderPlugin {
             .init_resource::<previews::PreviewState>()
             .init_resource::<buffers::BufferTargets>()
             .init_resource::<buffers::BufferPipelines>()
+            .init_resource::<compute::MainStorage>()
+            .init_resource::<compute::ComputePipelines>()
             .init_resource::<crate::debugger::DebuggerOn>()
             .init_resource::<crate::ui_texture::UiTexture>()
             .add_systems(
@@ -162,12 +166,38 @@ impl Plugin for ShaderToyRenderPlugin {
                 (
                     previews::preview_pass
                         .in_set(Core3dSystems::PostProcess)
+                        .before(compute::shadertoy_compute_pass),
+                    compute::shadertoy_compute_pass
+                        .in_set(Core3dSystems::PostProcess)
                         .before(buffers::shadertoy_buffer_pass),
                     buffers::shadertoy_buffer_pass
                         .in_set(Core3dSystems::PostProcess)
                         .before(fullscreen_material_system::<ShaderToyUniform>),
                 ),
             );
+    }
+
+    /// Tell the main world whether the GPU runs compute passes, once the
+    /// renderer exists (the render world finds out in `init_pipeline`).
+    fn finish(&self, app: &mut bevy::app::App) {
+        use bevy::render::renderer::{RenderAdapter, RenderDevice};
+        let world = app.world();
+        let supported = match (
+            world.get_resource::<RenderAdapter>(),
+            world.get_resource::<RenderDevice>(),
+        ) {
+            (Some(adapter), Some(device)) => compute::supported(adapter, device),
+            _ => false,
+        };
+        bevy::log::info!(
+            "compute passes {}",
+            if supported {
+                "available"
+            } else {
+                "unavailable"
+            }
+        );
+        app.insert_resource(compute::GpuCompute(supported));
     }
 }
 

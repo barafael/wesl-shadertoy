@@ -48,6 +48,9 @@ pub struct Browser {
     last_hovered: Option<(usize, Vec2, Vec2)>,
     /// Round-robin cursor into `visible`.
     next: usize,
+    /// Whether the GPU runs compute passes; where it does not, examples
+    /// with compute passes show a note instead of a thumbnail.
+    compute: bool,
 }
 
 impl Default for Browser {
@@ -57,6 +60,7 @@ impl Default for Browser {
             query: String::new(),
             tag: None,
             visible: Vec::new(),
+            compute: true,
             hovered: None,
             last_hovered: None,
             next: 0,
@@ -76,12 +80,19 @@ struct Card {
 struct CompiledExample {
     wgsl: &'static str,
     buffers: u8,
+    compute: crate::compile::Compute,
     /// Its live constants' default values, slot = index.
     tweaks: &'static [[f32; 4]],
 }
 
-// `COMPILED`, one entry per example in `examples::ALL` order.
-include!(concat!(env!("OUT_DIR"), "/compiled_examples.rs"));
+/// `COMPILED`, one entry per example in `examples::ALL` order.
+mod compiled {
+    use super::CompiledExample;
+    #[allow(unused_imports)] // only the variants some example uses
+    use crate::compile::{Compute, Dispatch::*, StorageSize::*};
+    include!(concat!(env!("OUT_DIR"), "/compiled_examples.rs"));
+}
+use compiled::COMPILED;
 
 impl Browser {
     /// Call every frame before [`show`]: a closed window shows no cards.
@@ -100,9 +111,11 @@ pub fn update_previews(
     mut shaders: ResMut<Assets<Shader>>,
     mut jobs: ResMut<PreviewJobs>,
     time: Res<Time>,
+    gpu: Res<crate::render::compute::GpuCompute>,
 ) {
     jobs.0.clear();
     let b = &mut *browser;
+    b.compute = gpu.0;
     if b.visible.is_empty() {
         return;
     }
@@ -126,8 +139,13 @@ pub fn update_previews(
     }
 
     // The hovered card every frame, then the next few visible ones.
-    let drawable = |b: &Browser, i: usize| b.cards[i].shader.is_some();
-    let mut picked: Vec<usize> = b.hovered.map(|(i, ..)| i).into_iter().collect();
+    let drawable = |b: &Browser, i: usize| b.cards[i].shader.is_some() && runnable(b, i);
+    let mut picked: Vec<usize> = b
+        .hovered
+        .map(|(i, ..)| i)
+        .filter(|&i| runnable(b, i))
+        .into_iter()
+        .collect();
     let candidates: Vec<usize> = b
         .visible
         .iter()
@@ -182,6 +200,7 @@ pub fn update_previews(
             generation: 0,
             shader: shader.clone(),
             buffers: compiled.buffers,
+            compute: compiled.compute,
             uniform,
         });
     }
@@ -318,10 +337,25 @@ fn card(
     response.on_hover_ui(|ui| details(ui, example)).clicked()
 }
 
+/// Whether example `i` runs on this GPU (compute passes need WebGPU).
+fn runnable(b: &Browser, i: usize) -> bool {
+    b.compute || !COMPILED[i].compute.is_used()
+}
+
 fn thumbnail(ui: &egui::Ui, b: &Browser, i: usize, rect: egui::Rect, feedback: &PreviewFeedback) {
     let painter = ui.painter();
     let card = &b.cards[i];
     match &card.image {
+        _ if !runnable(b, i) => {
+            painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "needs WebGPU",
+                egui::FontId::proportional(12.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
         Some((_, texture)) if feedback.drawn(PreviewKey::Example(i)) => {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(*texture, rect, uv, egui::Color32::WHITE);
@@ -385,6 +419,7 @@ mod tests {
             };
             assert_eq!(lines(compiled.wgsl), lines(&now.wgsl), "{}", example.name);
             assert_eq!(compiled.buffers, now.buffers, "{}", example.name);
+            assert_eq!(compiled.compute, now.compute, "{}", example.name);
             let values: Vec<[f32; 4]> = now.tweaks.iter().map(|c| c.value).collect();
             assert_eq!(compiled.tweaks, values, "{}", example.name);
         }

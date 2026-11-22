@@ -125,6 +125,9 @@ pub fn resolve_source(arg: &str) -> (String, String) {
 /// One ping-pong slot for a buffer channel.
 struct Surface {
     view: wgpu::TextureView,
+    /// Cleared at the start of every [`Renderer::render`]; `false` for the
+    /// shared black dummy of an undefined channel.
+    clear: bool,
 }
 
 /// The debugger's blit pass: the image target plus the overlay → output.
@@ -148,6 +151,12 @@ pub struct Renderer {
     bgl: wgpu::BindGroupLayout,
     main_pipeline: wgpu::RenderPipeline,
     buffer_pipelines: Vec<(usize, wgpu::RenderPipeline)>,
+    /// The compute passes, A→D, with how far each dispatches.
+    compute_pipelines: Vec<(compile::Dispatch, wgpu::ComputePipeline)>,
+    /// The storage group, for shaders with compute passes or storage
+    /// buffers, and its buffers (zeroed at the start of every render).
+    storage: Option<wgpu::BindGroup>,
+    storage_buffers: Vec<wgpu::Buffer>,
     uniform: wgpu::Buffer,
     sampler: wgpu::Sampler,
     dummy_view: wgpu::TextureView,
@@ -179,6 +188,7 @@ async fn render(
     let mut renderer = Renderer::new(
         &compiled.wgsl,
         compiled.buffers,
+        &compiled.compute,
         width,
         height,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -212,6 +222,7 @@ impl Renderer {
     pub async fn new(
         wgsl: &str,
         buffers: u8,
+        compute: &compile::Compute,
         width: u32,
         height: u32,
         format: wgpu::TextureFormat,
@@ -222,10 +233,32 @@ impl Renderer {
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .map_err(|e| e.to_string())?;
+        // Compute passes and storage buffers, like the app, only where the
+        // adapter has them; the storage group and the compute visibility
+        // only for shaders that use them.
+        let uses_storage = compute.is_used();
+        let flags = adapter.get_downlevel_capabilities().flags;
+        if uses_storage
+            && (!flags.contains(
+                wgpu::DownlevelFlags::COMPUTE_SHADERS
+                    | wgpu::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
+            ) || adapter.limits().max_storage_buffers_per_shader_stage
+                < compile::STORAGE_SLOTS as u32)
+        {
+            return Err("this adapter has no compute shaders or writable storage".into());
+        }
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
             .await
             .map_err(|e| e.to_string())?;
+        let visibility = if uses_storage {
+            wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE
+        } else {
+            wgpu::ShaderStages::FRAGMENT
+        };
         // A shader the GPU rejects (naga passed it, the backend did not)
         // comes back as `Err` instead of wgpu's default handler panicking,
         // which with `panic = "abort"` would take the whole app down from
@@ -246,7 +279,7 @@ impl Renderer {
         // app's view texture) is never sampled, so this layout skips it.
         let tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility,
             ty: wgpu::BindingType::Texture {
                 // Channels are Rgba32Float (unfilterable in core WebGPU).
                 sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -265,7 +298,7 @@ impl Renderer {
                 // `i_ui`: there is no UI here, so always the transparent dummy.
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -275,20 +308,20 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility,
                     // Must match the app's layout (fullscreen_material.rs).
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -298,9 +331,35 @@ impl Renderer {
                 },
             ],
         });
+        // The storage group: four untyped read-write storage buffers, like
+        // the app's (fullscreen_material.rs).
+        let storage_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        // Only for shaders that use it: adapters without storage buffers
+        // (GLES 3.0) reject the layout itself.
+        let storage_bgl = uses_storage.then(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadertoy-storage-bgl"),
+                entries: &[
+                    storage_entry(0),
+                    storage_entry(1),
+                    storage_entry(2),
+                    storage_entry(3),
+                ],
+            })
+        });
+        let groups = [Some(&bgl), storage_bgl.as_ref()];
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadertoy-pl"),
-            bind_group_layouts: &[Some(&bgl)],
+            bind_group_layouts: if uses_storage { &groups } else { &groups[..1] },
             immediate_size: 0,
         });
 
@@ -356,6 +415,57 @@ impl Renderer {
                 )
             })
             .collect();
+        let compute_pipelines: Vec<_> = compile::COMPUTE_NAMES
+            .iter()
+            .zip(compute.passes)
+            .filter_map(|(name, pass)| {
+                let pass = pass?;
+                let entry = compile::compute_entry(name);
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("compute-cp"),
+                    layout: Some(&layout),
+                    module: &user_module,
+                    entry_point: Some(&entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+                Some((pass, pipeline))
+            })
+            .collect();
+        let max = device.limits().max_storage_buffer_binding_size;
+        let storage_buffers: Vec<wgpu::Buffer> = if storage_bgl.is_some() {
+            compute
+                .storage
+                .iter()
+                .map(|size| {
+                    let bytes = size.map_or(16, |s| s.bytes(width, height));
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("shadertoy-storage"),
+                        size: (bytes.min(max) & !3).max(16),
+                        // COPY_DST: zeroed by `clear_buffer` before each render.
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let storage = storage_bgl.as_ref().map(|storage_bgl| {
+            let entries: Vec<_> = storage_buffers
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shadertoy-storage-bg"),
+                layout: storage_bgl,
+                entries: &entries,
+            })
+        });
 
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadertoy-uniform"),
@@ -424,6 +534,7 @@ impl Renderer {
             });
             Surface {
                 view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                clear: true,
             }
         };
         let mut pairs: Vec<[Surface; 2]> = Vec::new();
@@ -437,9 +548,11 @@ impl Renderer {
                 pairs.push([
                     Surface {
                         view: dummy_view.clone(),
+                        clear: false,
                     },
                     Surface {
                         view: dummy_view.clone(),
+                        clear: false,
                     },
                 ]);
             }
@@ -485,6 +598,9 @@ impl Renderer {
             bgl,
             main_pipeline,
             buffer_pipelines,
+            compute_pipelines,
+            storage,
+            storage_buffers,
             uniform,
             sampler,
             dummy_view,
@@ -539,10 +655,46 @@ impl Renderer {
         })
     }
 
-    /// Render `frames` frames (buffer passes, the main pass, then the
-    /// debugger blit pass if on), ending at `time`, with the given
-    /// `i_tweaks` and `i_mouse`. Every call counts frames from 0; the
-    /// buffers keep what the previous call left in them.
+    /// Zero the buffer targets and the storage buffers.
+    fn clear_state(&self) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("clear-encoder"),
+            });
+        for buffer in &self.storage_buffers {
+            encoder.clear_buffer(buffer, 0, None);
+        }
+        // An empty pass that clears is the portable way to zero a render
+        // target (`clear_texture` needs an optional feature).
+        for surface in self.pairs.iter().flatten().filter(|s| s.clear) {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render `frames` frames (compute passes, buffer passes, the main
+    /// pass, then the debugger blit pass if on), ending at `time`, with the
+    /// given `i_tweaks` and `i_mouse`. Every call starts from scratch, like
+    /// a fresh compile in the app: frames count from 0, and the buffers and
+    /// storage start zeroed. So renders of the same shader with different
+    /// constants (Drag's finite differences) differ only by the constants,
+    /// not by how far a simulation had run before.
     pub fn render(
         &mut self,
         time: f32,
@@ -552,6 +704,7 @@ impl Renderer {
     ) -> Result<(), String> {
         let (width, height, buffers) = (self.width, self.height, self.buffers);
         let (dummy_view, pairs) = (&self.dummy_view, &self.pairs);
+        self.clear_state();
         for frame in 0..frames {
             let t = time * (frame + 1) as f32 / frames as f32;
             let mut uniforms = ShaderToyUniform {
@@ -586,6 +739,32 @@ impl Renderer {
                     label: Some("smoke-encoder"),
                 });
 
+            // Compute passes, A→D, reading the channels as the previous
+            // frame left them.
+            if let Some(storage) = &self.storage
+                && !self.compute_pipelines.is_empty()
+            {
+                let previous: [&wgpu::TextureView; 4] = std::array::from_fn(|j| {
+                    if buffers & (1 << j) == 0 {
+                        dummy_view
+                    } else {
+                        &pairs[j][read_slot].view
+                    }
+                });
+                let bind_group = self.bind_group("compute-bg", previous);
+                for (dispatch, pipeline) in &self.compute_pipelines {
+                    let [x, y, z] = dispatch.workgroups(width, height);
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("compute-pass"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &bind_group, &[]);
+                    pass.set_bind_group(1, storage, &[]);
+                    pass.dispatch_workgroups(x, y, z);
+                }
+            }
+
             // Buffer passes, A→D. Earlier channels read this frame's result;
             // self and later channels read the previous frame's slot.
             for &(i, ref pipeline) in &self.buffer_pipelines {
@@ -617,6 +796,9 @@ impl Renderer {
                 });
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
+                if let Some(storage) = &self.storage {
+                    pass.set_bind_group(1, storage, &[]);
+                }
                 pass.draw(0..3, 0..1);
             }
 
@@ -654,6 +836,9 @@ impl Renderer {
                 });
                 pass.set_pipeline(&self.main_pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
+                if let Some(storage) = &self.storage {
+                    pass.set_bind_group(1, storage, &[]);
+                }
                 pass.draw(0..3, 0..1);
             }
 

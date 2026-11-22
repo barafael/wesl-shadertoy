@@ -30,6 +30,7 @@ use bevy::render::view::ExtractedView;
 
 use super::ShaderToyUniform;
 use super::buffers::BufferPipelines;
+use super::compute::ComputePipelines;
 use super::fullscreen_material::{
     FullscreenMaterialPipeline, FullscreenMaterialPipelineId, ShaderToyFragment,
 };
@@ -106,6 +107,7 @@ fn queue_pipelines(
     cache: &PipelineCache,
     fullscreen: &mut FullscreenMaterialPipeline<ShaderToyUniform>,
     buffers: &mut BufferPipelines,
+    computes: &mut ComputePipelines,
 ) -> Option<ShaderPipelines> {
     let main = fullscreen
         .main_pipeline(cache, &fragment.handle, format)
@@ -116,10 +118,18 @@ fn queue_pipelines(
             .into_iter()
             .flatten(),
     );
+    let compute_ids = computes
+        .ids_for(cache, fullscreen, &fragment.handle, fragment.compute.mask())
+        .into_iter()
+        .flatten()
+        .map(|id| cache.get_compute_pipeline_state(id));
     let mut ready = true;
     let mut error = None;
-    for id in ids {
-        match cache.get_render_pipeline_state(id) {
+    for state in ids
+        .map(|id| cache.get_render_pipeline_state(id))
+        .chain(compute_ids)
+    {
+        match state {
             CachedPipelineState::Ok(_) => {}
             CachedPipelineState::Err(e) => {
                 ready = false;
@@ -156,6 +166,7 @@ pub fn activate_shader(
     pipeline_cache: Res<PipelineCache>,
     mut fullscreen: ResMut<FullscreenMaterialPipeline<ShaderToyUniform>>,
     mut buffer_pipelines: ResMut<BufferPipelines>,
+    mut compute_pipelines: ResMut<ComputePipelines>,
     target: MainPassTarget,
     playback: Res<Playback>,
     rejected: Res<RejectedGeneration>,
@@ -170,6 +181,7 @@ pub fn activate_shader(
             cache,
             &mut fullscreen,
             &mut buffer_pipelines,
+            &mut compute_pipelines,
         ) else {
             continue;
         };
@@ -191,6 +203,7 @@ pub fn activate_shader(
                     cache,
                     &mut fullscreen,
                     &mut buffer_pipelines,
+                    &mut compute_pipelines,
                 )
                 .filter(|p| p.ready)
                 .map(|p| (a.fragment.clone(), p.main))

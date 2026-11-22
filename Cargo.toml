@@ -19,8 +19,8 @@ exclude = [".claude"]
 # umbrella features (which drag in bevy_pbr, bevy_gltf, gizmos, picking,
 # scene, anti-aliasing — tens of MB of wasm) and take only what the vendored
 # fullscreen-material plugin and the egui integration actually need.
-# `default_platform` already enables `webgl2`, so the wasm build runs in any
-# WebGL2 browser; add the `webgpu` feature to require WebGPU instead.
+# `default_platform` already enables `webgl2`; the wasm target adds
+# `webgpu` below, and the app picks one of the two at startup.
 bevy = { version = "0.20", default-features = false, features = [
     "default_app",
     "default_platform",
@@ -78,6 +78,12 @@ png = "0.17"
 jiff = "1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# One web build for every browser: WebGPU where it works (compute passes
+# run), WebGL2 elsewhere. `main` probes for WebGPU before starting the app
+# and asks for that backend (with both features Bevy would otherwise insist
+# on WebGPU). wgpu, the same one Bevy uses, provides the probe.
+bevy = { version = "0.20", default-features = false, features = ["webgpu"] }
+wgpu = { version = "30", default-features = false }
 web-sys = { version = "0.3", features = [
     "Storage",
     "Window",

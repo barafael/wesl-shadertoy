@@ -128,6 +128,7 @@ impl Header {
             }
         };
         imply("buffers", text.contains("fn buffer_a"));
+        imply("compute", text.contains("fn compute_"));
         imply("mouse", text.contains("i_mouse"));
         imply("lygia", text.contains("lygia::"));
         let tags = tags

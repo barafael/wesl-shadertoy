@@ -104,9 +104,21 @@ fn assert_backends_agree(cases: &[Case], tolerated: &[&str]) {
     );
 }
 
+/// Examples with compute passes are left out: the GPU harness renders
+/// fragment passes only (they still go through the translation test).
 #[test]
 fn examples_render_alike_on_every_backend() {
-    assert_backends_agree(&Case::examples(), BACKEND_DEPENDENT);
+    let cases: Vec<Case> = Case::examples()
+        .into_iter()
+        .filter(|c| {
+            let uses = compile_user_shader(&c.source).is_ok_and(|s| s.compute.is_used());
+            if uses {
+                println!("{}: skipped (compute passes)", c.name);
+            }
+            !uses
+        })
+        .collect();
+    assert_backends_agree(&cases, BACKEND_DEPENDENT);
 }
 
 #[test]

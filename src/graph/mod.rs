@@ -31,6 +31,7 @@ pub mod layout;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
+use crate::compile::Compute;
 use crate::render::ShaderToyUniform;
 use crate::render::previews::{
     PREVIEW_FORMAT, PREVIEW_SIZE, PreviewFeedback, PreviewJob, PreviewJobs, PreviewKey,
@@ -105,6 +106,8 @@ struct Built {
     key: (u32, String, Mode),
     /// Buffer passes the compile defines; every variant runs them too.
     buffers: u8,
+    /// Likewise its compute passes and storage buffers.
+    compute: Compute,
     functions: Vec<String>,
     result: Result<(Graph, Layout), String>,
     /// Per node: its thumbnail slot.
@@ -143,6 +146,7 @@ struct Slot {
     /// restart with the new variant.
     generation: u32,
     buffers: u8,
+    compute: Compute,
     last_drawn: f32,
 }
 
@@ -160,7 +164,7 @@ pub fn parse(wgsl: &str) -> Result<(naga::Module, naga::valid::ModuleInfo), Stri
 
 impl GraphView {
     /// Rebuild the graph if the compile, function or mode changed.
-    fn refresh(&mut self, wgsl: &str, generation: u32, buffers: u8) {
+    fn refresh(&mut self, wgsl: &str, generation: u32, buffers: u8, compute: Compute) {
         let key = (generation, self.function.clone(), self.mode);
         if self.built.as_ref().is_some_and(|b| b.key == key) {
             return;
@@ -169,6 +173,7 @@ impl GraphView {
         let mut built = Built {
             key,
             buffers,
+            compute,
             functions: Vec::new(),
             result: Err("Compile a shader to see its graph.".into()),
             thumbs: Vec::new(),
@@ -379,12 +384,12 @@ pub fn show(
     view: &mut GraphView,
     wgsl: &str,
     generation: u32,
-    buffers: u8,
+    (buffers, compute): (u8, Compute),
     feedback: &PreviewFeedback,
 ) {
     view.shown = true;
     view.hovered_slot = None;
-    view.refresh(wgsl, generation, buffers);
+    view.refresh(wgsl, generation, buffers, compute);
 
     ui.horizontal(|ui| {
         let functions = view
@@ -422,7 +427,7 @@ pub fn show(
         }
     });
     // A switch takes effect next frame (the combo box borrows the list).
-    view.refresh(wgsl, generation, buffers);
+    view.refresh(wgsl, generation, buffers, compute);
 
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -643,6 +648,7 @@ pub fn update_thumbnails(
             holds: None,
             generation: 0,
             buffers: 0,
+            compute: Compute::default(),
             last_drawn: 0.0,
         });
     }
@@ -662,6 +668,7 @@ pub fn update_thumbnails(
             .insert(&slot.shader, Shader::from_wgsl(variant.wgsl.clone(), path))
             .expect("slot handles stay valid");
         slot.buffers = built.buffers;
+        slot.compute = built.compute;
         slot.holds = Some(variant.hash);
         slot.generation += 1;
     }
@@ -712,6 +719,7 @@ pub fn update_thumbnails(
             generation: slot.generation,
             shader: slot.shader.clone(),
             buffers: slot.buffers,
+            compute: slot.compute,
             uniform,
         });
     }
@@ -746,7 +754,9 @@ mod tests {
                 let shown = egui::Window::new("Graph")
                     .default_pos([100.0, 60.0])
                     .default_size([760.0, 520.0])
-                    .show(ui.ctx(), |ui| show(ui, &mut view, &wgsl, 1, 0, &feedback));
+                    .show(ui.ctx(), |ui| {
+                        show(ui, &mut view, &wgsl, 1, (0, Compute::default()), &feedback)
+                    });
                 sizes.push(shown.unwrap().response.rect.size());
             })
             .drop_without_applying_deltas();
@@ -762,7 +772,7 @@ mod tests {
             .expect("compiles")
             .wgsl;
         let mut view = GraphView::default();
-        view.refresh(&wgsl, 1, 0);
+        view.refresh(&wgsl, 1, 0, Compute::default());
         let built = view.built.as_ref().unwrap();
         let (graph, _) = built.result.as_ref().expect("graph");
         let with_thumbs: Vec<&str> = graph
@@ -782,7 +792,7 @@ mod tests {
             mode: Mode::All,
             ..default()
         };
-        all.refresh(&wgsl, 1, 0);
+        all.refresh(&wgsl, 1, 0, Compute::default());
         let built = all.built.as_ref().unwrap();
         let (graph, _) = built.result.as_ref().expect("graph");
         let thumbs = built.thumbs.iter().flatten().count();
@@ -799,7 +809,7 @@ mod tests {
                 .wgsl;
             for mode in [Mode::Lets, Mode::All] {
                 let mut view = GraphView { mode, ..default() };
-                view.refresh(&wgsl, 1, 0);
+                view.refresh(&wgsl, 1, 0, Compute::default());
                 let built = view.built.as_ref().unwrap();
                 assert!(built.result.is_ok(), "{}", example.name);
                 assert!(built.variants.len() <= MAX_THUMBS);

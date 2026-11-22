@@ -138,7 +138,11 @@ pub fn user_functions(module: &Module) -> Vec<(String, Handle<Function>)> {
         .collect();
     let rank = |name: &str| match name {
         "main_image" => 0,
-        n if crate::compile::BUFFER_NAMES.contains(&n) => 1,
+        n if crate::compile::BUFFER_NAMES.contains(&n)
+            || crate::compile::COMPUTE_NAMES.contains(&n) =>
+        {
+            1
+        }
         _ => 2,
     };
     out.sort_by(|a, b| (rank(&a.0), &a.0).cmp(&(rank(&b.0), &b.0)));
@@ -986,7 +990,9 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         );
     }
 
-    /// Every example's functions extract in both modes.
+    /// Every example's functions extract in both modes, with a return node
+    /// wherever they return a value (compute passes return none: they
+    /// write storage buffers).
     #[test]
     fn every_example_extracts() {
         for example in crate::examples::ALL {
@@ -997,7 +1003,8 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
                 for mode in [Mode::Lets, Mode::All] {
                     let g = extract(&module, &info, f, mode);
                     assert!(
-                        g.nodes.iter().any(|n| n.kind == Kind::Return),
+                        module.functions[f].result.is_none()
+                            || g.nodes.iter().any(|n| n.kind == Kind::Return),
                         "{}: no return",
                         example.name
                     );

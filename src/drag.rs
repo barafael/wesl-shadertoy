@@ -378,6 +378,7 @@ pub struct Job {
     pub generation: u32,
     pub wgsl: std::sync::Arc<str>,
     pub buffers: u8,
+    pub compute: crate::compile::Compute,
     /// Estimation size, pixels.
     pub size: UVec2,
     pub time: f32,
@@ -447,8 +448,9 @@ mod native {
 
     /// Render `values` and read it back as [`Gray`].
     pub fn frame(renderer: &mut Renderer, job: &Job, values: &Values) -> Result<Gray, String> {
-        // One frame: buffer shaders start from scratch, which is the
-        // best a frozen-time estimate can do for them.
+        // One frame from scratch (`render` zeroes buffers and storage):
+        // the best a frozen-time estimate can do for buffer and compute
+        // shaders, and the same start for every variant.
         renderer.render(job.time, 1, values, job.mouse)?;
         let bytes = renderer.read()?;
         Ok(Gray::from_rgba32f(
@@ -517,6 +519,7 @@ mod native {
         pollster::block_on(Renderer::new(
             &job.wgsl,
             job.buffers,
+            &job.compute,
             job.size.x,
             job.size.y,
             FORMAT,
@@ -830,6 +833,7 @@ pub fn update(mut p: DragParams) {
             generation: grab.generation,
             wgsl,
             buffers: p.fragment.buffers,
+            compute: p.fragment.compute,
             size: grab.size,
             time: p.state.time,
             mouse: p.state.mouse * scale,
@@ -1011,6 +1015,7 @@ fn drag_cli(
         generation: 1,
         wgsl: compiled.wgsl.as_str().into(),
         buffers: compiled.buffers,
+        compute: compiled.compute,
         size,
         time,
         mouse: Vec4::ZERO,
@@ -1086,6 +1091,7 @@ fn drag_cli(
     let mut full = pollster::block_on(crate::headless::Renderer::new(
         &compiled.wgsl,
         compiled.buffers,
+        &compiled.compute,
         FULL.x,
         FULL.y,
         wgpu::TextureFormat::Rgba32Float,
@@ -1425,6 +1431,7 @@ mod tests {
             generation: 7,
             wgsl: compiled.wgsl.as_str().into(),
             buffers: compiled.buffers,
+            compute: compiled.compute,
             size: UVec2::new(EST_WIDTH, 108),
             time: 3.0,
             mouse: Vec4::ZERO,

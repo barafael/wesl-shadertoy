@@ -25,7 +25,7 @@ use bevy::platform::collections::HashMap;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::{ComponentUniforms, DynamicUniformIndex};
 use bevy::render::render_resource::{
-    BindGroupEntries, BindingResource, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+    BindGroup, BindingResource, CachedRenderPipelineId, ColorTargetState, ColorWrites,
     CommandEncoder, Extent3d, FragmentState, Operations, PipelineCache, RenderPassColorAttachment,
     RenderPassDescriptor, RenderPipelineDescriptor, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
@@ -158,7 +158,7 @@ impl BufferPipelines {
                 let name = crate::compile::BUFFER_NAMES[i];
                 pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(format!("shadertoy_buffer_pipeline_{name}").into()),
-                    layout: vec![fullscreen.layout.clone()],
+                    layout: fullscreen.layouts(),
                     vertex: fullscreen.vertex.clone(),
                     fragment: Some(FragmentState {
                         shader: shader.clone(),
@@ -192,6 +192,9 @@ pub(crate) struct BufferPass<'a> {
     pub offset: u32,
     /// [`ChannelViews::dummy`], bound for channels the shader lacks.
     pub dummy: &'a TextureView,
+    /// The storage group ([`super::compute`]); required where the layout
+    /// has one.
+    pub storage: Option<&'a BindGroup>,
 }
 
 impl BufferPass<'_> {
@@ -212,9 +215,9 @@ impl BufferPass<'_> {
                 *slot = dummy.clone();
             }
         }
-        let bgl = self
-            .pipeline_cache
-            .get_bind_group_layout(&self.fullscreen.layout);
+        if self.fullscreen.storage.is_some() && self.storage.is_none() {
+            return;
+        }
         for (i, name) in crate::compile::BUFFER_NAMES.iter().enumerate() {
             if self.mask & (1 << i) == 0 {
                 continue;
@@ -238,20 +241,14 @@ impl BufferPass<'_> {
                 continue; // pipeline still compiling; channel keeps its stale view
             };
 
-            let bind_group = self.device.create_bind_group(
-                Some(format!("shadertoy_buffer_bind_group_{name}").as_str()),
-                &bgl,
-                &BindGroupEntries::sequential((
-                    dummy,
-                    &self.fullscreen.sampler,
-                    self.uniforms.clone(),
-                    &reads[0],
-                    &reads[1],
-                    &reads[2],
-                    &reads[3],
-                    &self.fullscreen.ui_dummy,
-                    &self.fullscreen.ui_sampler,
-                )),
+            let bind_group = self.fullscreen.bind_group(
+                self.device,
+                self.pipeline_cache,
+                &format!("shadertoy_buffer_bind_group_{name}"),
+                dummy,
+                self.uniforms.clone(),
+                reads.each_ref(),
+                None,
             );
 
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -269,6 +266,9 @@ impl BufferPass<'_> {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[self.offset]);
+            if let Some(storage) = self.storage {
+                pass.set_bind_group(1, storage, &[]);
+            }
             pass.draw(0..3, 0..1);
             drop(pass);
 
@@ -297,6 +297,7 @@ pub struct BufferPassParams<'w> {
     channels: ResMut<'w, ChannelViews>,
     targets: ResMut<'w, BufferTargets>,
     pipelines: ResMut<'w, BufferPipelines>,
+    storage: Res<'w, super::compute::MainStorage>,
 }
 
 /// Render the defined buffer passes (A→D) into their ping-pong targets and
@@ -358,6 +359,7 @@ pub fn shadertoy_buffer_pass(
         uniforms: settings_binding,
         offset: view.1.index(),
         dummy: &dummy,
+        storage: p.storage.bind_group.as_ref(),
     };
     pass.draw(ctx.command_encoder(), &mut p.targets, &mut p.channels.views);
 }

@@ -72,6 +72,13 @@ pub fn export(text: &str, title: Option<&str>, target: Target) -> Result<Crate, 
                 .into(),
         );
     }
+    if compiled.compute.is_used() {
+        return Err(
+            "export does not support compute passes (compute_a..compute_d) or storage \
+             buffers yet; only single-pass shaders"
+                .into(),
+        );
+    }
     // Bevy's stock fullscreen material binds the screen texture, its sampler
     // and the uniforms (0..=2); the lock screen only the uniforms.
     let bound = |b: u32| match target {
@@ -112,15 +119,17 @@ pub fn export(text: &str, title: Option<&str>, target: Target) -> Result<Crate, 
     })
 }
 
-/// The first binding of the linked `wgsl` that the exported crate does not
-/// provide (`bound` says which it does): a buffer channel read without a
-/// buffer pass, or the UI texture.
+/// The first binding of the linked `wgsl`'s group 0 that the exported
+/// crate does not provide (`bound` says which it does): a buffer channel
+/// read without a buffer pass, or the UI texture. (Other groups are the
+/// storage buffers, refused before this.)
 fn unsupported_binding(wgsl: &str, bound: impl Fn(u32) -> bool) -> Option<u32> {
     let module = naga::front::wgsl::parse_str(wgsl).ok()?;
     module
         .global_variables
         .iter()
         .filter_map(|(_, var)| var.binding.as_ref())
+        .filter(|b| b.group == 0)
         .map(|b| b.binding)
         .find(|&b| !bound(b))
 }
@@ -828,6 +837,11 @@ fn main_image(p: vec2<f32>) -> vec4<f32> {
             .err()
             .unwrap();
         assert!(why.contains("buffer"), "{why}");
+        let particles = examples::by_name("Particles").unwrap();
+        let why = export(particles.code, Some(particles.name), Target::Bevy)
+            .err()
+            .unwrap();
+        assert!(why.contains("compute passes"), "{why}");
         // Bindings past the stock material's 0..=2 would fail in the crate.
         let melt = examples::by_name("UI Melt").unwrap();
         let why = export(melt.code, Some(melt.name), Target::Bevy)

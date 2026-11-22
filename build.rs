@@ -36,12 +36,13 @@ fn main() {
 }
 
 /// `COMPILED`: every example composed and validated, in
-/// `examples::ALL` order, with its buffer mask and its live constants'
-/// default values.
+/// `examples::ALL` order, with its buffer mask, its compute passes and
+/// storage (as their `Debug` form, which is Rust with the `compile` types
+/// in scope) and its live constants' default values.
 fn compiled_examples() -> String {
     use wesl_shadertoy_core::compile::compile_user_shader;
     use wesl_shadertoy_core::examples::ALL;
-    let mut out = String::from("static COMPILED: &[CompiledExample] = &[\n");
+    let mut out = String::from("pub(super) static COMPILED: &[CompiledExample] = &[\n");
     for example in ALL {
         let compiled = compile_user_shader(example.code)
             .unwrap_or_else(|e| panic!("example {} does not compile: {e}", example.name));
@@ -52,9 +53,10 @@ fn compiled_examples() -> String {
             .collect();
         let _ = writeln!(
             out,
-            "    CompiledExample {{ wgsl: {:?}, buffers: {}, tweaks: &[{}] }},",
+            "    CompiledExample {{ wgsl: {:?}, buffers: {}, compute: {:?}, tweaks: &[{}] }},",
             compiled.wgsl,
             compiled.buffers,
+            compiled.compute,
             tweaks.join(", ")
         );
     }

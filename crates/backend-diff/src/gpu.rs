@@ -252,6 +252,9 @@ impl Gpu {
         if shader.buffers != 0 && !self.float_targets {
             return Err("Rgba32Float is not renderable; buffer passes cannot run".into());
         }
+        if shader.compute.is_used() {
+            return Err("compute passes and storage buffers are not supported here yet".into());
+        }
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let image = self.render_unscoped(shader, scene);
         if let Some(error) = pollster::block_on(scope.pop()) {

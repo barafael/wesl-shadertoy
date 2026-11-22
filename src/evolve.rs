@@ -326,6 +326,7 @@ pub fn update_previews(
             generation: fragment.generation,
             shader: fragment.handle.clone(),
             buffers: fragment.buffers,
+            compute: fragment.compute,
             uniform,
         });
     }

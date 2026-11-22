@@ -71,10 +71,37 @@ fn main() {
             drag::run_cli(&args);
             return;
         }
+        run(None);
+    }
+    // WebGPU where the browser really has it, else WebGL2. Asking for an
+    // adapter is the only reliable test (Chrome on Linux has `navigator.gpu`
+    // but no adapter), and it is async, so the app starts once it answers.
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async {
+        use bevy::render::settings::Backends;
+        let webgpu = wgpu::util::is_browser_webgpu_supported().await;
+        run(Some(if webgpu {
+            Backends::BROWSER_WEBGPU
+        } else {
+            Backends::GL
+        }));
+    });
+}
+
+/// Build and run the app, on `backends` if given (else Bevy's default for
+/// the platform).
+fn run(backends: Option<bevy::render::settings::Backends>) {
+    let mut wgpu_settings = bevy::render::settings::WgpuSettings::default();
+    if backends.is_some() {
+        wgpu_settings.backends = backends;
     }
     App::new()
         .add_plugins(
             DefaultPlugins
+                .set(bevy::render::RenderPlugin {
+                    render_creation: wgpu_settings.into(),
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "wesl-shadertoy".into(),
@@ -189,8 +216,10 @@ struct CurrentShader {
     generation: u32,
     /// Its composed WGSL, for the WGSL window.
     wgsl: String,
-    /// Its buffer passes, bit per pass (for the Graph's thumbnails).
+    /// Its buffer passes, bit per pass, and its compute passes and storage
+    /// (for the Graph's thumbnails).
     buffers: u8,
+    compute: compile::Compute,
 }
 
 impl CurrentShader {
@@ -609,6 +638,7 @@ struct CompileParams<'w, 's> {
     feedback: Res<'w, ShaderFeedback>,
     tweaks: ResMut<'w, Tweaks>,
     heat: Res<'w, heatmap::Heat>,
+    gpu_compute: Res<'w, render::compute::GpuCompute>,
 }
 
 /// Compile the editor text and, on success, hot-swap the running shader.
@@ -622,7 +652,16 @@ fn compile_and_apply(mut p: CompileParams) {
     p.status.note = None;
 
     let started = Instant::now();
-    match compile::compile_user_shader_with(&p.doc.text, p.heat.on) {
+    // Shaders with compute passes compile anywhere, but run only where the
+    // GPU has compute (not on WebGL2).
+    let compiled = compile::compile_user_shader_with(&p.doc.text, p.heat.on).and_then(|c| match p
+        .gpu_compute
+        .refuse(&c.compute)
+    {
+        Some(e) => Err(e),
+        None => Ok(c),
+    });
+    match compiled {
         Ok(compiled) => {
             // Replace the slot that is not on screen. Repeated compiles
             // before the first lands keep overwriting the same pending slot.
@@ -641,12 +680,14 @@ fn compile_and_apply(mut p: CompileParams) {
             p.current.generation += 1;
             p.current.wgsl = compiled.wgsl;
             p.current.buffers = compiled.buffers;
+            p.current.compute = compiled.compute;
             p.tweaks.replace(compiled.tweaks, compiled.fixed);
             // The render world switches to it (and restarts i_frame, the
             // channel clocks and the buffers) once its pipelines are built.
             **p.fragment = ShaderToyFragment {
                 handle,
                 buffers: compiled.buffers,
+                compute: compiled.compute,
                 generation: p.current.generation,
             };
             let ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -1151,7 +1192,7 @@ fn ui(mut p: UiParams) {
                     &mut p.graph,
                     &current.wgsl,
                     current.generation,
-                    current.buffers,
+                    (current.buffers, current.compute),
                     &p.preview_feedback,
                 );
             },

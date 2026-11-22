@@ -40,8 +40,18 @@ pub fn translate(wgsl: &str) -> Result<[Outcome; 4], String> {
 }
 
 /// GLSL ES 3.00 as WebGL2 sees it, one fragment entry point at a time (the
-/// GLSL writer emits a single entry point per shader).
+/// GLSL writer emits a single entry point per shader). Compute entries (the
+/// stubs every shader carries) are left out, and shaders with storage
+/// buffers skipped whole: WebGL2 has neither, and the app does not run them
+/// there.
 fn glsl(module: &naga::Module, info: &naga::valid::ModuleInfo) -> Outcome {
+    let storage = module
+        .global_variables
+        .iter()
+        .any(|(_, v)| matches!(v.space, naga::AddressSpace::Storage { .. }));
+    if storage {
+        return Ok("skipped: storage buffers need WebGPU");
+    }
     use naga::back::glsl;
     let options = glsl::Options {
         version: glsl::Version::Embedded {
@@ -52,6 +62,9 @@ fn glsl(module: &naga::Module, info: &naga::valid::ModuleInfo) -> Outcome {
     };
     let mut note = "";
     for entry in &module.entry_points {
+        if entry.stage == naga::ShaderStage::Compute {
+            continue;
+        }
         let pipeline = glsl::PipelineOptions {
             shader_stage: entry.stage,
             entry_point: entry.name.clone(),
