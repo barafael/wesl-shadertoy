@@ -291,15 +291,65 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
   image) can read and write them. A fixed-size type gets exactly its size
   (at most 128 MiB); a runtime-sized `array<T>` gets one element per pixel
   of the view.
-* **How many invocations**: `compute_x(p: vec2<u32>)` runs once per pixel
-  (`p` in the same pixel space as `frag_coord`). `compute_x(i: u32)` runs
-  once per element of the array at `@binding(0)` — or `n` times with a
-  `// dispatch: n` line right above the function.
+* **How many invocations**: once per pixel, once per element of the array
+  at `@binding(0)`, or a count you give in a `// dispatch: n` comment. The
+  parameter decides which; see [below](#how-many-invocations).
 * **Order**: compute A → D, then buffer A → D, then the image, every frame.
   Compute passes read the channels as the previous frame left them.
 * **State**: storage starts zeroed and is zeroed again on every compile, on
   Reset and (if one is sized by the view) on resize; compute passes hold
   still while paused, like buffer passes.
+
+#### How many invocations
+
+A compute function takes exactly one parameter, and its type picks how often
+the pass runs each frame:
+
+| Signature | Runs | Count |
+| --- | --- | --- |
+| `fn compute_x(p: vec2<u32>)` | once per pixel | the viewport, `p` in the same pixel space as `frag_coord` |
+| `fn compute_x(i: u32)` with `// dispatch: n` above it | `n` times | `i` in `0..n` |
+| `fn compute_x(i: u32)` over a fixed-size array at `@binding(0)` | once per element | `array<T, n>` gives `i` in `0..n` |
+| `fn compute_x(i: u32)` over a runtime-sized `array<T>` at `@binding(0)` | once per pixel | `i` in `0..width * height` |
+
+A `// dispatch:` line takes precedence over the binding-0 array, so a pass can
+cover fewer (or more) invocations than the array has elements, or run with no
+binding 0 at all:
+
+```rust
+@group(1) @binding(0) var<storage, read_write> bins: array<atomic<u32>, 256>;
+
+fn compute_a(i: u32) {                     // 256 times: clear each bin
+    atomicStore(&bins[i], 0u);
+}
+
+// dispatch: 1_000_000
+fn compute_b(i: u32) {                     // a million samples into the bins
+    let bin = (i * 2654435761u) >> 24u;    // hash i to 0..255
+    atomicAdd(&bins[bin], 1u);
+}
+```
+
+The `// dispatch:` line:
+
+* must be the last non-blank line before the `fn` line; blank lines between
+  them are fine, any other line (even another comment) hides it;
+* holds a plain count of invocations, not workgroups: `_` separators and a
+  trailing `u` are allowed (`1_024`, `64u`); anything else, or `0`, is a
+  compile error;
+* only applies to `compute_x(i: u32)`; on `compute_x(p: vec2<u32>)` it is a
+  compile error, since that pass always covers the viewport.
+
+An `i: u32` pass with neither a `// dispatch:` line nor an array at
+`@binding(0)` is a compile error that asks for one of the two.
+
+You never pick workgroup sizes or counts: the app wraps each pass in its own
+`@compute` entry point, with 8×8 workgroups for per-pixel passes and 64-wide
+ones for `i: u32` passes, and dispatches enough of them to cover the count.
+Invocations past the count (the leftovers of the last workgroup) return before
+your function is called, so `i` and `p` are always in range. Linear passes
+longer than 65535 workgroups (about 4.2 million invocations) spill into a
+second row of workgroups; `i` stays a flat index regardless.
 
 Compute needs WebGPU: native builds have it on Vulkan, Metal and DX12 (not on
 an OpenGL-only adapter, which the app checks at startup), and the web build uses
