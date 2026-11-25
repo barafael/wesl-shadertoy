@@ -95,6 +95,13 @@ pub struct Library {
 }
 
 impl Library {
+    /// Show the source of the module at `path` (`generative::snoise`).
+    pub fn open_source(&mut self, path: &str) {
+        if let Some(m) = module(path) {
+            self.source = Some(m);
+        }
+    }
+
     /// The modules that pass the category filter and contain every word of
     /// the query (in their path, item names or description).
     fn filtered(&mut self) -> Vec<&'static ModuleDoc> {

@@ -36,6 +36,13 @@ use crate::analyzer::{Diagnostic, Severity};
 use crate::highlight::highlight_job;
 use crate::theme::SYNTAX;
 
+mod assist;
+mod peek;
+#[cfg(test)]
+use assist::DiagnosticsOnly;
+pub use assist::{AssistOptions, AssistOutput, Assistant, CodeAssist};
+pub use peek::{Peek, PeekAction};
+
 /// Cached highlight results, so the tokenizer runs only when the text
 /// actually changed — not on every egui frame (egui calls the editor's
 /// layouter once per frame, more while interacting).
@@ -114,14 +121,18 @@ fn gutter_width(ctx: &Context, font_id: &FontId, lines: usize) -> f32 {
     digits * ctx.fonts_mut(|f| f.glyph_width(font_id, '0')) + 8.0 + GUTTER_GAP
 }
 
-/// Show the highlighted code editor inside `ui`, reusing (and updating) the highlighted jobs held in `cache`.
-/// `diagnostics` (char ranges into `text`) are squiggled under the code.
+/// Show the highlighted code editor inside `ui`, reusing (and updating) the
+/// highlighted jobs held in `cache`. `assistant`'s diagnostics are squiggled
+/// under the code, and it answers the completion, signature, definition and
+/// format requests the editor makes (popup state in `assist`).
 pub fn show_code_editor(
     ui: &mut Ui,
     text: &mut String,
     cache: &mut HighlightCache,
-    diagnostics: &[Diagnostic],
-) {
+    assist: &mut CodeAssist,
+    assistant: &mut dyn Assistant,
+    options: AssistOptions,
+) -> AssistOutput {
     let pal = SYNTAX;
     let ctx = ui.ctx().clone();
     let font_id = FontId::monospace(13.0);
@@ -137,6 +148,14 @@ pub fn show_code_editor(
     // the TextEdit's `lock_focus` keeps egui from moving focus on Tab) ---
     let prev_id: Option<Id> = ctx.data(|d| d.get_temp(editor_id_marker()));
     let focused = prev_id.is_some_and(|id| ctx.memory(|m| m.focused() == Some(id)));
+    // Code assistance first: an open popup takes the keys it uses (Tab
+    // among them) before the indenting below and the TextEdit see them.
+    let mut out = AssistOutput::default();
+    let keys = assist::shortcuts(&ctx, focused);
+    let typed = assist::typed(&ctx, focused);
+    if let Some(id) = prev_id {
+        assist::before(&ctx, id, focused, text, assist, assistant, &mut out);
+    }
     if focused {
         // Shift comes from the key event itself: the frame's modifier state
         // may already have moved on by the end of the input batch.
@@ -222,11 +241,13 @@ pub fn show_code_editor(
                     gutter_galley,
                     weak,
                 );
-                paint_diagnostics(ui, &output, gutter_rect, diagnostics);
+                paint_diagnostics(ui, &output, gutter_rect, assistant.diagnostics());
+                assist::after(ui, &output, text, &typed, keys, assist, assistant, options);
 
                 ctx.data_mut(|d| d.insert_temp(editor_id_marker(), output.response.response.id));
             });
         });
+    out
 }
 
 /// Squiggle each diagnostic under its text, tick its first line in the
@@ -323,6 +344,24 @@ fn squiggle(painter: &Painter, span: Rect, color: Color32) {
 /// keeps long composed-WGSL lines on one row (a plain Label would wrap them
 /// at the window width and break the gutter alignment).
 pub fn show_code_view(ui: &mut Ui, text: &str, cache: &mut HighlightCache) {
+    show_marked_code_view(ui, text, cache, None);
+}
+
+/// A char range to tint in a read-only code view, scrolled into view once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub range: std::ops::Range<usize>,
+    /// Still to be scrolled to.
+    pub scroll: bool,
+}
+
+/// [`show_code_view`] with `mark`'s lines tinted.
+pub fn show_marked_code_view(
+    ui: &mut Ui,
+    text: &str,
+    cache: &mut HighlightCache,
+    mark: Option<&mut Mark>,
+) {
     let pal = SYNTAX;
     let ctx = ui.ctx().clone();
     let font_id = FontId::monospace(13.0);
@@ -361,11 +400,34 @@ pub fn show_code_view(ui: &mut Ui, text: &str, cache: &mut HighlightCache) {
                 let job = cached_job(&mut cache.viewer, text, || {
                     highlight_job(text, font_id.clone(), default_color, &pal)
                 });
-                ui.add(
-                    Label::new(job)
+                let code = ui.add(
+                    Label::new(job.clone())
                         .selectable(true)
                         .wrap_mode(TextWrapMode::Extend),
                 );
+                if let Some(mark) = mark {
+                    // Same job, same layout: the rows the Label painted.
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
+                    let at = |i: usize| {
+                        galley
+                            .pos_from_cursor(CCursor::new(i))
+                            .translate(code.rect.min.to_vec2())
+                    };
+                    let (start, end) = (at(mark.range.start), at(mark.range.end));
+                    let rows =
+                        Rect::from_x_y_ranges(code.rect.x_range(), start.top()..=end.bottom());
+                    let tint = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
+                    ui.painter().rect_filled(rows, 0.0, tint);
+                    if std::mem::take(&mut mark.scroll) {
+                        // Its start, not the full width: centring that
+                        // would scroll sideways too.
+                        let target = Rect::from_x_y_ranges(
+                            code.rect.left()..=code.rect.left() + 1.0,
+                            rows.y_range(),
+                        );
+                        ui.scroll_to_rect(target, Some(Align::Center));
+                    }
+                }
             });
         });
 }
@@ -408,7 +470,7 @@ fn handle_tab(ctx: &Context, id: Id, text: &mut String, shift: bool) {
 }
 
 /// egui keeps these functions private to `text_cursor_cache`; ours are tiny.
-fn byte_index_from_char_index(s: &str, char_index: usize) -> usize {
+pub(crate) fn byte_index_from_char_index(s: &str, char_index: usize) -> usize {
     s.char_indices()
         .nth(char_index)
         .map(|(i, _)| i)
@@ -573,7 +635,14 @@ mod tests {
     fn editor_text_survives_font_atlas_rebuilds() {
         let mut text = crate::examples::default().code.to_string();
         survives_atlas_rebuilds(|ui, cache| {
-            show_code_editor(ui, &mut text, cache, &[]);
+            show_code_editor(
+                ui,
+                &mut text,
+                cache,
+                &mut CodeAssist::default(),
+                &mut DiagnosticsOnly(&[]),
+                AssistOptions::default(),
+            );
         });
     }
 
@@ -617,7 +686,14 @@ mod tests {
         };
         let mut frame = |input: RawInput, text: &mut String| {
             ctx.run_ui(input, |ui| {
-                show_code_editor(ui, text, &mut cache, &[]);
+                show_code_editor(
+                    ui,
+                    text,
+                    &mut cache,
+                    &mut CodeAssist::default(),
+                    &mut DiagnosticsOnly(&[]),
+                    AssistOptions::default(),
+                );
             })
             .drop_without_applying_deltas();
         };
@@ -658,7 +734,14 @@ mod tests {
         let mut text = crate::examples::default().code.to_string();
         for _ in 0..3 {
             ctx.run_ui(bevy_egui::egui::RawInput::default(), |ui| {
-                show_code_editor(ui, &mut text, &mut cache, &[]);
+                show_code_editor(
+                    ui,
+                    &mut text,
+                    &mut cache,
+                    &mut CodeAssist::default(),
+                    &mut DiagnosticsOnly(&[]),
+                    AssistOptions::default(),
+                );
             })
             .drop_without_applying_deltas();
         }
@@ -688,7 +771,14 @@ mod tests {
         let mut frame = || {
             let mut out = ctx.run_ui(RawInput::default(), |ui| {
                 crate::theme::apply(ui.ctx());
-                show_code_editor(ui, &mut text, &mut cache, &diagnostics);
+                show_code_editor(
+                    ui,
+                    &mut text,
+                    &mut cache,
+                    &mut CodeAssist::default(),
+                    &mut DiagnosticsOnly(&diagnostics),
+                    AssistOptions::default(),
+                );
             });
             out.textures_delta.clear();
             out
@@ -745,5 +835,338 @@ mod tests {
         // One row per line — the original bug stacked every number on row 1.
         assert_eq!(rows(&ctx, &gutter.job), text.matches('\n').count() + 1);
         assert!(gutter.job.text.starts_with("1\n2\n3\n"));
+    }
+
+    /// An assistant whose answers are scripted: completion always offers
+    /// `items`, signature help always `signature`.
+    #[derive(Default)]
+    struct Scripted {
+        items: Vec<crate::analyzer::CompletionItem>,
+        signature: Option<crate::analyzer::Signature>,
+        completion: Option<crate::analyzer::Answer<Vec<crate::analyzer::CompletionItem>>>,
+        signature_answer: Option<crate::analyzer::Answer<Option<crate::analyzer::Signature>>>,
+        /// What a format request answers.
+        formatted: Option<String>,
+        format_answer: Option<crate::analyzer::Answer<Option<String>>>,
+        /// `(method, char index)` of each request.
+        asked: Vec<(&'static str, usize)>,
+        next: crate::analyzer::Ticket,
+    }
+
+    impl Assistant for Scripted {
+        fn diagnostics(&self) -> &[Diagnostic] {
+            &[]
+        }
+        fn inlay_hints(&self) -> &[crate::analyzer::InlayHint] {
+            &[]
+        }
+        fn completion(
+            &self,
+        ) -> Option<&crate::analyzer::Answer<Vec<crate::analyzer::CompletionItem>>> {
+            self.completion.as_ref()
+        }
+        fn signature(
+            &self,
+        ) -> Option<&crate::analyzer::Answer<Option<crate::analyzer::Signature>>> {
+            self.signature_answer.as_ref()
+        }
+        fn take_definition(
+            &mut self,
+        ) -> Option<crate::analyzer::Answer<Option<crate::analyzer::Definition>>> {
+            None
+        }
+        fn take_format(&mut self) -> Option<crate::analyzer::Answer<Option<String>>> {
+            self.format_answer.take()
+        }
+        fn request_completion(&mut self, _: &str, at: usize) -> Option<crate::analyzer::Ticket> {
+            self.next += 1;
+            self.asked.push(("completion", at));
+            self.completion = Some(crate::analyzer::Answer {
+                ticket: self.next,
+                value: self.items.clone(),
+            });
+            Some(self.next)
+        }
+        fn request_signature(&mut self, _: &str, at: usize) -> Option<crate::analyzer::Ticket> {
+            self.next += 1;
+            self.asked.push(("signature", at));
+            self.signature_answer = Some(crate::analyzer::Answer {
+                ticket: self.next,
+                value: self.signature.clone(),
+            });
+            Some(self.next)
+        }
+        fn request_definition(&mut self, _: &str, at: usize) -> Option<crate::analyzer::Ticket> {
+            self.asked.push(("definition", at));
+            None
+        }
+        fn request_format(
+            &mut self,
+            _: &str,
+            _: Option<std::ops::Range<usize>>,
+        ) -> Option<crate::analyzer::Ticket> {
+            self.next += 1;
+            self.asked.push(("format", 0));
+            self.format_answer = Some(crate::analyzer::Answer {
+                ticket: self.next,
+                value: self.formatted.clone(),
+            });
+            Some(self.next)
+        }
+    }
+
+    fn completion(label: &str, sort: &str) -> crate::analyzer::CompletionItem {
+        crate::analyzer::CompletionItem {
+            label: label.into(),
+            kind: crate::analyzer::CompletionKind::Function,
+            detail: Some(format!("fn {label}() -> f32")),
+            insert: label.into(),
+            filter: label.into(),
+            sort: sort.into(),
+        }
+    }
+
+    /// One key stroke, as a backend sends it within a frame.
+    fn stroke(key: Key, modifiers: Modifiers) -> RawInput {
+        let event = |pressed| Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        RawInput {
+            events: vec![
+                Event::ModifiersChanged(modifiers),
+                event(true),
+                event(false),
+                Event::ModifiersChanged(Modifiers::NONE),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn typing(text: &str) -> RawInput {
+        RawInput {
+            events: vec![Event::Text(text.into())],
+            ..Default::default()
+        }
+    }
+
+    /// The completion list opens while typing a word, takes Up/Down and
+    /// Enter while it shows (not the TextEdit, not the indenting), replaces
+    /// the typed word with the choice, and leaves Tab and Escape alone once
+    /// closed; `(` asks for the call's signature.
+    #[test]
+    fn completion_popup_keys() {
+        let ctx = Context::default();
+        let mut cache = HighlightCache::default();
+        let mut assist = CodeAssist::default();
+        let mut scripted = Scripted {
+            items: vec![
+                completion("snoise3", "1"),
+                completion("snoise2", "2"),
+                completion("stroke", "3"),
+            ],
+            signature: Some(crate::analyzer::Signature {
+                label: "fn snoise2(v: vec2<f32>) -> f32".into(),
+                params: std::iter::once(11..23).collect(),
+                active: Some(0),
+            }),
+            ..Default::default()
+        };
+        let mut text = String::from("let n = ");
+        let mut frame =
+            |input: RawInput, text: &mut String, assist: &mut CodeAssist, s: &mut Scripted| {
+                ctx.run_ui(input, |ui| {
+                    show_code_editor(ui, text, &mut cache, assist, s, AssistOptions::default());
+                })
+                .drop_without_applying_deltas();
+            };
+
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        let id: Id = ctx.data(|d| d.get_temp(editor_id_marker())).unwrap();
+        ctx.memory_mut(|m| m.request_focus(id));
+        let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(8))));
+        state.store(&ctx, id);
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+
+        frame(typing("s"), &mut text, &mut assist, &mut scripted);
+        assert_eq!(scripted.asked, [("completion", 8)], "anchored at the word");
+        frame(typing("n"), &mut text, &mut assist, &mut scripted);
+        assert_eq!(scripted.asked.len(), 1, "asked again while typing on");
+        assert_eq!(text, "let n = sn");
+
+        frame(
+            stroke(Key::ArrowDown, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        frame(
+            stroke(Key::Enter, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert_eq!(text, "let n = snoise2", "second row replaces the word");
+
+        frame(typing("("), &mut text, &mut assist, &mut scripted);
+        assert_eq!(text, "let n = snoise2(");
+        assert_eq!(scripted.asked.last(), Some(&("signature", 16)));
+        assert!(assist.signature.is_some());
+
+        // Escape closes the signature without the editor losing focus;
+        // with no popup, Tab indents again.
+        frame(
+            stroke(Key::Escape, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert!(assist.signature.is_none());
+        assert_eq!(ctx.memory(|m| m.focused()), Some(id));
+        frame(
+            stroke(Key::Tab, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert_eq!(text, "let n = snoise2(    ");
+
+        // A word with no match shows no list, so Enter types a newline.
+        frame(typing("zz"), &mut text, &mut assist, &mut scripted);
+        frame(
+            stroke(Key::Enter, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert_eq!(text, "let n = snoise2(    zz\n");
+
+        // Ctrl+Space opens the list anywhere; Escape closes it, focus stays.
+        frame(
+            stroke(Key::Space, Modifiers::COMMAND),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert_eq!(scripted.asked.last(), Some(&("completion", 23)));
+        assert!(assist.completion.is_some());
+        frame(
+            stroke(Key::Escape, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert!(assist.completion.is_none());
+        assert_eq!(ctx.memory(|m| m.focused()), Some(id));
+        assert_eq!(text, "let n = snoise2(    zz\n", "Ctrl+Space typed a space");
+    }
+
+    /// Accepting a completion is undoable, and keeps the history before it.
+    #[test]
+    fn accepted_completion_undoes() {
+        let ctx = Context::default();
+        let mut cache = HighlightCache::default();
+        let mut assist = CodeAssist::default();
+        let mut scripted = Scripted {
+            items: vec![completion("snoise3", "1")],
+            ..Default::default()
+        };
+        let mut text = String::from("x");
+        // Seconds apart, as typing is: egui's undoer merges edits made
+        // within a second into one step.
+        let mut now = 0.0;
+        let mut frame =
+            |mut input: RawInput, text: &mut String, assist: &mut CodeAssist, s: &mut Scripted| {
+                now += 2.0;
+                input.time = Some(now);
+                ctx.run_ui(input, |ui| {
+                    show_code_editor(ui, text, &mut cache, assist, s, AssistOptions::default());
+                })
+                .drop_without_applying_deltas();
+            };
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        let id: Id = ctx.data(|d| d.get_temp(editor_id_marker())).unwrap();
+        ctx.memory_mut(|m| m.request_focus(id));
+        let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(1))));
+        state.store(&ctx, id);
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        frame(
+            stroke(Key::Enter, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        frame(typing("s"), &mut text, &mut assist, &mut scripted);
+        frame(
+            stroke(Key::Enter, Modifiers::NONE),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert_eq!(text, "x\nsnoise3");
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        frame(
+            stroke(Key::Z, Modifiers::COMMAND),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert_eq!(text, "x\ns", "undo restores the typed word");
+    }
+
+    /// Formatting from the button (the editor not focused, so egui's
+    /// undoer never saw the text before) is still one Ctrl+Z away.
+    #[test]
+    fn formatting_undoes() {
+        let ctx = Context::default();
+        let mut cache = HighlightCache::default();
+        let mut assist = CodeAssist::default();
+        let mut scripted = Scripted {
+            formatted: Some("fn f() {\n    return;\n}\n".into()),
+            ..Default::default()
+        };
+        let mut text = String::from("fn f(){return;}\n");
+        let mut now = 0.0;
+        let mut frame =
+            |mut input: RawInput, text: &mut String, assist: &mut CodeAssist, s: &mut Scripted| {
+                now += 2.0;
+                input.time = Some(now);
+                ctx.run_ui(input, |ui| {
+                    show_code_editor(ui, text, &mut cache, assist, s, AssistOptions::default());
+                })
+                .drop_without_applying_deltas();
+            };
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        // Focused a moment, as when clicked into, then the button takes
+        // the focus.
+        let id: Id = ctx.data(|d| d.get_temp(editor_id_marker())).unwrap();
+        ctx.memory_mut(|m| m.request_focus(id));
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        ctx.memory_mut(|m| m.surrender_focus(id));
+        assist.request_format();
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        assert_eq!(scripted.asked, [("format", 0)]);
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        assert_eq!(text, "fn f() {\n    return;\n}\n");
+
+        ctx.memory_mut(|m| m.request_focus(id));
+        frame(RawInput::default(), &mut text, &mut assist, &mut scripted);
+        frame(
+            stroke(Key::Z, Modifiers::COMMAND),
+            &mut text,
+            &mut assist,
+            &mut scripted,
+        );
+        assert_eq!(text, "fn f(){return;}\n", "undo restores the text before");
     }
 }

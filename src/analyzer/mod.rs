@@ -482,9 +482,12 @@ impl<L: Link> Client<L> {
                 },
                 "workspace": { "configuration": true },
             },
-            // The editor shows type hints only; signature help covers
-            // parameter names.
-            "initializationOptions": { "inlayHints": { "parameterHints": false } },
+            // The editor shows type hints only (signature help covers
+            // parameter names), and of a `var` the type it holds: `f32`,
+            // not `ref<function, f32, read_write>`.
+            "initializationOptions": { "inlayHints": {
+                "parameterHints": false, "typeVerbosity": "inner",
+            } },
         });
         self.request(Pending::Init, "initialize", params, String::new());
     }
@@ -601,6 +604,9 @@ impl<L: Link> Client<L> {
                         remap(&mut diagnostics, text, seen);
                     }
                     self.results.diagnostics = diagnostics;
+                    // The server has analyzed this version now; hints asked
+                    // for before that (right after opening) come back empty.
+                    self.hints_version = None;
                 }
             }
             (None, Some(method)) => debug!("wgsl-analyzer: {method} {}", message["params"]),
@@ -1140,6 +1146,18 @@ mod tests {
         );
         respond(&mut client, first, json!([]));
         assert_eq!(client.results.hints.len(), 1, "stale reply applied");
+
+        // Diagnostics for this version mean the server has analyzed it:
+        // hints asked before that (an empty answer) are asked again.
+        let asked = client.link.sent.len();
+        client.link.inbox.push_back(json!({
+            "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+                "uri": "file:///ws/shaders/user.wesl", "version": client.version, "diagnostics": [],
+            },
+        }));
+        client.step(&edited).unwrap();
+        let again = &client.link.sent[asked..];
+        assert_eq!(methods(again), ["textDocument/inlayHint"]);
 
         client.hints = false;
         client.step(&edited).unwrap();

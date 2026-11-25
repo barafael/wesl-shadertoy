@@ -246,11 +246,11 @@ fn classify_word(word: &str) -> Kind {
     WORD_KINDS.get(word).copied().unwrap_or(Kind::Default)
 }
 
-fn is_ident_start(c: char) -> bool {
+pub(crate) fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-fn is_ident_char(c: char) -> bool {
+pub(crate) fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 

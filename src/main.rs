@@ -133,6 +133,8 @@ fn run(backends: Option<bevy::render::settings::Backends>) {
         .init_resource::<RunRequest>()
         .init_resource::<UiWindows>()
         .init_resource::<editor::HighlightCache>()
+        .init_resource::<editor::CodeAssist>()
+        .init_resource::<editor::Peek>()
         .init_resource::<analyzer::Analyzer>()
         .init_resource::<browser::Browser>()
         .init_resource::<evolve::Evolve>()
@@ -390,8 +392,13 @@ impl Default for UiWindows {
 #[derive(Resource)]
 struct Settings {
     random_example: bool,
-    /// Live diagnostics from wgsl-analyzer while editing.
+    /// wgsl-analyzer while editing: diagnostics, completion, signature
+    /// help, definitions, formatting.
     analyzer: bool,
+    /// Open the completion list while typing (else on Ctrl+Space only).
+    autocomplete: bool,
+    /// The types of `let`/`var` at the end of their line.
+    type_hints: bool,
     /// Frosted glass: how blurred the shader shows through windows and
     /// panels, as the blur's sigma in points; 0 is off (opaque UI).
     blur: f32,
@@ -409,6 +416,8 @@ impl Settings {
         Self {
             random_example: true,
             analyzer: true,
+            autocomplete: true,
+            type_hints: true,
             blur: 12.0,
             lock_fps: 30,
             webgpu: true,
@@ -417,9 +426,11 @@ impl Settings {
 
     fn encode(&self) -> String {
         format!(
-            "random={};analyzer={};blur_px={};lock_fps={};webgpu={}",
+            "random={};analyzer={};autocomplete={};hints={};blur_px={};lock_fps={};webgpu={}",
             self.random_example as u8,
             self.analyzer as u8,
+            self.autocomplete as u8,
+            self.type_hints as u8,
             self.blur,
             self.lock_fps,
             self.webgpu as u8
@@ -432,6 +443,8 @@ impl Settings {
             match part.split_once('=') {
                 Some(("random", r)) => out.random_example = r == "1",
                 Some(("analyzer", a)) => out.analyzer = a == "1",
+                Some(("autocomplete", a)) => out.autocomplete = a == "1",
+                Some(("hints", h)) => out.type_hints = h == "1",
                 Some(("webgpu", w)) => out.webgpu = w == "1",
                 Some(("lock_fps", f)) => {
                     if let Ok(f) = f.parse::<u32>() {
@@ -852,7 +865,9 @@ struct UiParams<'w, 's> {
     settings: ResMut<'w, Settings>,
     current: Res<'w, CurrentShader>,
     highlight: ResMut<'w, editor::HighlightCache>,
-    analyzer: Res<'w, analyzer::Analyzer>,
+    analyzer: ResMut<'w, analyzer::Analyzer>,
+    code_assist: ResMut<'w, editor::CodeAssist>,
+    peek: ResMut<'w, editor::Peek>,
     playback: ResMut<'w, Playback>,
     blur: ResMut<'w, render::blur::Blur>,
     tweaks: ResMut<'w, Tweaks>,
@@ -919,6 +934,7 @@ fn run_analyzer(
     doc: Res<ShaderDoc>,
     settings: Res<Settings>,
 ) {
+    analyzer.set_inlay_hints(settings.type_hints);
     analyzer.update(settings.analyzer, &doc.text);
 }
 
@@ -1125,13 +1141,18 @@ fn ui(mut p: UiParams) {
     });
 
     // --- status / error panel ----------------------------------------------
+    let mut format = false;
     status_bar(
         &mut root_ui,
         glass,
         &p.status,
         &mut p.wins.errors_expanded,
         &p.analyzer,
+        &mut format,
     );
+    if format {
+        p.code_assist.request_format();
+    }
 
     // --- canvas: what the panels leave free shows the shader ----------------
     p.state.canvas = root_ui.available_rect_before_wrap();
@@ -1147,6 +1168,7 @@ fn ui(mut p: UiParams) {
 
     // --- editor window -------------------------------------------------------
     if p.wins.editor {
+        let mut assisted = editor::AssistOutput::default();
         show_window(
             ctx,
             glass,
@@ -1156,14 +1178,49 @@ fn ui(mut p: UiParams) {
                 .default_size([640.0, 460.0])
                 .open(&mut p.wins.editor),
             |ui| {
-                editor::show_code_editor(
+                assisted = editor::show_code_editor(
                     ui,
                     &mut p.doc.text,
                     &mut p.highlight,
-                    p.analyzer.diagnostics(),
+                    &mut p.code_assist,
+                    &mut *p.analyzer,
+                    editor::AssistOptions {
+                        autocomplete: p.settings.autocomplete,
+                        type_hints: p.settings.type_hints,
+                    },
                 );
             },
         );
+        if let Some(definition) = assisted.peek {
+            p.peek.open(definition);
+        }
+        if assisted.format_failed {
+            p.status.note = Some(("format: fix the syntax errors first".into(), false));
+        }
+    }
+
+    // --- definition peek (F12 / Ctrl+click on a name defined elsewhere) ----
+    if let Some(title) = p.peek.title() {
+        let mut open = true;
+        let mut action = None;
+        show_window(
+            ctx,
+            glass,
+            "peek_window",
+            egui::Window::new(title)
+                .default_pos([680.0, 60.0])
+                .default_size([520.0, 420.0])
+                .open(&mut open),
+            |ui| action = p.peek.show(ui),
+        );
+        if let Some(editor::PeekAction::OpenInLygia(module)) = action {
+            p.library.open_source(&module);
+            p.wins.lygia = true;
+            open = false;
+        }
+        if !open {
+            p.peek.close();
+        }
     }
 
     // --- generated WGSL viewer -----------------------------------------------
@@ -1353,16 +1410,30 @@ fn ui(mut p: UiParams) {
                 let before = (
                     p.settings.random_example,
                     p.settings.analyzer,
+                    p.settings.autocomplete,
+                    p.settings.type_hints,
                     p.settings.blur,
                 );
                 ui.checkbox(
                     &mut p.settings.random_example,
                     "random example on fresh start",
                 );
-                ui.checkbox(&mut p.settings.analyzer, "live diagnostics (wgsl-analyzer)");
+                ui.checkbox(&mut p.settings.analyzer, "wgsl-analyzer")
+                    .on_hover_text(
+                        "Diagnostics, completion, signature help, go to definition and \
+                         formatting while you edit",
+                    );
                 if let analyzer::Status::Unavailable(why) = p.analyzer.status() {
                     ui.label(egui::RichText::new(why).small().weak());
                 }
+                ui.add_enabled_ui(p.settings.analyzer, |ui| {
+                    ui.indent("analyzer_options", |ui| {
+                        ui.checkbox(&mut p.settings.autocomplete, "complete while typing")
+                            .on_hover_text("Off: the list opens on Ctrl+Space only");
+                        ui.checkbox(&mut p.settings.type_hints, "type hints")
+                            .on_hover_text("The types of let and var at the end of their line");
+                    });
+                });
                 ui.add(
                     egui::Slider::new(&mut p.settings.blur, 0.0..=MAX_BLUR)
                         .text("frosted glass blur")
@@ -1376,9 +1447,15 @@ fn ui(mut p: UiParams) {
                 renderer_settings(ui, &mut p.settings, p.adapter.as_deref(), &p.doc, &p.tweaks);
                 ui.separator();
                 ui.weak("Ctrl+S saves · Ctrl+O opens a .wesl file");
+                ui.weak(
+                    "Ctrl+Space completes · F12 or Ctrl+click goes to a definition · \
+                     Shift+Alt+F formats",
+                );
                 let after = (
                     p.settings.random_example,
                     p.settings.analyzer,
+                    p.settings.autocomplete,
+                    p.settings.type_hints,
                     p.settings.blur,
                 );
                 if after != before {
@@ -1599,6 +1676,7 @@ fn status_bar(
     status: &CompileStatus,
     errors_expanded: &mut bool,
     analyzer: &analyzer::Analyzer,
+    format: &mut bool,
 ) {
     let expanded_error = status.error.as_deref().filter(|_| *errors_expanded);
     let panel = match expanded_error {
@@ -1643,6 +1721,12 @@ fn status_bar(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 analyzer_readout(ui, analyzer);
+                if *analyzer.status() == analyzer::Status::Ready {
+                    *format |= ui
+                        .small_button("format")
+                        .on_hover_text("Format the code, or the selected lines (Shift+Alt+F)")
+                        .clicked();
+                }
             });
         });
         if let Some(mut err) = expanded_error {
@@ -2227,7 +2311,7 @@ mod tests {
                     ..Default::default()
                 };
                 ctx.run_ui(input, |ui| {
-                    status_bar(ui, None, status, &mut expanded, &analyzer);
+                    status_bar(ui, None, status, &mut expanded, &analyzer, &mut false);
                     canvas = ui.available_rect_before_wrap();
                 })
                 .drop_without_applying_deltas();

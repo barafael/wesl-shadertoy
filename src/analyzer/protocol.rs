@@ -218,7 +218,7 @@ pub fn completions(result: &Value) -> Vec<CompletionItem> {
 /// LSP's `CompletionItemKind` numbers, folded to what the list shows.
 fn completion_kind(kind: Option<u64>) -> CompletionKind {
     match kind {
-        Some(2 | 3 | 4) => CompletionKind::Function,
+        Some(2..=4) => CompletionKind::Function,
         Some(6) => CompletionKind::Variable,
         Some(21) => CompletionKind::Constant,
         Some(5 | 10) => CompletionKind::Field,
