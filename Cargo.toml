@@ -45,15 +45,15 @@ wesl = "0.6"
 # Same major as the naga inside wgpu 30 (Bevy 0.20's renderer), so anything
 # we validate here is accepted by the pipeline cache there.
 naga = { version = "30", features = ["wgsl-in"] }
-lucide-icons = "1.61.0"
+lucide-icons = "1.80.0"
 # JSON-RPC messages to and from the wgsl-analyzer language server.
 serde_json = "1"
 # Rasterizes the debugger's font atlas from egui's embedded Hack TTF (already
 # in the tree through epaint), replacing the reference engine's 1.3 MB font.png.
 ab_glyph = "0.2"
 # Share links: the document deflated and base64url-encoded into the URL
-# fragment (both already in the tree, through png and bevy).
-miniz_oxide = "0.8"
+# fragment (miniz_oxide 0.9 is already in the tree, through flate2).
+miniz_oxide = "0.9"
 base64 = "0.23"
 
 [build-dependencies]
@@ -71,8 +71,8 @@ dev = ["bevy/dynamic_linking"]
 # Offscreen `--render` smoke shots (src/headless.rs): windowless wgpu, a tiny
 # block_on for the async adapter/device requests, and PNG encoding.
 wgpu = "30"
-pollster = "0.4"
-png = "0.17"
+pollster = "1.0"
+png = "0.18"
 # `iDate` in local time, as shadertoy has it (the system time zone on every
 # desktop OS). The browser build asks JavaScript's `Date` instead.
 jiff = "1.0"

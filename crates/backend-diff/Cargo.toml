@@ -23,5 +23,5 @@ naga = { version = "30", features = [
     "hlsl-out",
     "spv-out",
 ] }
-pollster = "0.4"
-png = "0.17"
+pollster = "1.0"
+png = "0.18"
