@@ -17,6 +17,7 @@
 //! coordinates (as UTF-16 columns, converted to egui's char indices here).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use bevy::log::{debug, info, warn};
@@ -27,6 +28,7 @@ use serde_json::{Value, json};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+mod protocol;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
@@ -34,6 +36,12 @@ mod web;
 use native::Transport;
 #[cfg(target_arch = "wasm32")]
 use web::Transport;
+
+use protocol::lsp_position;
+pub use protocol::{
+    CompletionItem, CompletionKind, Definition, Diagnostic, HintKind, InlayHint, Severity,
+    Signature,
+};
 
 /// The open document holding the editor text, relative to the workspace root.
 const USER_DOC: &str = "shaders/user.wesl";
@@ -108,23 +116,6 @@ enum LinkState {
     Failed(String),
 }
 
-/// How serious a [`Diagnostic`] is (LSP hints count as info).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
-    Error,
-    Warning,
-    Info,
-}
-
-/// One server diagnostic on the editor text.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Diagnostic {
-    /// Char range in the document (egui `CCursor` indices), never empty.
-    pub range: Range<usize>,
-    pub severity: Severity,
-    pub message: String,
-}
-
 /// What the analyzer is doing, for the status bar and settings.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Status {
@@ -139,12 +130,41 @@ pub enum Status {
     Unavailable(String),
 }
 
-/// The language-server connection and its latest diagnostics.
+/// Identifies one request the editor made; the answer carries the same one,
+/// so the editor can tell its answer from an older one.
+pub type Ticket = i64;
+
+/// A server answer to one of the editor's requests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer<T> {
+    pub ticket: Ticket,
+    pub value: T,
+}
+
+/// What the server last reported or answered.
+#[derive(Default)]
+struct Results {
+    /// On the editor's latest text (carried through edits until the server
+    /// reports on it).
+    diagnostics: Vec<Diagnostic>,
+    /// Like `diagnostics`.
+    hints: Vec<InlayHint>,
+    completion: Option<Answer<Vec<CompletionItem>>>,
+    signature: Option<Answer<Option<Signature>>>,
+    /// Taken by the editor once acted on.
+    definition: Option<Answer<Option<Definition>>>,
+    /// The formatted text, or `None` where the server could not format
+    /// (it sends `null` for text it cannot parse). Taken once applied.
+    format: Option<Answer<Option<String>>>,
+}
+
+/// The language-server connection and its latest results.
 #[derive(Resource, Default)]
 pub struct Analyzer {
     client: Option<Client<Transport>>,
     status: Status,
-    diagnostics: Vec<Diagnostic>,
+    /// Whether to keep inlay hints up to date.
+    hints: bool,
 }
 
 impl Analyzer {
@@ -152,9 +172,75 @@ impl Analyzer {
         &self.status
     }
 
-    /// Diagnostics for the editor text the server last saw.
+    fn results(&self) -> Option<&Results> {
+        self.client.as_ref().map(|c| &c.results)
+    }
+
+    /// Diagnostics for the editor text, as the server last saw it.
     pub fn diagnostics(&self) -> &[Diagnostic] {
-        &self.diagnostics
+        self.results().map_or(&[], |r| &r.diagnostics)
+    }
+
+    /// Inlay hints for the editor text, while [`Self::set_inlay_hints`] is on.
+    pub fn inlay_hints(&self) -> &[InlayHint] {
+        self.results().map_or(&[], |r| &r.hints)
+    }
+
+    /// Keep inlay hints up to date (from the next frame on), or drop them.
+    pub fn set_inlay_hints(&mut self, on: bool) {
+        self.hints = on;
+    }
+
+    /// The latest completion list.
+    pub fn completion(&self) -> Option<&Answer<Vec<CompletionItem>>> {
+        self.results()?.completion.as_ref()
+    }
+
+    /// The latest signature help.
+    pub fn signature(&self) -> Option<&Answer<Option<Signature>>> {
+        self.results()?.signature.as_ref()
+    }
+
+    /// The latest definition, once.
+    pub fn take_definition(&mut self) -> Option<Answer<Option<Definition>>> {
+        self.client.as_mut()?.results.definition.take()
+    }
+
+    /// The latest formatting result, once.
+    pub fn take_format(&mut self) -> Option<Answer<Option<String>>> {
+        self.client.as_mut()?.results.format.take()
+    }
+
+    /// Ask for completions at char index `at` of `text` (the editor's
+    /// current text). `None` while the server is not ready.
+    pub fn request_completion(&mut self, text: &str, at: usize) -> Option<Ticket> {
+        self.client
+            .as_mut()?
+            .at_cursor(text, at, "textDocument/completion", Pending::Completion)
+    }
+
+    /// Ask for the signature of the call around char index `at`.
+    pub fn request_signature(&mut self, text: &str, at: usize) -> Option<Ticket> {
+        self.client
+            .as_mut()?
+            .at_cursor(text, at, "textDocument/signatureHelp", Pending::Signature)
+    }
+
+    /// Ask where the name at char index `at` is defined.
+    pub fn request_definition(&mut self, text: &str, at: usize) -> Option<Ticket> {
+        self.client
+            .as_mut()?
+            .at_cursor(text, at, "textDocument/definition", Pending::Definition)
+    }
+
+    /// Ask for `text` formatted: all of it, or the lines `selection` (a char
+    /// range) touches.
+    pub fn request_format(
+        &mut self,
+        text: &str,
+        selection: Option<Range<usize>>,
+    ) -> Option<Ticket> {
+        self.client.as_mut()?.format(text, selection)
     }
 
     /// Run one frame: start or stop the server per `enabled`, apply what it
@@ -163,7 +249,6 @@ impl Analyzer {
         if !enabled {
             self.client = None;
             self.status = Status::Off;
-            self.diagnostics.clear();
             return;
         }
         if self.client.is_none() {
@@ -185,7 +270,8 @@ impl Analyzer {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        match client.step(text, &mut self.diagnostics) {
+        client.hints = self.hints;
+        match client.step(text) {
             Ok(true) => {
                 if self.status != Status::Ready {
                     info!("wgsl-analyzer ready");
@@ -196,20 +282,16 @@ impl Analyzer {
             Err(why) => {
                 warn!("wgsl-analyzer stopped: {why}");
                 self.client = None;
-                self.diagnostics.clear();
                 self.status = Status::Unavailable(why);
             }
         }
     }
 }
 
-/// Move `diagnostics` (char ranges into `old`) through the edit that turned
-/// `old` into `new`: one replaced span, found as the common prefix and suffix.
-/// Marks after the span shift by the length change; a mark edge inside it
-/// snaps to the span's edge, and a mark the edit swallowed whole is dropped.
-fn remap(diagnostics: &mut Vec<Diagnostic>, old: &str, new: &str) {
-    let (old, new): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
-    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+/// The one replaced span that turns `old` into `new`, found as their common
+/// prefix and suffix: `(start, old_end, new_end)` in chars.
+fn edit_span(old: &[char], new: &[char]) -> (usize, usize, usize) {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
     let max_suffix = old.len().min(new.len()) - prefix;
     let suffix = old
         .iter()
@@ -218,7 +300,16 @@ fn remap(diagnostics: &mut Vec<Diagnostic>, old: &str, new: &str) {
         .take(max_suffix)
         .take_while(|(a, b)| a == b)
         .count();
-    let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
+    (prefix, old.len() - suffix, new.len() - suffix)
+}
+
+/// Move `diagnostics` (char ranges into `old`) through the edit that turned
+/// `old` into `new` (see [`edit_span`]). Marks after the span shift by the
+/// length change; a mark edge inside it snaps to the span's edge, and a mark
+/// the edit swallowed whole is dropped.
+fn remap(diagnostics: &mut Vec<Diagnostic>, old: &str, new: &str) {
+    let (old, new): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let (prefix, old_end, new_end) = edit_span(&old, &new);
     // A start at the edit's end follows inserted text; an end at the edit's
     // start stays put, so typing next to a mark never stretches it.
     let start = |i: usize| match i {
@@ -237,29 +328,68 @@ fn remap(diagnostics: &mut Vec<Diagnostic>, old: &str, new: &str) {
     });
 }
 
+/// Move inlay hints (char indices into `old`) through the edit that turned
+/// `old` into `new`; a hint inside the replaced text is dropped.
+fn remap_hints(hints: &mut Vec<InlayHint>, old: &str, new: &str) {
+    let (old, new): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let (prefix, old_end, new_end) = edit_span(&old, &new);
+    hints.retain_mut(|h| match h.at {
+        at if at <= prefix => true,
+        at if at >= old_end => {
+            h.at = at - old_end + new_end;
+            true
+        }
+        _ => false,
+    });
+}
+
 /// How long the text must rest before an edit goes to the server: typing
 /// sends once per pause, not once per keystroke (each send is a full-text
-/// change the server analyzes from scratch).
+/// change the server analyzes from scratch). Requests at the cursor send
+/// the text at once.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// The LSP client: initialize handshake, full-text document sync, and
-/// `publishDiagnostics` for the editor document. Anything else the server
-/// asks for gets an empty answer, so it never waits on us.
+/// What a request in flight was for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending {
+    Init,
+    Completion,
+    Signature,
+    Definition,
+    Format,
+    Hints,
+}
+
+/// A request in flight.
+struct Request {
+    kind: Pending,
+    /// The document version and editor text it was made on.
+    version: i32,
+    text: String,
+}
+
+/// The LSP client: initialize handshake, full-text document sync,
+/// `publishDiagnostics`, and the requests the editor makes. Anything the
+/// server asks gets an empty answer, so it never waits on us.
 struct Client<L> {
     link: L,
     next_id: i64,
-    /// The pending `initialize` request.
-    init_id: Option<i64>,
+    pending: HashMap<i64, Request>,
     initialized: bool,
     /// Version and text of the document as the server has it.
     version: i32,
     synced: Option<String>,
-    /// The text the diagnostics' ranges refer to: the editor's latest, so
+    /// The text the results' ranges refer to: the editor's latest, so
     /// marks follow edits at once, before the server sees them.
     seen: Option<String>,
     /// When `seen` last changed, for [`DEBOUNCE`].
     changed: Option<Instant>,
     debounce: Duration,
+    /// Whether to keep `results.hints` up to date, and the version they
+    /// were last asked for.
+    hints: bool,
+    hints_version: Option<i32>,
+    results: Results,
 }
 
 impl<L: Link> Client<L> {
@@ -267,69 +397,41 @@ impl<L: Link> Client<L> {
         Self {
             link,
             next_id: 1,
-            init_id: None,
+            pending: HashMap::new(),
             initialized: false,
             version: 0,
             synced: None,
             seen: None,
             changed: None,
             debounce: DEBOUNCE,
+            hints: false,
+            hints_version: None,
+            results: Results::default(),
         }
     }
 
     /// Returns whether the server is initialized; `Err` when it is gone.
-    fn step(&mut self, text: &str, diagnostics: &mut Vec<Diagnostic>) -> Result<bool, String> {
-        self.step_at(text, diagnostics, Instant::now())
+    fn step(&mut self, text: &str) -> Result<bool, String> {
+        self.step_at(text, Instant::now())
     }
 
     /// [`Self::step`] at time `now`.
-    fn step_at(
-        &mut self,
-        text: &str,
-        diagnostics: &mut Vec<Diagnostic>,
-        now: Instant,
-    ) -> Result<bool, String> {
+    fn step_at(&mut self, text: &str, now: Instant) -> Result<bool, String> {
         match self.link.state() {
             LinkState::Starting => return Ok(false),
             LinkState::Failed(why) => return Err(why),
             LinkState::Ready => {}
         }
-        if !self.initialized && self.init_id.is_none() {
-            let root = self.link.root_uri();
-            let id = self.request(
-                "initialize",
-                json!({
-                    "processId": process_id(),
-                    "clientInfo": { "name": "wesl-shadertoy" },
-                    "rootUri": root,
-                    "workspaceFolders": [{ "uri": root, "name": "wesl-shadertoy" }],
-                    "capabilities": {
-                        "general": { "positionEncodings": ["utf-16"] },
-                        "textDocument": {
-                            "synchronization": {},
-                            "publishDiagnostics": { "versionSupport": true },
-                        },
-                        "workspace": { "configuration": true },
-                    },
-                }),
-            );
-            self.init_id = Some(id);
+        if !self.initialized && !self.pending.values().any(|r| r.kind == Pending::Init) {
+            self.initialize();
         }
         for message in self.link.recv() {
-            self.handle(message, diagnostics)?;
+            self.handle(message)?;
         }
         if !self.initialized {
             return Ok(false);
         }
-        if self.seen.as_deref() != Some(text) {
-            // Until the server reports on the new text, keep the old marks
-            // on the characters they were about, not on the same indices.
-            if let Some(old) = &self.seen {
-                remap(diagnostics, old, text);
-            }
-            self.seen = Some(text.to_owned());
-            self.changed = Some(now);
-        }
+        self.observe(text, now);
         // The document opens at once; edits go out once typing pauses.
         let settled = self
             .changed
@@ -337,10 +439,121 @@ impl<L: Link> Client<L> {
         if self.synced.as_deref() != Some(text) && (self.synced.is_none() || settled) {
             self.sync(text);
         }
+        if !self.hints {
+            self.results.hints.clear();
+            self.hints_version = None;
+        } else if self.hints_version != Some(self.version)
+            && let Some(synced) = self.synced.clone()
+        {
+            let end = lsp_position(&synced, synced.chars().count());
+            let params = json!({
+                "textDocument": { "uri": self.uri() },
+                "range": { "start": { "line": 0, "character": 0 }, "end": end },
+            });
+            self.request(Pending::Hints, "textDocument/inlayHint", params, synced);
+            self.hints_version = Some(self.version);
+        }
         Ok(true)
     }
 
-    fn handle(&mut self, message: Value, diagnostics: &mut Vec<Diagnostic>) -> Result<(), String> {
+    fn initialize(&mut self) {
+        let root = self.link.root_uri();
+        let params = json!({
+            "processId": process_id(),
+            "clientInfo": { "name": "wesl-shadertoy" },
+            "rootUri": root,
+            "workspaceFolders": [{ "uri": root, "name": "wesl-shadertoy" }],
+            "capabilities": {
+                "general": { "positionEncodings": ["utf-16"] },
+                "textDocument": {
+                    "synchronization": {},
+                    "publishDiagnostics": { "versionSupport": true },
+                    "completion": { "completionItem": {
+                        "snippetSupport": false, "labelDetailsSupport": true,
+                    } },
+                    "signatureHelp": { "signatureInformation": {
+                        "parameterInformation": { "labelOffsetSupport": true },
+                        "activeParameterSupport": true,
+                    } },
+                    "definition": {},
+                    "inlayHint": {},
+                    "formatting": {},
+                    "rangeFormatting": {},
+                },
+                "workspace": { "configuration": true },
+            },
+            // The editor shows type hints only; signature help covers
+            // parameter names.
+            "initializationOptions": { "inlayHints": { "parameterHints": false } },
+        });
+        self.request(Pending::Init, "initialize", params, String::new());
+    }
+
+    /// Note the editor's text: until the server reports on new text, keep
+    /// the old marks on the characters they were about, not on the same
+    /// indices.
+    fn observe(&mut self, text: &str, now: Instant) {
+        if self.seen.as_deref() == Some(text) {
+            return;
+        }
+        if let Some(old) = &self.seen {
+            remap(&mut self.results.diagnostics, old, text);
+            remap_hints(&mut self.results.hints, old, text);
+        }
+        self.seen = Some(text.to_owned());
+        self.changed = Some(now);
+    }
+
+    /// Bring the server up to `text` now, skipping the debounce, so a
+    /// request's positions refer to what it has. `false` before the
+    /// handshake is done.
+    fn flush(&mut self, text: &str) -> bool {
+        if !self.initialized {
+            return false;
+        }
+        self.observe(text, Instant::now());
+        if self.synced.as_deref() != Some(text) {
+            self.sync(text);
+        }
+        true
+    }
+
+    /// A `textDocument/*` request at char index `at` of `text`.
+    fn at_cursor(&mut self, text: &str, at: usize, method: &str, kind: Pending) -> Option<Ticket> {
+        if !self.flush(text) {
+            return None;
+        }
+        let params = json!({
+            "textDocument": { "uri": self.uri() },
+            "position": lsp_position(text, at),
+        });
+        Some(self.request(kind, method, params, text.to_owned()))
+    }
+
+    fn format(&mut self, text: &str, selection: Option<Range<usize>>) -> Option<Ticket> {
+        if !self.flush(text) {
+            return None;
+        }
+        let options = json!({ "tabSize": 4, "insertSpaces": true });
+        let document = json!({ "uri": self.uri() });
+        let (method, params) = match selection.filter(|s| !s.is_empty()) {
+            Some(s) => (
+                "textDocument/rangeFormatting",
+                json!({
+                    "textDocument": document,
+                    "range": { "start": lsp_position(text, s.start), "end": lsp_position(text, s.end) },
+                    "options": options,
+                }),
+            ),
+            None => (
+                "textDocument/formatting",
+                json!({ "textDocument": document, "options": options }),
+            ),
+        };
+        Some(self.request(Pending::Format, method, params, text.to_owned()))
+    }
+
+    fn handle(&mut self, message: Value) -> Result<(), String> {
         let method = message.get("method").and_then(Value::as_str);
         let id = message.get("id").cloned();
         match (id, method) {
@@ -355,15 +568,13 @@ impl<L: Link> Client<L> {
                 self.link
                     .send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
             }
-            // A response; only `initialize` matters.
+            // A response to one of ours.
             (Some(id), None) => {
-                if self.init_id.is_some() && id.as_i64() == self.init_id {
-                    self.init_id = None;
-                    if let Some(error) = message.get("error") {
-                        return Err(format!("initialize failed: {error}"));
-                    }
-                    self.notify("initialized", json!({}));
-                    self.initialized = true;
+                let Some(ticket) = id.as_i64() else {
+                    return Ok(());
+                };
+                if let Some(request) = self.pending.remove(&ticket) {
+                    self.answer(ticket, request, &message)?;
                 }
             }
             (None, Some("textDocument/publishDiagnostics")) => {
@@ -377,14 +588,19 @@ impl<L: Link> Client<L> {
                     .is_none_or(|v| v == i64::from(self.version));
                 if ours && current {
                     let text = self.synced.as_deref().unwrap_or_default();
-                    *diagnostics = params["diagnostics"]
+                    let mut diagnostics: Vec<Diagnostic> = params["diagnostics"]
                         .as_array()
-                        .map(|list| list.iter().filter_map(|d| convert(text, d)).collect())
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|d| protocol::diagnostic(text, d))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     // Typed since it was sent: carry the marks along.
                     if let Some(seen) = self.seen.as_deref().filter(|s| *s != text) {
-                        remap(diagnostics, text, seen);
+                        remap(&mut diagnostics, text, seen);
                     }
+                    self.results.diagnostics = diagnostics;
                 }
             }
             (None, Some(method)) => debug!("wgsl-analyzer: {method} {}", message["params"]),
@@ -393,9 +609,70 @@ impl<L: Link> Client<L> {
         Ok(())
     }
 
+    /// Apply the response to `request`.
+    fn answer(&mut self, ticket: Ticket, request: Request, message: &Value) -> Result<(), String> {
+        let error = message.get("error");
+        if let Some(error) = error {
+            if request.kind == Pending::Init {
+                return Err(format!("initialize failed: {error}"));
+            }
+            debug!("wgsl-analyzer: {:?} failed: {error}", request.kind);
+        }
+        let result = &message["result"];
+        let unchanged = self.seen.as_deref() == Some(request.text.as_str());
+        let results = &mut self.results;
+        match request.kind {
+            Pending::Init => {
+                self.notify("initialized", json!({}));
+                self.initialized = true;
+            }
+            // The list is the scope at the cursor; the editor filters it by
+            // the word typed since, so it stays useful while typing on.
+            Pending::Completion => {
+                results.completion = Some(Answer {
+                    ticket,
+                    value: protocol::completions(result),
+                });
+            }
+            Pending::Signature => {
+                results.signature = Some(Answer {
+                    ticket,
+                    value: protocol::signature(result),
+                });
+            }
+            // Positions into a text that has moved on are no use.
+            Pending::Definition if unchanged => {
+                let root = self.link.root_uri();
+                results.definition = Some(Answer {
+                    ticket,
+                    value: protocol::definition(result, &root, &request.text),
+                });
+            }
+            Pending::Format if unchanged => {
+                results.format = Some(Answer {
+                    ticket,
+                    value: protocol::apply_edits(&request.text, result),
+                });
+            }
+            Pending::Hints if request.version == self.version => {
+                let mut hints = protocol::inlay_hints(result, &request.text);
+                if let Some(seen) = self.seen.as_deref().filter(|s| *s != request.text) {
+                    remap_hints(&mut hints, &request.text, seen);
+                }
+                results.hints = hints;
+            }
+            Pending::Definition | Pending::Format | Pending::Hints => {}
+        }
+        Ok(())
+    }
+
+    fn uri(&self) -> String {
+        format!("{}/{USER_DOC}", self.link.root_uri())
+    }
+
     /// Open the document, or replace its whole text.
     fn sync(&mut self, text: &str) {
-        let uri = format!("{}/{USER_DOC}", self.link.root_uri());
+        let uri = self.uri();
         let sent = for_analyzer(text);
         self.version += 1;
         if self.synced.is_none() {
@@ -417,12 +694,22 @@ impl<L: Link> Client<L> {
         self.synced = Some(text.to_owned());
     }
 
-    fn request(&mut self, method: &str, params: Value) -> i64 {
+    /// Send a request about `text` (the editor text it refers to).
+    fn request(&mut self, kind: Pending, method: &str, params: Value, text: String) -> Ticket {
         let id = self.next_id;
         self.next_id += 1;
         self.link.send(&json!({
             "jsonrpc": "2.0", "id": id, "method": method, "params": params,
         }));
+        let version = self.version;
+        self.pending.insert(
+            id,
+            Request {
+                kind,
+                version,
+                text,
+            },
+        );
         id
     }
 
@@ -442,56 +729,6 @@ fn process_id() -> Value {
     {
         Value::Null
     }
-}
-
-/// An LSP diagnostic as a [`Diagnostic`] on `text`.
-fn convert(text: &str, diagnostic: &Value) -> Option<Diagnostic> {
-    let range = &diagnostic["range"];
-    let position = |p: &Value| {
-        Some(char_index(
-            text,
-            usize::try_from(p["line"].as_u64()?).ok()?,
-            usize::try_from(p["character"].as_u64()?).ok()?,
-        ))
-    };
-    let (mut start, mut end) = (position(&range["start"])?, position(&range["end"])?);
-    // Give zero-width reports (e.g. "expected `;`") a visible character.
-    if end <= start {
-        let len = text.chars().count();
-        start = start.min(len.saturating_sub(1));
-        end = (start + 1).min(len.max(1));
-    }
-    let severity = match diagnostic["severity"].as_u64() {
-        Some(1) | None => Severity::Error,
-        Some(2) => Severity::Warning,
-        _ => Severity::Info,
-    };
-    Some(Diagnostic {
-        range: start..end,
-        severity,
-        message: diagnostic["message"].as_str()?.to_owned(),
-    })
-}
-
-/// The char index of an LSP position (`line`, UTF-16 `column`) in `text`,
-/// clamped to the line and the text.
-fn char_index(text: &str, line: usize, column: usize) -> usize {
-    let mut chars = 0;
-    for (i, row) in text.split('\n').enumerate() {
-        if i == line {
-            let mut units = 0;
-            for c in row.chars() {
-                if units >= column {
-                    break;
-                }
-                units += c.len_utf16();
-                chars += 1;
-            }
-            return chars;
-        }
-        chars += row.chars().count() + 1;
-    }
-    text.chars().count()
 }
 
 #[cfg(test)]
@@ -577,21 +814,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn utf16_columns_to_char_indices() {
-        // `—` is one UTF-16 unit (three UTF-8 bytes), `𝄞` is two.
-        let text = "ab\n// — x\n𝄞y\n";
-        assert_eq!(char_index(text, 0, 1), 1);
-        assert_eq!(char_index(text, 1, 5), 3 + 5);
-        assert_eq!(char_index(text, 1, 99), 3 + 6, "clamped to the line");
-        assert_eq!(
-            char_index(text, 2, 2),
-            3 + 7 + 1,
-            "after the surrogate pair"
-        );
-        assert_eq!(char_index(text, 9, 0), text.chars().count());
-    }
-
     /// Scripted server: records what the client sends, replays queued
     /// messages on `recv`.
     #[derive(Default)]
@@ -623,10 +845,9 @@ mod tests {
     fn handshake_sync_and_diagnostics() {
         let mut client = Client::new(Fake::default());
         client.debounce = Duration::ZERO;
-        let mut diags = Vec::new();
         let text = "let a = 1;\n// — é\nlet b: u32 = 1.0;\n";
 
-        assert!(!client.step(text, &mut diags).unwrap());
+        assert!(!client.step(text).unwrap());
         assert_eq!(methods(&client.link.sent), ["initialize"]);
         let init_id = client.link.sent[0]["id"].clone();
 
@@ -635,7 +856,7 @@ mod tests {
                     "params": { "items": [{}, {}] } }),
             json!({ "jsonrpc": "2.0", "id": init_id, "result": { "capabilities": {} } }),
         ]);
-        assert!(client.step(text, &mut diags).unwrap());
+        assert!(client.step(text).unwrap());
         let sent = &client.link.sent;
         assert_eq!(sent[1]["id"], 7);
         assert_eq!(sent[1]["result"], json!([null, null]));
@@ -660,9 +881,9 @@ mod tests {
             } })
         };
         client.link.inbox.push_back(report(1, 2));
-        client.step(text, &mut diags).unwrap();
+        client.step(text).unwrap();
         assert_eq!(
-            diags,
+            client.results.diagnostics,
             [Diagnostic {
                 range: 31..34,
                 severity: Severity::Error,
@@ -674,7 +895,7 @@ mod tests {
 
         // An edit goes out as a full-text change.
         let edited = format!("{text}\n");
-        client.step(&edited, &mut diags).unwrap();
+        client.step(&edited).unwrap();
         let change = client.link.sent.last().unwrap();
         assert_eq!(change["method"], "textDocument/didChange");
         assert_eq!(change["params"]["textDocument"]["version"], 2);
@@ -685,13 +906,17 @@ mod tests {
         // A report for version 1 arriving now is stale and ignored.
         client.link.inbox.push_back(report(1, 0));
         let before = client.link.sent.len();
-        client.step(&edited, &mut diags).unwrap();
+        client.step(&edited).unwrap();
         assert_eq!(
             client.link.sent.len(),
             before,
             "unchanged text is not resent"
         );
-        assert_eq!(diags[0].range, 31..34, "stale report applied");
+        assert_eq!(
+            client.results.diagnostics[0].range,
+            31..34,
+            "stale report applied"
+        );
     }
 
     /// Edits wait for a pause in typing; the marks follow them meanwhile,
@@ -699,17 +924,16 @@ mod tests {
     #[test]
     fn edits_are_debounced() {
         let mut client = Client::new(Fake::default());
-        let mut diags = Vec::new();
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
         let text = "let a = 1.0;\n";
-        client.step_at(text, &mut diags, t0).unwrap();
+        client.step_at(text, t0).unwrap();
         let init_id = client.link.sent[0]["id"].clone();
         client
             .link
             .inbox
             .push_back(json!({ "jsonrpc": "2.0", "id": init_id, "result": {} }));
-        client.step_at(text, &mut diags, ms(1)).unwrap();
+        client.step_at(text, ms(1)).unwrap();
         assert_eq!(
             methods(&client.link.sent).last(),
             Some(&"textDocument/didOpen")
@@ -721,12 +945,10 @@ mod tests {
             .iter()
             .enumerate()
         {
-            client
-                .step_at(typed, &mut diags, ms(10 + 50 * i as u64))
-                .unwrap();
+            client.step_at(typed, ms(10 + 50 * i as u64)).unwrap();
         }
         let typed = "// xyz\nlet a = 1.0;\n";
-        client.step_at(typed, &mut diags, ms(110)).unwrap();
+        client.step_at(typed, ms(110)).unwrap();
         assert_eq!(client.link.sent.len(), sent, "sent while typing");
 
         // The server reports on version 1 (`1.0` at line 0, 8..11) now: the
@@ -740,33 +962,188 @@ mod tests {
                 }],
             },
         }));
-        client.step_at(typed, &mut diags, ms(200)).unwrap();
+        client.step_at(typed, ms(200)).unwrap();
         assert_eq!(
             client.link.sent.len(),
             sent,
             "sent before the pause was long"
         );
         let shown: Vec<char> = typed.chars().collect();
-        let r = diags[0].range.clone();
+        let r = client.results.diagnostics[0].range.clone();
         assert_eq!(shown[r].iter().collect::<String>(), "1.0");
 
         // 150 ms after the last keystroke it goes out, once.
-        client.step_at(typed, &mut diags, ms(260)).unwrap();
-        client.step_at(typed, &mut diags, ms(300)).unwrap();
+        client.step_at(typed, ms(260)).unwrap();
+        client.step_at(typed, ms(300)).unwrap();
         let changes: Vec<_> = client.link.sent[sent..].iter().collect();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0]["params"]["contentChanges"][0]["text"], typed);
     }
 
+    /// A client past the handshake, with `text` open, and what it sent.
+    fn ready_client(text: &str) -> Client<Fake> {
+        let mut client = Client::new(Fake::default());
+        let t0 = Instant::now();
+        client.step_at(text, t0).unwrap();
+        let init_id = client.link.sent[0]["id"].clone();
+        client
+            .link
+            .inbox
+            .push_back(json!({ "jsonrpc": "2.0", "id": init_id, "result": {} }));
+        client.step_at(text, t0).unwrap();
+        assert_eq!(
+            methods(&client.link.sent).last(),
+            Some(&"textDocument/didOpen")
+        );
+        client
+    }
+
+    fn respond(client: &mut Client<Fake>, ticket: Ticket, result: Value) {
+        client
+            .link
+            .inbox
+            .push_back(json!({ "jsonrpc": "2.0", "id": ticket, "result": result }));
+        let text = client.seen.clone().unwrap();
+        client.step(&text).unwrap();
+    }
+
+    /// A request at the cursor sends pending typing first (skipping the
+    /// debounce), so its position refers to what the server has; the
+    /// answer carries the request's ticket.
     #[test]
-    fn zero_width_diagnostics_get_a_character() {
-        let d = json!({
-            "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 3 } },
-            "message": "expected `;`",
-        });
-        let got = convert("abc", &d).unwrap();
-        assert_eq!(got.range, 2..3);
-        assert_eq!(got.severity, Severity::Error);
+    fn requests_flush_typing_and_carry_tickets() {
+        let mut client = ready_client("fn f() {}\n");
+        // Typed, not sent yet (debounced).
+        let typed = "fn f() { sn }\n";
+        client.step(typed).unwrap();
+        assert_eq!(client.version, 1);
+
+        let ticket = client
+            .at_cursor(typed, 11, "textDocument/completion", Pending::Completion)
+            .unwrap();
+        let sent = &client.link.sent;
+        let n = sent.len();
+        assert_eq!(sent[n - 2]["method"], "textDocument/didChange");
+        assert_eq!(sent[n - 2]["params"]["contentChanges"][0]["text"], typed);
+        assert_eq!(sent[n - 1]["method"], "textDocument/completion");
+        assert_eq!(sent[n - 1]["id"], ticket);
+        assert_eq!(
+            sent[n - 1]["params"]["position"],
+            json!({ "line": 0, "character": 11 })
+        );
+
+        respond(
+            &mut client,
+            ticket,
+            json!([{ "label": "snoise3", "kind": 3, "detail": "fn snoise3(v: vec3<f32>) -> f32" }]),
+        );
+        let answer = client.results.completion.as_ref().unwrap();
+        assert_eq!(answer.ticket, ticket);
+        assert_eq!(answer.value[0].label, "snoise3");
+
+        // A failed request answers with nothing rather than leaving the
+        // editor waiting on the old list.
+        let failed = client
+            .at_cursor(typed, 11, "textDocument/completion", Pending::Completion)
+            .unwrap();
+        client
+            .link
+            .inbox
+            .push_back(json!({ "jsonrpc": "2.0", "id": failed,
+            "error": { "code": -32603, "message": "boom" } }));
+        client.step(typed).unwrap();
+        let answer = client.results.completion.as_ref().unwrap();
+        assert_eq!((answer.ticket, answer.value.len()), (failed, 0));
+    }
+
+    /// Definitions and formatting are positions into the text they were
+    /// asked about: once the editor moved on, the answer is dropped.
+    #[test]
+    fn stale_definitions_and_formats_are_dropped() {
+        let text = "let a = 1;\nlet b = a;\n";
+        let mut client = ready_client(text);
+        let location = json!([{ "uri": "file:///ws/shaders/user.wesl", "range": {
+            "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 5 } } }]);
+
+        let ticket = client
+            .at_cursor(text, 19, "textDocument/definition", Pending::Definition)
+            .unwrap();
+        respond(&mut client, ticket, location.clone());
+        let answer = client.results.definition.take().unwrap();
+        assert_eq!(answer.value, Some(Definition::User(4..5)));
+
+        let ticket = client
+            .at_cursor(text, 19, "textDocument/definition", Pending::Definition)
+            .unwrap();
+        client.step(&format!("{text}// typed\n")).unwrap();
+        respond(&mut client, ticket, location);
+        assert_eq!(client.results.definition, None, "applied to moved text");
+
+        let text = client.seen.clone().unwrap();
+        let ticket = client.format(&text, None).unwrap();
+        assert_eq!(
+            client.link.sent.last().unwrap()["method"],
+            "textDocument/formatting"
+        );
+        let edit = json!([{ "range": { "start": { "line": 2, "character": 0 },
+            "end": { "line": 2, "character": 2 } }, "newText": "//" }]);
+        respond(&mut client, ticket, edit);
+        assert_eq!(client.results.format.take().unwrap().value.unwrap(), text);
+        // Range formatting for a selection; `null` (unparsable) is `None`.
+        let ticket = client.format(&text, Some(0..3)).unwrap();
+        assert_eq!(
+            client.link.sent.last().unwrap()["method"],
+            "textDocument/rangeFormatting"
+        );
+        respond(&mut client, ticket, Value::Null);
+        assert_eq!(client.results.format.take().unwrap().value, None);
+    }
+
+    /// With hints on, every synced version is asked for once; a reply for
+    /// an older version is dropped, and hints follow typing meanwhile.
+    #[test]
+    fn inlay_hints_follow_versions() {
+        let text = "let st = 1.0;\n";
+        let mut client = ready_client(text);
+        client.debounce = Duration::ZERO;
+        client.hints = true;
+        client.step(text).unwrap();
+        let request = client.link.sent.last().unwrap().clone();
+        assert_eq!(request["method"], "textDocument/inlayHint");
+        assert_eq!(
+            request["params"]["range"]["end"],
+            json!({ "line": 1, "character": 0 })
+        );
+        client.step(text).unwrap();
+        assert_eq!(client.link.sent.last().unwrap(), &request, "asked twice");
+
+        let hint =
+            json!([{ "position": { "line": 0, "character": 6 }, "label": ": f32", "kind": 1 }]);
+        let first = request["id"].as_i64().unwrap();
+        respond(&mut client, first, hint.clone());
+        assert_eq!(client.results.hints[0].at, 6);
+
+        // Typing before the hint moves it at once; the new version is asked.
+        let edited = format!("// x\n{text}");
+        client.step(&edited).unwrap();
+        assert_eq!(client.results.hints[0].at, 11);
+        let second = client.link.sent.last().unwrap()["id"].as_i64().unwrap();
+        assert_ne!(second, first);
+        // The reply for the first version arriving late is dropped.
+        client.pending.insert(
+            first,
+            Request {
+                kind: Pending::Hints,
+                version: 1,
+                text: text.into(),
+            },
+        );
+        respond(&mut client, first, json!([]));
+        assert_eq!(client.results.hints.len(), 1, "stale reply applied");
+
+        client.hints = false;
+        client.step(&edited).unwrap();
+        assert!(client.results.hints.is_empty());
     }
 
     /// End to end against a real server. Needs the `wgsl-analyzer` binary:
@@ -819,5 +1196,89 @@ mod tests {
         let chars: Vec<char> = broken.chars().collect();
         let flagged: String = chars[d.range.clone()].iter().collect();
         assert_eq!(flagged, "i_time()", "{d:?}");
+
+        // The editor's requests, on an example that imports LYGIA.
+        let code = crate::examples::by_name("LYGIA 101").unwrap().code;
+        let at = |needle: &str| {
+            let byte = code.find(needle).unwrap_or_else(|| panic!("{needle}"));
+            code[..byte].chars().count()
+        };
+        analyzer.set_inlay_hints(true);
+        wait_for(&mut analyzer, code, &|a| {
+            a.inlay_hints().iter().any(|h| h.kind == HintKind::Type)
+        });
+
+        let ticket = analyzer.request_completion(code, at("i_time();")).unwrap();
+        wait_for(&mut analyzer, code, &|a| {
+            a.completion().is_some_and(|c| c.ticket == ticket)
+        });
+        let items = &analyzer.completion().unwrap().value;
+        let snoise = items
+            .iter()
+            .find(|i| i.label == "snoise3")
+            .expect("snoise3");
+        assert_eq!(snoise.kind, CompletionKind::Function);
+        assert_eq!(
+            snoise.detail.as_deref(),
+            Some("fn snoise3(v: vec3<f32>) -> f32")
+        );
+
+        let ticket = analyzer
+            .request_signature(code, at("RING_RADIUS, 0.02"))
+            .unwrap();
+        wait_for(&mut analyzer, code, &|a| {
+            a.signature().is_some_and(|s| s.ticket == ticket)
+        });
+        let signature = analyzer
+            .signature()
+            .unwrap()
+            .value
+            .clone()
+            .expect("in a call");
+        assert!(signature.label.starts_with("fn stroke("), "{signature:?}");
+        assert_eq!(signature.active, Some(1));
+
+        let definition = |analyzer: &mut Analyzer, needle: &str| {
+            let ticket = analyzer.request_definition(code, at(needle) + 1).unwrap();
+            wait_for(analyzer, code, &|a| {
+                a.results()
+                    .and_then(|r| r.definition.as_ref())
+                    .is_some_and(|d| d.ticket == ticket)
+            });
+            analyzer.take_definition().and_then(|answer| answer.value)
+        };
+        let Some(Definition::Module { title, lygia, .. }) =
+            definition(&mut analyzer, "snoise3(vec3")
+        else {
+            panic!("snoise3 resolves into LYGIA");
+        };
+        assert_eq!(title, "lygia::generative::snoise");
+        assert_eq!(lygia.as_deref(), Some("generative::snoise"));
+        assert!(matches!(
+            definition(&mut analyzer, "i_time();"),
+            Some(Definition::Module { lygia: None, .. })
+        ));
+        assert_eq!(
+            definition(&mut analyzer, "res.y;"),
+            Some(Definition::User(at("res = ")..at("res = ") + 3))
+        );
+
+        // Formatting every example gives text that still compiles.
+        for example in crate::examples::ALL {
+            let ticket = analyzer.request_format(example.code, None).unwrap();
+            wait_for(&mut analyzer, example.code, &|a| {
+                a.results()
+                    .and_then(|r| r.format.as_ref())
+                    .is_some_and(|f| f.ticket == ticket)
+            });
+            let formatted = analyzer
+                .take_format()
+                .unwrap()
+                .value
+                .unwrap_or_else(|| panic!("{} formats", example.name));
+            if let Err(e) = crate::compile::compile_user_shader(&formatted) {
+                panic!("{} formatted no longer compiles: {e:?}", example.name);
+            }
+        }
     }
 }
