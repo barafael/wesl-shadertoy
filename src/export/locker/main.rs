@@ -27,9 +27,8 @@ use raw_window_handle::{
     WaylandDisplayHandle, WaylandWindowHandle,
 };
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_output, delegate_registry, delegate_seat,
-    delegate_session_lock,
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    delegate_dispatch2, delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{
@@ -799,7 +798,7 @@ impl Locker {
         out.ready = false;
         let wl_surface = out.lock_surface.wl_surface();
         // Ask before presenting: presenting commits the surface.
-        wl_surface.frame(qh, wl_surface.clone());
+        wl_surface.frame(qh, FrameCallbackData(wl_surface.clone()));
 
         let texture = match target.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -1282,9 +1281,5 @@ impl ProvidesRegistryState for Locker {
     registry_handlers![OutputState, SeatState];
 }
 
-delegate_compositor!(Locker);
-delegate_output!(Locker);
-delegate_seat!(Locker);
-delegate_keyboard!(Locker);
-delegate_session_lock!(Locker);
+delegate_dispatch2!(Locker);
 delegate_registry!(Locker);

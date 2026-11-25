@@ -50,11 +50,11 @@ publish = false
 
 [dependencies]
 wgpu = "30"
-smithay-client-toolkit = "0.20"
+smithay-client-toolkit = "0.21"
 # `system`: libwayland underneath, whose pointers wgpu needs.
 wayland-client = {{ version = "0.31", features = ["system"] }}
 raw-window-handle = "0.6"
-pollster = "0.4"
+pollster = "1.0"
 # Without its default `cli` feature, which reads passwords from a terminal.
 pam-client = {{ version = "0.5", default-features = false }}
 zeroize = "1"
