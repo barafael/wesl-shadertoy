@@ -75,7 +75,7 @@ jobs:
       - name: Install trunk
         run: |
           curl -LsSf \
-            https://github.com/trunk-rs/trunk/releases/download/v0.22.0/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            https://github.com/trunk-rs/trunk/releases/download/v0.22.2/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
       # Code compiled only for wasm (file pickers, the web analyzer and

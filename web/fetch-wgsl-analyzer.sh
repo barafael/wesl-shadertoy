@@ -9,8 +9,8 @@
 # (the app then reports it as unavailable).
 set -eu
 
-VERSION=0.12.0-next.510
-INTEGRITY=sha512-1IugGZE1BtaBmgpf0Bl7P2LrwN1JbxeogbPcgOczDI3XSBp/QEM1Ve6M6Hr2SetzrdXf1ERnVbuoNyvE8dwQMA==
+VERSION=0.12.0-next.542
+INTEGRITY=sha512-qhoaLrW5KVx9brijlfHPhqPt+f4fyhgwTj/XzVuOACfM5hxXgfzwh/5a9OwrkTbj2v1ICz4wfoYW+6VOyKgo4A==
 URL="https://registry.npmjs.org/wgsl-analyzer-web/-/wgsl-analyzer-web-$VERSION.tgz"
 
 cd "$(dirname "$0")"
@@ -35,13 +35,14 @@ if [ "$GOT" != "$INTEGRITY" ]; then
 fi
 tar -xzf "$TMP/package.tgz" -C "$TMP"
 
-# index.js spawns assets/worker.js, which loads the emscripten glue and wasm
-# next to itself; nothing else in the package is needed at runtime.
+# Plain ES modules since 0.12.0-next.5xx: index.js spawns worker.js, which
+# imports host.js (and it fs.js) and loads the emscripten glue and wasm next
+# to itself. The rest of dist/ (types, source maps, protocol.js and
+# emscripten.js, imported for types only) is not needed at runtime.
 rm -rf "$DEST"
-mkdir -p "$DEST/assets"
-cp "$TMP/package/dist/index.js" "$TMP/package/LICENSE-MIT" "$TMP/package/LICENSE-APACHE" "$DEST/"
-cp "$TMP/package/dist/assets/worker.js" \
-    "$TMP/package/dist/assets/wgsl_analyzer.js" \
-    "$TMP/package/dist/assets/wgsl_analyzer.wasm" \
-    "$DEST/assets/"
+mkdir -p "$DEST"
+for file in index.js worker.js host.js fs.js wgsl_analyzer.js wgsl_analyzer.wasm; do
+    cp "$TMP/package/dist/$file" "$DEST/"
+done
+cp "$TMP/package/LICENSE-MIT" "$TMP/package/LICENSE-APACHE" "$DEST/"
 echo "$VERSION" >"$DEST/VERSION"
