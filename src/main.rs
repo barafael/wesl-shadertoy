@@ -410,8 +410,8 @@ struct Settings {
 }
 
 impl Settings {
-    /// Used when nothing is saved yet: random example, live diagnostics and
-    /// frosted glass on.
+    /// Used when nothing is saved yet: random example, wgsl-analyzer (with
+    /// completion while typing and type hints) and frosted glass on.
     fn fallback() -> Self {
         Self {
             random_example: true,
@@ -1493,7 +1493,7 @@ fn ui(mut p: UiParams) {
                 ui.label("MIT OR Apache-2.0.");
                 ui.weak(
                     "fullscreen_material.rs vendored from Bevy 0.20 (MIT OR Apache-2.0) \
-                     · live diagnostics by wgsl-analyzer (MIT OR Apache-2.0) \
+                     · code intelligence by wgsl-analyzer (MIT OR Apache-2.0) \
                      · debugger overlay ported from eliotbo/bevy_shadertoy_wgsl \
                      (MIT OR Apache-2.0) \
                      · coi-serviceworker by Guido Zuidhof (MIT) \
@@ -1873,7 +1873,7 @@ fn analyzer_readout(ui: &mut egui::Ui, analyzer: &analyzer::Analyzer) {
                 let n = diagnostics.iter().filter(|d| d.severity == s).count();
                 (n > 0).then_some(n)
             };
-            let hover = "Live diagnostics: hover the squiggles in the code";
+            let hover = "Diagnostics: hover the squiggles in the code";
             let plural = |n: usize, what| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
             match (count(Severity::Error), count(Severity::Warning)) {
                 (Some(e), Some(w)) => {

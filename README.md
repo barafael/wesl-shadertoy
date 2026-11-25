@@ -25,7 +25,7 @@ Runs natively and in the browser as WASM.
 | Drag the picture *(experimental, native only)* | toolbar hand, or **Alt+drag** on the canvas: grab a spot of the image and drag it; the float constant that moves that spot best along the drag follows the pointer (with time frozen), and the code changes on release (see [Dragging the picture](#dragging-the-picture-experimental)) |
 | Windows | `Examples`, `Code`, `WGSL` (composed output), `Constants`, `Flags`, `LYGIA`, `Graph` toggles; `⚙` settings (frosted-glass blur slider, 0–24 px: how blurred the shader shows through the UI, 0 = off; the GPU backend in use and, on the web, a WebGPU switch that reloads the page on WebGL2 or back, keeping the document), `?` about |
 | Edit | Tab / Shift-Tab indent, line-number gutter, syntax highlighting |
-| Live diagnostics | squiggles + gutter marks from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type; hover for the message; toggle in `⚙` |
+| Code intelligence | from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer) while you type: squiggles + gutter marks (hover for the message), completion (**Ctrl+Space**), signature help, go to definition (**F12** / **Ctrl+click**, also into LYGIA and `package::shadertoy`), **Format** (**Shift+Alt+F**), type hints at line ends; switches in `⚙` (see [Code intelligence](#code-intelligence-wgsl-analyzer)) |
 | `iMouse` | click + drag on the canvas (clicks on UI are ignored) |
 | The shader eats the editor | toolbar droplet icon (enabled while the shader reads `i_ui`, e.g. the `UI Melt` example): the rendered UI goes into the shader as a texture and the shader's output is what you see, so it can ripple, smear or melt the editor you type into. Clicks and typing still land on the undistorted UI. **F2** always switches it off; it is never saved, and it pauses the frosted glass and the debugger overlay (see [The UI as a texture](#the-ui-as-a-texture)) |
 | Cost heatmap | toolbar flame icon (or `--heat` natively): the image becomes a thermal map of loop iterations per pixel, black (none) through red to pale yellow (the legend's max, 256 by default, dragged live in the canvas corner) — see [Cost heatmap](#cost-heatmap) |
@@ -471,11 +471,35 @@ console), then handed to Bevy as `Shader::from_wgsl`. The previous shader keeps
 drawing until the new one's pipelines are built, so a compile never blanks
 the screen, and a broken edit never replaces a working shader.
 
-## Live diagnostics (wgsl-analyzer)
+## Code intelligence (wgsl-analyzer)
 
 While you edit, the [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer)
-language server checks the code and the editor squiggles what it reports;
-the status bar shows the count. Its workspace mirrors the real compile:
+language server reads the code, and the editor shows what it knows:
+
+* **Diagnostics**: squiggles under the code and ticks in the gutter, the
+  message on hover; the status bar counts them.
+* **Completion**: a list opens while you type a name, or after `.` on a
+  value (**Ctrl+Space** opens it anywhere). It holds what is in scope there
+  (your functions, variables and constants, imported LYGIA functions,
+  builtins, struct fields after `.`), filtered by what you typed, with each
+  entry's type or signature. **Up**/**Down** pick, **Enter** or **Tab**
+  take, **Escape** closes. "complete while typing" in `⚙` switches the
+  automatic list off.
+* **Signature help**: after `(` or `,` in a call, the function's signature
+  shows above the line with the current parameter underlined.
+* **Go to definition**: **F12**, or **Ctrl+click** on a name. A name from your
+  code gets selected where it is declared; one from `package::shadertoy` or
+  LYGIA opens read-only in a Definition window, scrolled to it (for LYGIA
+  with a button to the module in the LYGIA window).
+* **Format**: the `format` button in the status bar, or **Shift+Alt+F**,
+  formats the code (or the lines of a selection) the way the examples are
+  formatted; **Ctrl+Z** takes it back. Code that does not parse is left
+  alone.
+* **Type hints**: the types of `let` and `var` declarations, faded at the end
+  of their line (`st: vec2<f32>`); "type hints" in `⚙` hides them.
+
+Hover, rename and find-references are not there because the server does not
+offer them yet. Its workspace mirrors the real compile:
 `shaders/shadertoy.wesl` is the hidden `package::shadertoy` module, `lygia/`
 the bundled LYGIA (a path dependency in `wesl.toml`), and the editor text is
 `shaders/user.wesl` (`package::user`), so imports and types resolve exactly as
@@ -549,8 +573,14 @@ src/
   debugger.rs   debugger overlay (ported from bevy_shadertoy_wgsl): blit pass,
                 overlay WGSL, font atlas rasterized from egui's Hack font
   highlight.rs  WESL/WGSL tokenizer -> colored LayoutJob
-  editor.rs     the code editor: TextEdit with a custom layouter that paints
-                the highlighted job, line-number gutter, Tab/Shift-Tab
+  editor/       the code editor
+    mod.rs        TextEdit with a custom layouter that paints the
+                  highlighted job, line-number gutter, Tab/Shift-Tab,
+                  squiggles; the read-only code view
+    assist.rs     completion and signature-help popups, go to definition,
+                  formatting and type hints, over an `Assistant` (the
+                  analyzer, or a script in the tests)
+    peek.rs       the Definition window for names defined outside the code
   browser.rs    the Examples window: cards, filters, and which thumbnails to
                 draw each frame, from the examples build.rs compiled
   evolve.rs     Evolve mode: mutating constants, the lineage, the 3×3 grid of
@@ -563,8 +593,11 @@ src/
                   WESL-mangled names mapped back
     layout.rs     layered left-to-right layout: cycle breaking, longest-path
                   columns, dummy nodes, barycenter crossing reduction
-  analyzer/     wgsl-analyzer LSP client (live diagnostics)
-    mod.rs        handshake, full-text sync, publishDiagnostics -> char ranges
+  analyzer/     wgsl-analyzer LSP client
+    mod.rs        handshake, full-text sync, diagnostics, and the editor's
+                  requests, each answer tagged with its request's ticket
+    protocol.rs   LSP payloads <-> app types: UTF-16 positions, completion
+                  items, signatures, definitions, hints, formatting edits
     native.rs     the wgsl-analyzer executable over stdio
     web.rs        wgsl-analyzer-web in a Web Worker, via web/analyzer.js
 build.rs        compiles every example ahead of time for the Examples
