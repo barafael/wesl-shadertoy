@@ -24,7 +24,7 @@ fn sd_menger(p_in: vec3<f32>) -> f32 {
     var p = p_in;
     var s = 1.0;
     var d = sd_box(p, 1.0);
-    for (var i = 0; i < LEVELS; i = i + 1) {
+    for(var i = 0; i < LEVELS; i = i + 1) {
         // `mod` is reserved by WESL, so fold into [-1, 1) by hand.
         let w = p * s + vec3<f32>(1.0);
         let q = w - 2.0 * floor(w * 0.5) - vec3<f32>(1.0);
@@ -56,11 +56,13 @@ fn map(p: vec3<f32>) -> f32 {
 
 fn normal(p: vec3<f32>) -> vec3<f32> {
     let e = vec3<f32>(0.001, 0.0, 0.0);
-    return normalize(vec3<f32>(
-        map(p + e.xyy) - map(p - e.xyy),
-        map(p + e.yxy) - map(p - e.yxy),
-        map(p + e.yyx) - map(p - e.yyx),
-    ));
+    return normalize(
+            vec3<f32>(
+                map(p + e.xyy) - map(p - e.xyy),
+                map(p + e.yxy) - map(p - e.yxy),
+                map(p + e.yyx) - map(p - e.yyx),
+            ),
+        );
 }
 
 fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
@@ -73,20 +75,20 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     var t = 0.0;
     var p = ro;
     var hit = 0.0;
-    for (var i = 0; i < STEPS; i = i + 1) {
+    for(var i = 0; i < STEPS; i = i + 1) {
         p = ro + rd * t;
         let d = map(p);
-        if (d < 0.0008) {
+        if d < 0.0008 {
             hit = 1.0;
             break;
         }
         t = t + d;
-        if (t > 8.0) {
+        if t > 8.0 {
             break;
         }
     }
 
-    if (hit < 0.5) {
+    if hit < 0.5 {
         return vec4<f32>(BG_COLOR, 1.0);
     }
 

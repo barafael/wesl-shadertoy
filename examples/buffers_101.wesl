@@ -21,7 +21,7 @@ const HEAD_COLOR: vec3<f32> = vec3<f32>(1.0, 0.9, 0.6);
 // circling the middle.
 fn brush() -> vec2<f32> {
     let m = i_mouse();
-    if (m.z > 0.0) {
+    if m.z > 0.0 {
         return m.xy;
     }
     let t = i_time();
@@ -32,7 +32,7 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     // Buffers start out black, and are cleared again on every compile, on
     // Reset and on resize. Anything else to set up goes on frame 0: here,
     // a ring that fades away like the rest of the trail.
-    if (i_frame() == 0u) {
+    if i_frame() == 0u {
         let r = length(frag_coord - 0.5 * i_resolution().xy) - 0.4 * i_resolution().y;
         return vec4<f32>(select(0.0, 1.0, abs(r) < 3.0));
     }

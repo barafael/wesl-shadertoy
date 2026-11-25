@@ -25,16 +25,27 @@ const SEA_WATER_COLOR: vec3<f32> = vec3<f32>(0.48, 0.54, 0.36);
 const TIME_SCALE: f32 = 0.3; // tweak: 0..2
 // Direction towards the sun (normalized in use).
 const LIGHT_DIR: vec3<f32> = vec3<f32>(0., 1., 0.8); // tweak: -1..1
-const octave_m: mat2x2<f32> = mat2x2<f32>(vec2<f32>(1.6, 1.2), vec2<f32>(-1.2, 1.6));
+const octave_m: mat2x2<f32> = mat2x2<f32>(
+        vec2<f32>(1.6, 1.2),
+        vec2<f32>(-1.2, 1.6),
+    );
 
 fn fromEuler(ang: vec3<f32>) -> mat3x3<f32> {
     let a1: vec2<f32> = vec2<f32>(sin(ang.x), cos(ang.x));
     let a2: vec2<f32> = vec2<f32>(sin(ang.y), cos(ang.y));
     let a3: vec2<f32> = vec2<f32>(sin(ang.z), cos(ang.z));
     var m: mat3x3<f32> = mat3x3<f32>();
-    m[0] = vec3<f32>(a1.y * a3.y + a1.x * a2.x * a3.x, a1.y * a2.x * a3.x + a3.y * a1.x, -a2.y * a3.x);
-    m[1] =  vec3<f32>(-a2.y * a1.x, a1.y * a2.y, a2.x);
-    m[2] =  vec3<f32>(a3.y * a1.x * a2.x + a1.y * a3.x, a1.x * a3.x - a1.y * a3.y * a2.x, a2.y * a3.y);
+    m[0] = vec3<f32>(
+            a1.y * a3.y + a1.x * a2.x * a3.x,
+            a1.y * a2.x * a3.x + a3.y * a1.x,
+            -a2.y * a3.x,
+        );
+    m[1] = vec3<f32>(-a2.y * a1.x, a1.y * a2.y, a2.x);
+    m[2] = vec3<f32>(
+            a3.y * a1.x * a2.x + a1.y * a3.x,
+            a1.x * a3.x - a1.y * a3.y * a2.x,
+            a2.y * a3.y,
+        );
     return m;
 }
 
@@ -47,7 +58,11 @@ fn noise(p: vec2<f32>) -> f32 {
     let i: vec2<f32> = floor(p);
     let f: vec2<f32> = fract(p);
     let u: vec2<f32> = f * f * (3. - 2. * f);
-    return -1. + 2. * mix(mix(hash(i + vec2<f32>(0., 0.)), hash(i + vec2<f32>(1., 0.)), u.x), mix(hash(i + vec2<f32>(0., 1.)), hash(i + vec2<f32>(1., 1.)), u.x), u.y);
+    return -1. + 2. * mix(
+            mix(hash(i + vec2<f32>(0., 0.)), hash(i + vec2<f32>(1., 0.)), u.x),
+            mix(hash(i + vec2<f32>(0., 1.)), hash(i + vec2<f32>(1., 1.)), u.x),
+            u.y,
+        );
 }
 
 fn diffuse(n: vec3<f32>, l: vec3<f32>, p: f32) -> f32 {
@@ -83,7 +98,7 @@ fn map(p: vec3<f32>) -> f32 {
     var d: f32 = 0.;
     var h: f32 = 0.;
 
-    for (var i: i32 = 0; i < ITER_GEOMETRY; i = i + 1) {
+    for(var i: i32 = 0; i < ITER_GEOMETRY; i = i + 1) {
         d = sea_octave((uv + (1. + i_time() * SEA_SPEED)) * freq, choppy);
         d = d + (sea_octave((uv - (1. + i_time() * SEA_SPEED)) * freq, choppy));
         h = h + (d * amp);
@@ -105,7 +120,7 @@ fn map_detailed(p: vec3<f32>) -> f32 {
     var d: f32 = 0.;
     var h: f32 = 0.;
 
-    for (var i: i32 = 0; i < ITER_FRAGMENT; i = i + 1) {
+    for(var i: i32 = 0; i < ITER_FRAGMENT; i = i + 1) {
         d = sea_octave((uv + (1. + i_time() * SEA_SPEED)) * freq, choppy);
         d = d + (sea_octave((uv - (1. + i_time() * SEA_SPEED)) * freq, choppy));
         h = h + (d * amp);
@@ -118,7 +133,13 @@ fn map_detailed(p: vec3<f32>) -> f32 {
     return p.y - h;
 }
 
-fn getSeaColor(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>, eye: vec3<f32>, dist: vec3<f32>) -> vec3<f32> {
+fn getSeaColor(
+    p: vec3<f32>,
+    n: vec3<f32>,
+    l: vec3<f32>,
+    eye: vec3<f32>,
+    dist: vec3<f32>,
+) -> vec3<f32> {
     var fresnel: f32 = clamp(1. - dot(n, -eye), 0., 1.);
     fresnel = pow(fresnel, 3.) * 0.5;
     let reflected: vec3<f32> = getSkyColor(reflect(eye, n));
@@ -139,27 +160,26 @@ fn getNormal(p: vec3<f32>, eps: f32) -> vec3<f32> {
     return normalize(n);
 }
 
-fn heightMapTracing(ori: vec3<f32>, dir: vec3<f32>,  p: ptr<function, vec3<f32>>) -> f32 {
+fn heightMapTracing(ori: vec3<f32>, dir: vec3<f32>, p: ptr<function, vec3<f32>>) -> f32 {
     var p_var: vec3<f32> = vec3<f32>(0.);
     var tm: f32 = 0.;
     var tx: f32 = 1000.;
     var hx: f32 = map(ori + dir * tx);
-    if (hx > 0.) {
+    if hx > 0. {
         p_var = ori + dir * tx;
         return tx;
     }
     var hm: f32 = map(ori + dir * tm);
     var tmid: f32 = 0.;
 
-    for (var i: i32 = 0; i < NUM_STEPS; i = i + 1) {
+    for(var i: i32 = 0; i < NUM_STEPS; i = i + 1) {
         tmid = mix(tm, tx, hm / (hm - hx));
         p_var = ori + dir * tmid;
         let hmid: f32 = map(p_var);
-        if (hmid < 0.) {
+        if hmid < 0. {
             tx = tmid;
             hx = hmid;
         } else {
-
             tm = tmid;
             hm = hmid;
         }
@@ -183,7 +203,11 @@ fn getPixel(coord: vec2<f32>, time: f32) -> vec3<f32> {
     let dist: vec3<f32> = p - ori;
     let n: vec3<f32> = getNormal(p, dot(dist, dist) * (0.1 / i_resolution().x));
     let light: vec3<f32> = normalize(LIGHT_DIR);
-    return mix(getSkyColor(dir), getSeaColor(p, n, light, dir, dist), pow(smoothstep(0., -0.02, dir.y), 0.2));
+    return mix(
+            getSkyColor(dir),
+            getSeaColor(p, n, light, dir, dist),
+            pow(smoothstep(0., -0.02, dir.y), 0.2),
+        );
 }
 
 fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {

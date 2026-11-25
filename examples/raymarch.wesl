@@ -25,7 +25,7 @@ fn map(p: vec3<f32>) -> vec2<f32> {
     let bob = vec3<f32>(0.0, 0.4 + 0.2 * sin(t * BOB_SPEED), 0.0);
     let d_sphere = sd_sphere(p, bob, SPHERE_RADIUS);
     let d_ground = p.y - (-0.5);
-    if (d_sphere < d_ground) {
+    if d_sphere < d_ground {
         return vec2<f32>(d_sphere, 1.0);
     }
     return vec2<f32>(d_ground, 2.0);
@@ -34,11 +34,13 @@ fn map(p: vec3<f32>) -> vec2<f32> {
 fn normal(p: vec3<f32>) -> vec3<f32> {
     let e = 0.001;
     let d = map(p).x;
-    return normalize(vec3<f32>(
-        map(p + vec3<f32>(e, 0.0, 0.0)).x - d,
-        map(p + vec3<f32>(0.0, e, 0.0)).x - d,
-        map(p + vec3<f32>(0.0, 0.0, e)).x - d,
-    ));
+    return normalize(
+            vec3<f32>(
+                map(p + vec3<f32>(e, 0.0, 0.0)).x - d,
+                map(p + vec3<f32>(0.0, e, 0.0)).x - d,
+                map(p + vec3<f32>(0.0, 0.0, e)).x - d,
+            ),
+        );
 }
 
 fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
@@ -52,20 +54,20 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     var t = 0.0;
     var hit_id = 0.0;
     var p = ro;
-    for (var i = 0; i < STEPS; i = i + 1) {
+    for(var i = 0; i < STEPS; i = i + 1) {
         p = ro + rd * t;
         let h = map(p);
-        if (h.x < 0.001) {
+        if h.x < 0.001 {
             hit_id = h.y;
             break;
         }
         t = t + h.x;
-        if (t > 20.0) {
+        if t > 20.0 {
             break;
         }
     }
 
-    if (hit_id == 0.0) {
+    if hit_id == 0.0 {
         let sky = mix(SKY_HORIZON, SKY_ZENITH, clamp(rd.y + 0.4, 0.0, 1.0));
         return vec4<f32>(sky, 1.0);
     }
@@ -74,7 +76,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let light_dir = normalize(LIGHT_DIR);
     let diff = max(dot(n, light_dir), 0.0);
     var albedo = SPHERE_COLOR;
-    if (hit_id > 1.5) {
+    if hit_id > 1.5 {
         let chk = step(0.5, fract(p.x * CHECKER_SCALE)) + step(0.5, fract(p.z * CHECKER_SCALE));
         albedo = mix(vec3<f32>(0.15), vec3<f32>(0.8), fract(chk * 0.5));
     }

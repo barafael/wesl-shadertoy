@@ -5,7 +5,7 @@
 // Shapes, drawing helpers, easing curves and color spaces all come from
 // LYGIA (https://lygia.xyz), bundled as the `lygia` WESL package. Its 2D
 // functions work in 0..1 coordinates centered on (0.5, 0.5).
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::sdf::starSDF::starSDF;
 import lygia::sdf::flowerSDF::flowerSDF;
 import lygia::sdf::gearSDF::gearSDF;
@@ -27,12 +27,12 @@ const OUTLINE_COLOR: vec3<f32> = vec3<f32>(0.92, 0.86, 0.7);
 /// Shape `i`'s distance field at `st`, and the level its edge sits at.
 fn shape(i: i32, st: vec2<f32>) -> vec2<f32> {
     switch i {
-        case 0: { return vec2<f32>(starSDF(st, 5, 0.1), 0.3); }
-        case 1: { return vec2<f32>(flowerSDF(st, 5), 0.7); }
+        case 0 { return vec2<f32>(starSDF(st, 5, 0.1), 0.3); }
+        case 1 { return vec2<f32>(flowerSDF(st, 5), 0.7); }
         // The gear is small at unit scale: zoom in on it.
-        case 2: { return vec2<f32>(gearSDF(0.5 + 0.3 * (st - 0.5), 6.0, 10), 0.0); }
+        case 2 { return vec2<f32>(gearSDF(0.5 + 0.3 * (st - 0.5), 6.0, 10), 0.0); }
         // LYGIA's heart expects y pointing down, frag_coord points up.
-        default: { return vec2<f32>(heartSDF(vec2<f32>(st.x, 1.0 - st.y)), 0.0); }
+        default { return vec2<f32>(heartSDF(vec2<f32>(st.x, 1.0 - st.y)), 0.0); }
     }
 }
 

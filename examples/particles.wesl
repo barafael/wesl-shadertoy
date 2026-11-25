@@ -25,10 +25,12 @@ struct Particle {
 }
 
 // 16 384 particles, 16 bytes each.
-@group(1) @binding(0) var<storage, read_write> particles: array<Particle, 16384>;
+@group(1) @binding(0)
+var<storage, read_write> particles: array<Particle, 16384>;
 // A runtime-sized array gets one element per pixel: how bright it is, in
 // 256ths of a hit (integers, since atomics are integers).
-@group(1) @binding(1) var<storage, read_write> glow: array<atomic<u32>>;
+@group(1) @binding(1)
+var<storage, read_write> glow: array<atomic<u32>>;
 
 const PULL: f32 = 500.0; // tweak: 0..2000
 const SWIRL: f32 = 320.0; // tweak: 0..1000

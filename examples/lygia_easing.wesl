@@ -6,7 +6,7 @@
 // (https://lygia.xyz), mapping 0..1 time to 0..1 progress (some overshoot).
 // Each cell plots its curve and moves a dot along it; the bar underneath
 // shows the progress the dot would drive.
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::animation::easing::sineInOut::sineInOut;
 import lygia::animation::easing::quadraticOut::quadraticOut;
 import lygia::animation::easing::cubicInOut::cubicInOut;
@@ -30,18 +30,18 @@ const GRID_COLOR: vec3<f32> = vec3<f32>(0.07, 0.066, 0.06);
 
 fn ease(i: i32, t: f32) -> f32 {
     switch i {
-        case 0: { return sineInOut(t); }
-        case 1: { return quadraticOut(t); }
-        case 2: { return cubicInOut(t); }
-        case 3: { return quinticIn(t); }
-        case 4: { return exponentialInOut(t); }
-        case 5: { return circularOut(t); }
-        case 6: { return backIn(t); }
-        case 7: { return backOut(t); }
-        case 8: { return elasticOut(t); }
-        case 9: { return elasticInOut(t); }
-        case 10: { return bounceOut(t); }
-        default: { return bounceInOut(t); }
+        case 0 { return sineInOut(t); }
+        case 1 { return quadraticOut(t); }
+        case 2 { return cubicInOut(t); }
+        case 3 { return quinticIn(t); }
+        case 4 { return exponentialInOut(t); }
+        case 5 { return circularOut(t); }
+        case 6 { return backIn(t); }
+        case 7 { return backOut(t); }
+        case 8 { return elasticOut(t); }
+        case 9 { return elasticInOut(t); }
+        case 10 { return bounceOut(t); }
+        default { return bounceInOut(t); }
     }
 }
 

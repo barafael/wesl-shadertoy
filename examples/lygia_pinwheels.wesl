@@ -9,7 +9,7 @@
 //   windmillTile turns each tile of a 2×2 block a quarter further, so one
 //                half-square triangle per tile becomes a field of pinwheels.
 //   mirrorTile   flips every other tile, so a diagonal becomes a chevron.
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::space::brickTile::brickTile_s2;
 import lygia::space::windmillTile::windmillTile_s;
 import lygia::space::mirrorTile::mirrorTile_s;
@@ -67,9 +67,9 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let px = TILES / res.y;
     var col: vec3<f32>;
     switch i32(panel) {
-        case 0: { col = bricks(st, px); }
-        case 1: { col = pinwheels(st, px); }
-        default: { col = chevrons(st, px); }
+        case 0 { col = bricks(st, px); }
+        case 1 { col = pinwheels(st, px); }
+        default { col = chevrons(st, px); }
     }
     let border = abs(frag_coord.x - w * round(frag_coord.x / w));
     col = mix(GAP_COLOR, col, step(2.0, border));

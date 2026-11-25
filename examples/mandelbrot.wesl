@@ -23,15 +23,15 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     var z = vec2<f32>(0.0, 0.0);
     var iters = 0.0;
-    for (var k = 0; k < MAX_ITER; k = k + 1) {
+    for(var k = 0; k < MAX_ITER; k = k + 1) {
         z = vec2<f32>(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
-        if (dot(z, z) > 4.0) {
+        if dot(z, z) > 4.0 {
             break;
         }
         iters = iters + 1.0;
     }
 
-    if (iters > f32(MAX_ITER) - 0.5) {
+    if iters > f32(MAX_ITER) - 0.5 {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
     let f = iters / f32(MAX_ITER);

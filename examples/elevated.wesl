@@ -24,17 +24,17 @@ fn noise(p: vec2<f32>) -> f32 {
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
     return mix(
-        mix(hash(i), hash(i + vec2<f32>(1.0, 0.0)), u.x),
-        mix(hash(i + vec2<f32>(0.0, 1.0)), hash(i + vec2<f32>(1.0, 1.0)), u.x),
-        u.y,
-    );
+            mix(hash(i), hash(i + vec2<f32>(1.0, 0.0)), u.x),
+            mix(hash(i + vec2<f32>(0.0, 1.0)), hash(i + vec2<f32>(1.0, 1.0)), u.x),
+            u.y,
+        );
 }
 
 fn fbm(p_in: vec2<f32>) -> f32 {
     var v = 0.0;
     var a = 0.5;
     var p = p_in;
-    for (var i = 0; i < 5; i = i + 1) {
+    for(var i = 0; i < 5; i = i + 1) {
         v = v + a * noise(p);
         p = p * 2.0 + vec2<f32>(17.0, 3.0);
         a = a * 0.5;
@@ -59,34 +59,36 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     var tm = 0.0;
     var p = ro;
     var hit = 0.0;
-    for (var i = 0; i < STEPS; i = i + 1) {
+    for(var i = 0; i < STEPS; i = i + 1) {
         p = ro + rd * tm;
         let d = terrain(p);
-        if (d < 0.01) {
+        if d < 0.01 {
             hit = 1.0;
             break;
         }
         tm = tm + max(d * 0.5, 0.02);
-        if (tm > 60.0) {
+        if tm > 60.0 {
             break;
         }
     }
 
     let sky = mix(
-        vec3<f32>(0.55, 0.7, 0.9),
-        vec3<f32>(0.15, 0.25, 0.5),
-        clamp(1.0 - rd.y * 2.0, 0.0, 1.0),
-    );
-    if (hit < 0.5) {
+            vec3<f32>(0.55, 0.7, 0.9),
+            vec3<f32>(0.15, 0.25, 0.5),
+            clamp(1.0 - rd.y * 2.0, 0.0, 1.0),
+        );
+    if hit < 0.5 {
         return vec4<f32>(sky, 1.0);
     }
 
     let e = 0.05;
-    let n = normalize(vec3<f32>(
-        terrain(p) - terrain(p + vec3<f32>(e, 0.0, 0.0)),
-        terrain(p) - terrain(p + vec3<f32>(0.0, e, 0.0)),
-        terrain(p) - terrain(p + vec3<f32>(0.0, 0.0, e)),
-    ));
+    let n = normalize(
+            vec3<f32>(
+                terrain(p) - terrain(p + vec3<f32>(e, 0.0, 0.0)),
+                terrain(p) - terrain(p + vec3<f32>(0.0, e, 0.0)),
+                terrain(p) - terrain(p + vec3<f32>(0.0, 0.0, e)),
+            ),
+        );
     let diff = max(dot(n, normalize(SUN_DIR)), 0.0);
 
     var col = mix(GRASS_COLOR, ROCK_COLOR, clamp(p.y * 0.4 + 0.3, 0.0, 1.0));

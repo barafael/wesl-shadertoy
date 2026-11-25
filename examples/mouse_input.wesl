@@ -37,7 +37,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     var m = i_mouse();
     // Before the first click, pretend there was one in the middle (a
     // common trick, so a shader looks right before anyone touches it).
-    if (all(m == vec4<f32>(0.0))) {
+    if all(m == vec4<f32>(0.0)) {
         let mid = 0.5 * i_resolution().xy;
         m = vec4<f32>(mid, -mid);
     }

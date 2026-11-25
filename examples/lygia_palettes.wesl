@@ -9,7 +9,7 @@
 // white, yellow ochre, cadmium red and ivory black (`zorn`); every pair is
 // blended with Kubelka-Munk `mixSpectral`, the way the pigments would mix.
 // The charts list sRGB values, decoded to linear with `srgb2rgb` here.
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::color::palette::fire::fire;
 import lygia::color::palette::water::water;
 import lygia::color::palette::heatmap::heatmap;
@@ -30,11 +30,11 @@ const BACKGROUND_COLOR: vec3<f32> = vec3<f32>(0.016, 0.015, 0.014);
 fn gradient(i: i32, x: f32) -> vec3<f32> {
     switch i {
         // fire's raw curve runs past 1; squash it into the strip.
-        case 0: { return clamp(fire(x * 0.9), vec3<f32>(0.0), vec3<f32>(1.0)); }
-        case 1: { return water(x); }
-        case 2: { return clamp(heatmap(x), vec3<f32>(0.0), vec3<f32>(1.0)); }
-        case 3: { return hueDefault(x); }
-        default: { return spectral(x); }
+        case 0 { return clamp(fire(x * 0.9), vec3<f32>(0.0), vec3<f32>(1.0)); }
+        case 1 { return water(x); }
+        case 2 { return clamp(heatmap(x), vec3<f32>(0.0), vec3<f32>(1.0)); }
+        case 3 { return hueDefault(x); }
+        default { return spectral(x); }
     }
 }
 
@@ -60,7 +60,11 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
         let at = fract(i_time() / SWEEP);
         let near = abs(x - at) * split;
         col = mix(col, vec3<f32>(1.0), step(near, 1.0) * step(0.2 * h, local.y));
-        col = mix(col, gradient(i32(row), at), step(local.y, 0.2 * h) * inset(local, vec2<f32>(split, h)));
+        col = mix(
+                col,
+                gradient(i32(row), at),
+                step(local.y, 0.2 * h) * inset(local, vec2<f32>(split, h)),
+            );
     } else if frag_coord.y > 0.45 * res.y {
         // The ColorChecker: 6 × 4 patches, dark skin top left.
         let origin = vec2<f32>(split, 0.45 * res.y);

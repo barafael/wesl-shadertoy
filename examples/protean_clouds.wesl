@@ -26,14 +26,17 @@ const GRADE_TINT: vec3<f32> = vec3<f32>(1., 0.97, 0.9);
 fn rot(a: f32) -> mat2x2<f32> {
     let c: f32 = cos(a);
     let s: f32 = sin(a);
-    return mat2x2<f32>(vec2<f32>(c, s), vec2<f32>(-s, c));
+    return mat2x2<f32>(
+            vec2<f32>(c, s),
+            vec2<f32>(-s, c),
+        );
 }
 
 const m3: mat3x3<f32> = mat3x3<f32>(
-    vec3<f32>(0.64342, 1.08146, -1.38607),
-    vec3<f32>(-1.696, 0.6302, -0.2957),
-    vec3<f32>(0.2926, 1.3432, 1.1838)
-);
+        vec3<f32>(0.64342, 1.08146, -1.38607),
+        vec3<f32>(-1.696, 0.6302, -0.2957),
+        vec3<f32>(0.2926, 1.3432, 1.1838),
+    );
 
 fn mag2(p: vec2<f32>) -> f32 {
     return dot(p, p);
@@ -67,7 +70,7 @@ fn map(p_in: vec3<f32>) -> vec2<f32> {
     var trk: f32 = 1.;
     var dspAmp: f32 = 0.1 + prm1 * 0.2;
 
-    for (var i: i32 = 0; i < 5; i = i + 1) {
+    for(var i: i32 = 0; i < 5; i = i + 1) {
         p = p + (sin(p.zxy * 0.75 * trk + i_time() * trk * 0.8) * dspAmp);
         d = d - (abs(dot(cos(p), sin(p.yzx)) * z));
         z = z * (0.57);
@@ -86,8 +89,8 @@ fn render(ro: vec3<f32>, rd: vec3<f32>, time: f32) -> vec4<f32> {
     var t: f32 = 1.5;
     var fogT: f32 = 0.;
 
-    for (var i: i32 = 0; i < MARCH_STEPS; i = i + 1) {
-        if (rez.a > 0.99) {
+    for(var i: i32 = 0; i < MARCH_STEPS; i = i + 1) {
+        if rez.a > 0.99 {
             break;
         }
         let pos: vec3<f32> = ro + t * rd;
@@ -95,8 +98,11 @@ fn render(ro: vec3<f32>, rd: vec3<f32>, time: f32) -> vec4<f32> {
         let den: f32 = clamp(mpv.x - 0.3, 0., 1.) * DENSITY;
         let dn: f32 = clamp(mpv.x + 2., 0., 3.);
         var col: vec4<f32> = vec4<f32>(0.);
-        if (mpv.x > 0.6) {
-            col = vec4<f32>(sin(PALETTE_PHASE + mpv.y * 0.1 + sin(pos.z * 0.4) * 0.5 + 1.8) * 0.5 + 0.5, 0.08);
+        if mpv.x > 0.6 {
+            col = vec4<f32>(
+                    sin(PALETTE_PHASE + mpv.y * 0.1 + sin(pos.z * 0.4) * 0.5 + 1.8) * 0.5 + 0.5,
+                    0.08,
+                );
             col = col * (den * den * den);
             var colrgb = col.rgb;
             colrgb = col.rgb * (linstep(4., -2.5, mpv.x) * 2.3);
@@ -106,7 +112,9 @@ fn render(ro: vec3<f32>, rd: vec3<f32>, time: f32) -> vec4<f32> {
             var dif: f32 = clamp((den - map(pos + 0.8).x) / 9., 0.001, 1.);
             dif = dif + (clamp((den - map(pos + 0.35).x) / 2.5, 0.001, 1.));
             var colxyz = col.xyz;
-            colxyz = col.xyz * (den * (vec3<f32>(0.005, 0.045, 0.075) + 1.5 * vec3<f32>(0.033, 0.07, 0.03) * dif));
+            colxyz = col.xyz
+                * (den
+                    * (vec3<f32>(0.005, 0.045, 0.075) + 1.5 * vec3<f32>(0.033, 0.07, 0.03) * dif));
             col.x = colxyz.x;
             col.y = colxyz.y;
             col.z = colxyz.z;
@@ -135,7 +143,9 @@ fn getsat(c: vec3<f32>) -> f32 {
 fn iLerp(a: vec3<f32>, b: vec3<f32>, x: f32) -> vec3<f32> {
     var ic: vec3<f32> = mix(a, b, x) + vec3<f32>(0.000001, 0., 0.);
     let sd: f32 = abs(getsat(ic) - mix(getsat(a), getsat(b), x));
-    let dir: vec3<f32> = normalize(vec3<f32>(2. * ic.x - ic.y - ic.z, 2. * ic.y - ic.x - ic.z, 2. * ic.z - ic.y - ic.x));
+    let dir: vec3<f32> = normalize(
+            vec3<f32>(2. * ic.x - ic.y - ic.z, 2. * ic.y - ic.x - ic.z, 2. * ic.z - ic.y - ic.x),
+        );
     let lgt: f32 = dot(vec3<f32>(1.), ic);
     let ff: f32 = dot(dir, normalize(ic));
     ic = ic + (1.5 * dir * sd * ff * lgt);

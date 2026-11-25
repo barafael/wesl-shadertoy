@@ -59,12 +59,24 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     col = mix(col, FACE_COLOR, stroke(length(p), RADIUS, px));
     // The twelve hour marks: snap the angle to the nearest mark.
     let mark = dial(round(atan2(p.x, p.y) / 6.2832 * 12.0) / 12.0);
-    col = mix(col, HAND_COLOR, stroke(segment(p, mark * RADIUS * 0.82, mark * RADIUS * 0.92), 0.006, px));
+    col = mix(
+            col,
+            HAND_COLOR,
+            stroke(segment(p, mark * RADIUS * 0.82, mark * RADIUS * 0.92), 0.006, px),
+        );
     // Hour, minute and second hands. The second hand ticks, with a little
     // bounce at the start of each second.
     let bounce = 0.004 * exp(-12.0 * fract(s)) * sin(40.0 * fract(s));
-    col = mix(col, HAND_COLOR, stroke(segment(p, vec2<f32>(0.0), dial(s / 43200.0) * RADIUS * 0.5), 0.012, px));
-    col = mix(col, HAND_COLOR, stroke(segment(p, vec2<f32>(0.0), dial(s / 3600.0) * RADIUS * 0.75), 0.008, px));
+    col = mix(
+            col,
+            HAND_COLOR,
+            stroke(segment(p, vec2<f32>(0.0), dial(s / 43200.0) * RADIUS * 0.5), 0.012, px),
+        );
+    col = mix(
+            col,
+            HAND_COLOR,
+            stroke(segment(p, vec2<f32>(0.0), dial(s / 3600.0) * RADIUS * 0.75), 0.008, px),
+        );
     let second = dial(floor(s) / 60.0 + bounce) * RADIUS * 0.85;
     col = mix(col, SECOND_COLOR, stroke(segment(p, vec2<f32>(0.0), second), 0.003, px));
     col = mix(col, SECOND_COLOR, stroke(length(p), 0.012, px));

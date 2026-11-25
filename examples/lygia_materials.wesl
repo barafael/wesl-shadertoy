@@ -6,7 +6,7 @@
 // The distance fields, camera, BRDFs, checker and tonemapper come from LYGIA
 // (https://lygia.xyz); the ray marcher is ours, since LYGIA's WESL port
 // leaves its `raymarch` helpers for later. Drag to orbit.
-import package::shadertoy::{i_time, i_resolution, i_mouse};
+import package::shadertoy::{i_mouse, i_resolution, i_time};
 import lygia::sdf::sphereSDF::sphereSDF1;
 import lygia::sdf::boxSDF::boxSDF1;
 import lygia::sdf::opUnion::opUnionSmooth;
@@ -47,18 +47,20 @@ fn map(p: vec3<f32>) -> vec2<f32> {
 
 fn normal(p: vec3<f32>) -> vec3<f32> {
     let e = vec2<f32>(0.001, 0.0);
-    return normalize(vec3<f32>(
-        map(p + e.xyy).x - map(p - e.xyy).x,
-        map(p + e.yxy).x - map(p - e.yxy).x,
-        map(p + e.yyx).x - map(p - e.yyx).x,
-    ));
+    return normalize(
+            vec3<f32>(
+                map(p + e.xyy).x - map(p - e.xyy).x,
+                map(p + e.yxy).x - map(p - e.yxy).x,
+                map(p + e.yyx).x - map(p - e.yyx).x,
+            ),
+        );
 }
 
 /// Soft shadow towards the sun.
 fn shadow(p: vec3<f32>, l: vec3<f32>) -> f32 {
     var lit = 1.0;
     var t = 0.02;
-    for (var i = 0; i < 48; i++) {
+    for(var i = 0; i < 48; i++) {
         let d = map(p + l * t).x;
         lit = min(lit, 12.0 * d / t);
         t += clamp(d, 0.01, 0.3);
@@ -88,7 +90,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     var t = 0.0;
     var hit = vec2<f32>(0.0, -2.0);
-    for (var i = 0; i < 128; i++) {
+    for(var i = 0; i < 128; i++) {
         let h = map(eye + rd * t);
         if h.x < 0.0005 * t {
             hit = h;

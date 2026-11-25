@@ -24,15 +24,15 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     // The fold keeps p in a bounded region; each pass adds a 1/d^2 glow
     // spike, which is what makes the fractal stars blow out to white.
     var col = vec3<f32>(0.0);
-    for (var k = 0; k < ITERATIONS; k = k + 1) {
+    for(var k = 0; k < ITERATIONS; k = k + 1) {
         p = abs(p) / clamp(dot(p, p), 0.05, 1.0) - c;
         let d = length(p);
         let glow = GLOW / (d * d + GLOW_SOFTNESS);
         col = col + glow * vec3<f32>(
-            0.5 + 0.5 * sin(3.0 * d + t),
-            0.5 + 0.5 * sin(4.0 * d + t + 2.0),
-            0.5 + 0.5 * sin(5.0 * d + t + 4.0),
-        );
+                0.5 + 0.5 * sin(3.0 * d + t),
+                0.5 + 0.5 * sin(4.0 * d + t + 2.0),
+                0.5 + 0.5 * sin(5.0 * d + t + 4.0),
+            );
     }
     return vec4<f32>(col, 1.0);
 }

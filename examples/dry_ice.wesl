@@ -61,14 +61,20 @@ fn sphIntersect(ro: vec3<f32>, rd: vec3<f32>, ce: vec3<f32>, ra: f32) -> vec2<f3
     let b: f32 = dot(oc, rd);
     let c: f32 = dot(oc, oc) - ra * ra;
     var h: f32 = b * b - c;
-    if (h < 0.) {
+    if h < 0. {
         return vec2<f32>(-1.);
     }
     h = sqrt(h);
     return vec2<f32>(-b - h, -b + h);
 }
 
-fn boxIntersection(ro: vec3<f32>, rd: vec3<f32>, rad: vec3<f32>, center: vec3<f32>, oN: ptr<function, vec3<f32>>) -> vec2<f32> {
+fn boxIntersection(
+    ro: vec3<f32>,
+    rd: vec3<f32>,
+    rad: vec3<f32>,
+    center: vec3<f32>,
+    oN: ptr<function, vec3<f32>>,
+) -> vec2<f32> {
     var ro_var = ro;
     ro_var = ro_var - (center);
     let m: vec3<f32> = 1. / rd;
@@ -78,17 +84,20 @@ fn boxIntersection(ro: vec3<f32>, rd: vec3<f32>, rad: vec3<f32>, center: vec3<f3
     let t2: vec3<f32> = -n + k;
     let tN: f32 = max(max(t1.x, t1.y), t1.z);
     let tF: f32 = min(min(t2.x, t2.y), t2.z);
-    if (tN > tF || tF < 0.) {
+    if tN > tF || tF < 0. {
         return vec2<f32>(-1.);
     }
-    (*oN) = -sign(rd) * step(t1.yzx, t1.xyz) * step(t1.zxy, t1.xyz);
+    *oN = -sign(rd) * step(t1.yzx, t1.xyz) * step(t1.zxy, t1.xyz);
     return vec2<f32>(tN, tF);
 }
 
 fn spherePosition(id: i32, frame: i32) -> vec2<f32> {
     let offset: vec4<f32> = hash41(f32(id)) * tau;
     let fframe: f32 = f32(frame);
-    return vec2<f32>(cos(offset.x + fframe * 0.015) + cos(offset.y + fframe * 0.02), cos(offset.z + fframe * 0.017) + cos(offset.w + fframe * 0.022)) * vec2<f32>(1., 0.5) * 0.9;
+    return vec2<f32>(
+            cos(offset.x + fframe * 0.015) + cos(offset.y + fframe * 0.02),
+            cos(offset.z + fframe * 0.017) + cos(offset.w + fframe * 0.022),
+        ) * vec2<f32>(1., 0.5) * 0.9;
 }
 
 fn dist2(v: vec3<f32>) -> f32 {
@@ -98,8 +107,8 @@ fn dist2(v: vec3<f32>) -> f32 {
 fn floorIntersect(ro: vec3<f32>, rd: vec3<f32>, floorHeight: f32, t: ptr<function, f32>) -> bool {
     var ro_var = ro;
     ro_var.y = ro_var.y - (floorHeight);
-    if (rd.y < -0.01) {
-        (*t) = ro_var.y / -rd.y;
+    if rd.y < -0.01 {
+        *t = ro_var.y / -rd.y;
         return true;
     }
     return false;
@@ -114,12 +123,11 @@ fn sample_bilinear(ch: texture_2d<f32>, U01: vec2<f32>) -> vec4<f32> {
     let c = vec2<i32>(ceil(U));
     let fr = fract(U);
 
-    let interpolated_2d = (
-        (1. - fr.x) * (1. - fr.y) * textureLoad(ch, f, 0)
-        + (1. - fr.x) * fr.y * textureLoad(ch, vec2<i32>(f.x, c.y), 0)
-        + fr.x * fr.y * textureLoad(ch, c, 0)
-        + fr.x * (1. - fr.y) * textureLoad(ch, vec2<i32>(c.x, f.y), 0)
-    );
+    let interpolated_2d =
+        ((1. - fr.x) * (1. - fr.y) * textureLoad(ch, f, 0)
+            + (1. - fr.x) * fr.y * textureLoad(ch, vec2<i32>(f.x, c.y), 0)
+            + fr.x * fr.y * textureLoad(ch, c, 0)
+            + fr.x * (1. - fr.y) * textureLoad(ch, vec2<i32>(c.x, f.y), 0));
     return interpolated_2d;
 }
 
@@ -146,7 +154,7 @@ fn fbm(p_in: vec3<f32>, octaveNum: i32) -> vec2<f32> {
     var amp: f32 = 0.5;
     let shift: vec3<f32> = vec3<f32>(100.);
 
-    for (var i: i32 = 0; i < octaveNum; i = i + 1) {
+    for(var i: i32 = 0; i < octaveNum; i = i + 1) {
         acc = acc + (vec2<f32>(noise(p), noise(p + vec3<f32>(0., 0., 10.))) * amp);
         p = p * 2. + shift;
         amp = amp * (0.5);
@@ -189,10 +197,10 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     let influenceRadius: f32 = ballRadius * 2.;
     let frame: i32 = i32(i_frame());
 
-    for (var i: i32 = 0; i < nbSphere; i = i + 1) {
+    for(var i: i32 = 0; i < nbSphere; i = i + 1) {
         let p: vec2<f32> = spherePosition(i, frame);
         let dist: f32 = distance(uv, p);
-        if (dist < influenceRadius) {
+        if dist < influenceRadius {
             let op: vec2<f32> = spherePosition(i, frame + 1);
             let ballVelocity: vec2<f32> = p - op;
             density = density - ((influenceRadius - dist) / influenceRadius * 0.15);
@@ -226,13 +234,25 @@ fn buffer_b(frag_coord: vec2<f32>) -> vec4<f32> {
 // weight C(10,(10+dx+dy)/2) * C(10,(10+dx-dy)/2) over the diamond
 // |dx| + |dy| <= 10 with dx+dy even (verified tap-by-tap), so it is written
 // as a loop over the binomial row instead of 121 explicit taps.
-const C10: array<f32, 11> = array<f32, 11>(1., 10., 45., 120., 210., 252., 210., 120., 45., 10., 1.);
+const C10: array<f32, 11> = array<f32, 11>(
+        1.,
+        10.,
+        45.,
+        120.,
+        210.,
+        252.,
+        210.,
+        120.,
+        45.,
+        10.,
+        1.,
+    );
 
 fn blurPressure(ch: texture_2d<f32>, loc: vec2<i32>) -> f32 {
     var p: f32 = 0.;
-    for (var dx: i32 = -10; dx <= 10; dx = dx + 1) {
-        for (var dy: i32 = -10; dy <= 10; dy = dy + 1) {
-            if (abs(dx) + abs(dy) > 10 || (dx + dy) % 2 != 0) {
+    for(var dx: i32 = -10; dx <= 10; dx = dx + 1) {
+        for(var dy: i32 = -10; dy <= 10; dy = dy + 1) {
+            if abs(dx) + abs(dy) > 10 || (dx + dy) % 2 != 0 {
                 continue;
             }
             let w = C10[(10 + dx + dy) / 2] * C10[(10 + dx - dy) / 2];
@@ -250,187 +270,187 @@ fn div_at(ch: texture_2d<f32>, loc: vec2<i32>, x: i32, y: i32) -> f32 {
 // from the reference's explicit tap list.
 fn getDiv(ch: texture_2d<f32>, loc: vec2<i32>) -> f32 {
     var p: f32 = 0.;
-		p = p + (1 * div_at(ch, loc, -9, 0));
-		p = p + (9 * div_at(ch, loc, -8, -1));
-		p = p + (4 * div_at(ch, loc, -8, 0));
-		p = p + (9 * div_at(ch, loc, -8, 1));
-		p = p + (36 * div_at(ch, loc, -7, -2));
-		p = p + (32 * div_at(ch, loc, -7, -1));
-		p = p + (97 * div_at(ch, loc, -7, 0));
-		p = p + (32 * div_at(ch, loc, -7, 1));
-		p = p + (36 * div_at(ch, loc, -7, 2));
-		p = p + (84 * div_at(ch, loc, -6, -3));
-		p = p + (112 * div_at(ch, loc, -6, -2));
-		p = p + (436 * div_at(ch, loc, -6, -1));
-		p = p + (320 * div_at(ch, loc, -6, 0));
-		p = p + (436 * div_at(ch, loc, -6, 1));
-		p = p + (112 * div_at(ch, loc, -6, 2));
-		p = p + (84 * div_at(ch, loc, -6, 3));
-		p = p + (126 * div_at(ch, loc, -5, -4));
-		p = p + (224 * div_at(ch, loc, -5, -3));
-		p = p + (1092 * div_at(ch, loc, -5, -2));
-		p = p + (1280 * div_at(ch, loc, -5, -1));
-		p = p + (2336 * div_at(ch, loc, -5, 0));
-		p = p + (1280 * div_at(ch, loc, -5, 1));
-		p = p + (1092 * div_at(ch, loc, -5, 2));
-		p = p + (224 * div_at(ch, loc, -5, 3));
-		p = p + (126 * div_at(ch, loc, -5, 4));
-		p = p + (126 * div_at(ch, loc, -4, -5));
-		p = p + (280 * div_at(ch, loc, -4, -4));
-		p = p + (1694 * div_at(ch, loc, -4, -3));
-		p = p + (2752 * div_at(ch, loc, -4, -2));
-		p = p + (6656 * div_at(ch, loc, -4, -1));
-		p = p + (6464 * div_at(ch, loc, -4, 0));
-		p = p + (6656 * div_at(ch, loc, -4, 1));
-		p = p + (2752 * div_at(ch, loc, -4, 2));
-		p = p + (1694 * div_at(ch, loc, -4, 3));
-		p = p + (280 * div_at(ch, loc, -4, 4));
-		p = p + (126 * div_at(ch, loc, -4, 5));
-		p = p + (84 * div_at(ch, loc, -3, -6));
-		p = p + (224 * div_at(ch, loc, -3, -5));
-		p = p + (1694 * div_at(ch, loc, -3, -4));
-		p = p + (3520 * div_at(ch, loc, -3, -3));
-		p = p + (11016 * div_at(ch, loc, -3, -2));
-		p = p + (16128 * div_at(ch, loc, -3, -1));
-		p = p + (24608 * div_at(ch, loc, -3, 0));
-		p = p + (16128 * div_at(ch, loc, -3, 1));
-		p = p + (11016 * div_at(ch, loc, -3, 2));
-		p = p + (3520 * div_at(ch, loc, -3, 3));
-		p = p + (1694 * div_at(ch, loc, -3, 4));
-		p = p + (224 * div_at(ch, loc, -3, 5));
-		p = p + (84 * div_at(ch, loc, -3, 6));
-		p = p + (36 * div_at(ch, loc, -2, -7));
-		p = p + (112 * div_at(ch, loc, -2, -6));
-		p = p + (1092 * div_at(ch, loc, -2, -5));
-		p = p + (2752 * div_at(ch, loc, -2, -4));
-		p = p + (11016 * div_at(ch, loc, -2, -3));
-		p = p + (21664 * div_at(ch, loc, -2, -2));
-		p = p + (47432 * div_at(ch, loc, -2, -1));
-		p = p + (59712 * div_at(ch, loc, -2, 0));
-		p = p + (47432 * div_at(ch, loc, -2, 1));
-		p = p + (21664 * div_at(ch, loc, -2, 2));
-		p = p + (11016 * div_at(ch, loc, -2, 3));
-		p = p + (2752 * div_at(ch, loc, -2, 4));
-		p = p + (1092 * div_at(ch, loc, -2, 5));
-		p = p + (112 * div_at(ch, loc, -2, 6));
-		p = p + (36 * div_at(ch, loc, -2, 7));
-		p = p + (9 * div_at(ch, loc, -1, -8));
-		p = p + (32 * div_at(ch, loc, -1, -7));
-		p = p + (436 * div_at(ch, loc, -1, -6));
-		p = p + (1280 * div_at(ch, loc, -1, -5));
-		p = p + (6656 * div_at(ch, loc, -1, -4));
-		p = p + (16128 * div_at(ch, loc, -1, -3));
-		p = p + (47432 * div_at(ch, loc, -1, -2));
-		p = p + (92224 * div_at(ch, loc, -1, -1));
-		p = p + (163476 * div_at(ch, loc, -1, 0));
-		p = p + (92224 * div_at(ch, loc, -1, 1));
-		p = p + (47432 * div_at(ch, loc, -1, 2));
-		p = p + (16128 * div_at(ch, loc, -1, 3));
-		p = p + (6656 * div_at(ch, loc, -1, 4));
-		p = p + (1280 * div_at(ch, loc, -1, 5));
-		p = p + (436 * div_at(ch, loc, -1, 6));
-		p = p + (32 * div_at(ch, loc, -1, 7));
-		p = p + (9 * div_at(ch, loc, -1, 8));
-		p = p + (1 * div_at(ch, loc, 0, -9));
-		p = p + (4 * div_at(ch, loc, 0, -8));
-		p = p + (97 * div_at(ch, loc, 0, -7));
-		p = p + (320 * div_at(ch, loc, 0, -6));
-		p = p + (2336 * div_at(ch, loc, 0, -5));
-		p = p + (6464 * div_at(ch, loc, 0, -4));
-		p = p + (24608 * div_at(ch, loc, 0, -3));
-		p = p + (59712 * div_at(ch, loc, 0, -2));
-		p = p + (163476 * div_at(ch, loc, 0, -1));
-		p = p + (409744 * div_at(ch, loc, 0, 0));
-		p = p + (163476 * div_at(ch, loc, 0, 1));
-		p = p + (59712 * div_at(ch, loc, 0, 2));
-		p = p + (24608 * div_at(ch, loc, 0, 3));
-		p = p + (6464 * div_at(ch, loc, 0, 4));
-		p = p + (2336 * div_at(ch, loc, 0, 5));
-		p = p + (320 * div_at(ch, loc, 0, 6));
-		p = p + (97 * div_at(ch, loc, 0, 7));
-		p = p + (4 * div_at(ch, loc, 0, 8));
-		p = p + (1 * div_at(ch, loc, 0, 9));
-		p = p + (9 * div_at(ch, loc, 1, -8));
-		p = p + (32 * div_at(ch, loc, 1, -7));
-		p = p + (436 * div_at(ch, loc, 1, -6));
-		p = p + (1280 * div_at(ch, loc, 1, -5));
-		p = p + (6656 * div_at(ch, loc, 1, -4));
-		p = p + (16128 * div_at(ch, loc, 1, -3));
-		p = p + (47432 * div_at(ch, loc, 1, -2));
-		p = p + (92224 * div_at(ch, loc, 1, -1));
-		p = p + (163476 * div_at(ch, loc, 1, 0));
-		p = p + (92224 * div_at(ch, loc, 1, 1));
-		p = p + (47432 * div_at(ch, loc, 1, 2));
-		p = p + (16128 * div_at(ch, loc, 1, 3));
-		p = p + (6656 * div_at(ch, loc, 1, 4));
-		p = p + (1280 * div_at(ch, loc, 1, 5));
-		p = p + (436 * div_at(ch, loc, 1, 6));
-		p = p + (32 * div_at(ch, loc, 1, 7));
-		p = p + (9 * div_at(ch, loc, 1, 8));
-		p = p + (36 * div_at(ch, loc, 2, -7));
-		p = p + (112 * div_at(ch, loc, 2, -6));
-		p = p + (1092 * div_at(ch, loc, 2, -5));
-		p = p + (2752 * div_at(ch, loc, 2, -4));
-		p = p + (11016 * div_at(ch, loc, 2, -3));
-		p = p + (21664 * div_at(ch, loc, 2, -2));
-		p = p + (47432 * div_at(ch, loc, 2, -1));
-		p = p + (59712 * div_at(ch, loc, 2, 0));
-		p = p + (47432 * div_at(ch, loc, 2, 1));
-		p = p + (21664 * div_at(ch, loc, 2, 2));
-		p = p + (11016 * div_at(ch, loc, 2, 3));
-		p = p + (2752 * div_at(ch, loc, 2, 4));
-		p = p + (1092 * div_at(ch, loc, 2, 5));
-		p = p + (112 * div_at(ch, loc, 2, 6));
-		p = p + (36 * div_at(ch, loc, 2, 7));
-		p = p + (84 * div_at(ch, loc, 3, -6));
-		p = p + (224 * div_at(ch, loc, 3, -5));
-		p = p + (1694 * div_at(ch, loc, 3, -4));
-		p = p + (3520 * div_at(ch, loc, 3, -3));
-		p = p + (11016 * div_at(ch, loc, 3, -2));
-		p = p + (16128 * div_at(ch, loc, 3, -1));
-		p = p + (24608 * div_at(ch, loc, 3, 0));
-		p = p + (16128 * div_at(ch, loc, 3, 1));
-		p = p + (11016 * div_at(ch, loc, 3, 2));
-		p = p + (3520 * div_at(ch, loc, 3, 3));
-		p = p + (1694 * div_at(ch, loc, 3, 4));
-		p = p + (224 * div_at(ch, loc, 3, 5));
-		p = p + (84 * div_at(ch, loc, 3, 6));
-		p = p + (126 * div_at(ch, loc, 4, -5));
-		p = p + (280 * div_at(ch, loc, 4, -4));
-		p = p + (1694 * div_at(ch, loc, 4, -3));
-		p = p + (2752 * div_at(ch, loc, 4, -2));
-		p = p + (6656 * div_at(ch, loc, 4, -1));
-		p = p + (6464 * div_at(ch, loc, 4, 0));
-		p = p + (6656 * div_at(ch, loc, 4, 1));
-		p = p + (2752 * div_at(ch, loc, 4, 2));
-		p = p + (1694 * div_at(ch, loc, 4, 3));
-		p = p + (280 * div_at(ch, loc, 4, 4));
-		p = p + (126 * div_at(ch, loc, 4, 5));
-		p = p + (126 * div_at(ch, loc, 5, -4));
-		p = p + (224 * div_at(ch, loc, 5, -3));
-		p = p + (1092 * div_at(ch, loc, 5, -2));
-		p = p + (1280 * div_at(ch, loc, 5, -1));
-		p = p + (2336 * div_at(ch, loc, 5, 0));
-		p = p + (1280 * div_at(ch, loc, 5, 1));
-		p = p + (1092 * div_at(ch, loc, 5, 2));
-		p = p + (224 * div_at(ch, loc, 5, 3));
-		p = p + (126 * div_at(ch, loc, 5, 4));
-		p = p + (84 * div_at(ch, loc, 6, -3));
-		p = p + (112 * div_at(ch, loc, 6, -2));
-		p = p + (436 * div_at(ch, loc, 6, -1));
-		p = p + (320 * div_at(ch, loc, 6, 0));
-		p = p + (436 * div_at(ch, loc, 6, 1));
-		p = p + (112 * div_at(ch, loc, 6, 2));
-		p = p + (84 * div_at(ch, loc, 6, 3));
-		p = p + (36 * div_at(ch, loc, 7, -2));
-		p = p + (32 * div_at(ch, loc, 7, -1));
-		p = p + (97 * div_at(ch, loc, 7, 0));
-		p = p + (32 * div_at(ch, loc, 7, 1));
-		p = p + (36 * div_at(ch, loc, 7, 2));
-		p = p + (9 * div_at(ch, loc, 8, -1));
-		p = p + (4 * div_at(ch, loc, 8, 0));
-		p = p + (9 * div_at(ch, loc, 8, 1));
-		p = p + (1 * div_at(ch, loc, 9, 0));
+    p = p + (1 * div_at(ch, loc, -9, 0));
+    p = p + (9 * div_at(ch, loc, -8, -1));
+    p = p + (4 * div_at(ch, loc, -8, 0));
+    p = p + (9 * div_at(ch, loc, -8, 1));
+    p = p + (36 * div_at(ch, loc, -7, -2));
+    p = p + (32 * div_at(ch, loc, -7, -1));
+    p = p + (97 * div_at(ch, loc, -7, 0));
+    p = p + (32 * div_at(ch, loc, -7, 1));
+    p = p + (36 * div_at(ch, loc, -7, 2));
+    p = p + (84 * div_at(ch, loc, -6, -3));
+    p = p + (112 * div_at(ch, loc, -6, -2));
+    p = p + (436 * div_at(ch, loc, -6, -1));
+    p = p + (320 * div_at(ch, loc, -6, 0));
+    p = p + (436 * div_at(ch, loc, -6, 1));
+    p = p + (112 * div_at(ch, loc, -6, 2));
+    p = p + (84 * div_at(ch, loc, -6, 3));
+    p = p + (126 * div_at(ch, loc, -5, -4));
+    p = p + (224 * div_at(ch, loc, -5, -3));
+    p = p + (1092 * div_at(ch, loc, -5, -2));
+    p = p + (1280 * div_at(ch, loc, -5, -1));
+    p = p + (2336 * div_at(ch, loc, -5, 0));
+    p = p + (1280 * div_at(ch, loc, -5, 1));
+    p = p + (1092 * div_at(ch, loc, -5, 2));
+    p = p + (224 * div_at(ch, loc, -5, 3));
+    p = p + (126 * div_at(ch, loc, -5, 4));
+    p = p + (126 * div_at(ch, loc, -4, -5));
+    p = p + (280 * div_at(ch, loc, -4, -4));
+    p = p + (1694 * div_at(ch, loc, -4, -3));
+    p = p + (2752 * div_at(ch, loc, -4, -2));
+    p = p + (6656 * div_at(ch, loc, -4, -1));
+    p = p + (6464 * div_at(ch, loc, -4, 0));
+    p = p + (6656 * div_at(ch, loc, -4, 1));
+    p = p + (2752 * div_at(ch, loc, -4, 2));
+    p = p + (1694 * div_at(ch, loc, -4, 3));
+    p = p + (280 * div_at(ch, loc, -4, 4));
+    p = p + (126 * div_at(ch, loc, -4, 5));
+    p = p + (84 * div_at(ch, loc, -3, -6));
+    p = p + (224 * div_at(ch, loc, -3, -5));
+    p = p + (1694 * div_at(ch, loc, -3, -4));
+    p = p + (3520 * div_at(ch, loc, -3, -3));
+    p = p + (11016 * div_at(ch, loc, -3, -2));
+    p = p + (16128 * div_at(ch, loc, -3, -1));
+    p = p + (24608 * div_at(ch, loc, -3, 0));
+    p = p + (16128 * div_at(ch, loc, -3, 1));
+    p = p + (11016 * div_at(ch, loc, -3, 2));
+    p = p + (3520 * div_at(ch, loc, -3, 3));
+    p = p + (1694 * div_at(ch, loc, -3, 4));
+    p = p + (224 * div_at(ch, loc, -3, 5));
+    p = p + (84 * div_at(ch, loc, -3, 6));
+    p = p + (36 * div_at(ch, loc, -2, -7));
+    p = p + (112 * div_at(ch, loc, -2, -6));
+    p = p + (1092 * div_at(ch, loc, -2, -5));
+    p = p + (2752 * div_at(ch, loc, -2, -4));
+    p = p + (11016 * div_at(ch, loc, -2, -3));
+    p = p + (21664 * div_at(ch, loc, -2, -2));
+    p = p + (47432 * div_at(ch, loc, -2, -1));
+    p = p + (59712 * div_at(ch, loc, -2, 0));
+    p = p + (47432 * div_at(ch, loc, -2, 1));
+    p = p + (21664 * div_at(ch, loc, -2, 2));
+    p = p + (11016 * div_at(ch, loc, -2, 3));
+    p = p + (2752 * div_at(ch, loc, -2, 4));
+    p = p + (1092 * div_at(ch, loc, -2, 5));
+    p = p + (112 * div_at(ch, loc, -2, 6));
+    p = p + (36 * div_at(ch, loc, -2, 7));
+    p = p + (9 * div_at(ch, loc, -1, -8));
+    p = p + (32 * div_at(ch, loc, -1, -7));
+    p = p + (436 * div_at(ch, loc, -1, -6));
+    p = p + (1280 * div_at(ch, loc, -1, -5));
+    p = p + (6656 * div_at(ch, loc, -1, -4));
+    p = p + (16128 * div_at(ch, loc, -1, -3));
+    p = p + (47432 * div_at(ch, loc, -1, -2));
+    p = p + (92224 * div_at(ch, loc, -1, -1));
+    p = p + (163476 * div_at(ch, loc, -1, 0));
+    p = p + (92224 * div_at(ch, loc, -1, 1));
+    p = p + (47432 * div_at(ch, loc, -1, 2));
+    p = p + (16128 * div_at(ch, loc, -1, 3));
+    p = p + (6656 * div_at(ch, loc, -1, 4));
+    p = p + (1280 * div_at(ch, loc, -1, 5));
+    p = p + (436 * div_at(ch, loc, -1, 6));
+    p = p + (32 * div_at(ch, loc, -1, 7));
+    p = p + (9 * div_at(ch, loc, -1, 8));
+    p = p + (1 * div_at(ch, loc, 0, -9));
+    p = p + (4 * div_at(ch, loc, 0, -8));
+    p = p + (97 * div_at(ch, loc, 0, -7));
+    p = p + (320 * div_at(ch, loc, 0, -6));
+    p = p + (2336 * div_at(ch, loc, 0, -5));
+    p = p + (6464 * div_at(ch, loc, 0, -4));
+    p = p + (24608 * div_at(ch, loc, 0, -3));
+    p = p + (59712 * div_at(ch, loc, 0, -2));
+    p = p + (163476 * div_at(ch, loc, 0, -1));
+    p = p + (409744 * div_at(ch, loc, 0, 0));
+    p = p + (163476 * div_at(ch, loc, 0, 1));
+    p = p + (59712 * div_at(ch, loc, 0, 2));
+    p = p + (24608 * div_at(ch, loc, 0, 3));
+    p = p + (6464 * div_at(ch, loc, 0, 4));
+    p = p + (2336 * div_at(ch, loc, 0, 5));
+    p = p + (320 * div_at(ch, loc, 0, 6));
+    p = p + (97 * div_at(ch, loc, 0, 7));
+    p = p + (4 * div_at(ch, loc, 0, 8));
+    p = p + (1 * div_at(ch, loc, 0, 9));
+    p = p + (9 * div_at(ch, loc, 1, -8));
+    p = p + (32 * div_at(ch, loc, 1, -7));
+    p = p + (436 * div_at(ch, loc, 1, -6));
+    p = p + (1280 * div_at(ch, loc, 1, -5));
+    p = p + (6656 * div_at(ch, loc, 1, -4));
+    p = p + (16128 * div_at(ch, loc, 1, -3));
+    p = p + (47432 * div_at(ch, loc, 1, -2));
+    p = p + (92224 * div_at(ch, loc, 1, -1));
+    p = p + (163476 * div_at(ch, loc, 1, 0));
+    p = p + (92224 * div_at(ch, loc, 1, 1));
+    p = p + (47432 * div_at(ch, loc, 1, 2));
+    p = p + (16128 * div_at(ch, loc, 1, 3));
+    p = p + (6656 * div_at(ch, loc, 1, 4));
+    p = p + (1280 * div_at(ch, loc, 1, 5));
+    p = p + (436 * div_at(ch, loc, 1, 6));
+    p = p + (32 * div_at(ch, loc, 1, 7));
+    p = p + (9 * div_at(ch, loc, 1, 8));
+    p = p + (36 * div_at(ch, loc, 2, -7));
+    p = p + (112 * div_at(ch, loc, 2, -6));
+    p = p + (1092 * div_at(ch, loc, 2, -5));
+    p = p + (2752 * div_at(ch, loc, 2, -4));
+    p = p + (11016 * div_at(ch, loc, 2, -3));
+    p = p + (21664 * div_at(ch, loc, 2, -2));
+    p = p + (47432 * div_at(ch, loc, 2, -1));
+    p = p + (59712 * div_at(ch, loc, 2, 0));
+    p = p + (47432 * div_at(ch, loc, 2, 1));
+    p = p + (21664 * div_at(ch, loc, 2, 2));
+    p = p + (11016 * div_at(ch, loc, 2, 3));
+    p = p + (2752 * div_at(ch, loc, 2, 4));
+    p = p + (1092 * div_at(ch, loc, 2, 5));
+    p = p + (112 * div_at(ch, loc, 2, 6));
+    p = p + (36 * div_at(ch, loc, 2, 7));
+    p = p + (84 * div_at(ch, loc, 3, -6));
+    p = p + (224 * div_at(ch, loc, 3, -5));
+    p = p + (1694 * div_at(ch, loc, 3, -4));
+    p = p + (3520 * div_at(ch, loc, 3, -3));
+    p = p + (11016 * div_at(ch, loc, 3, -2));
+    p = p + (16128 * div_at(ch, loc, 3, -1));
+    p = p + (24608 * div_at(ch, loc, 3, 0));
+    p = p + (16128 * div_at(ch, loc, 3, 1));
+    p = p + (11016 * div_at(ch, loc, 3, 2));
+    p = p + (3520 * div_at(ch, loc, 3, 3));
+    p = p + (1694 * div_at(ch, loc, 3, 4));
+    p = p + (224 * div_at(ch, loc, 3, 5));
+    p = p + (84 * div_at(ch, loc, 3, 6));
+    p = p + (126 * div_at(ch, loc, 4, -5));
+    p = p + (280 * div_at(ch, loc, 4, -4));
+    p = p + (1694 * div_at(ch, loc, 4, -3));
+    p = p + (2752 * div_at(ch, loc, 4, -2));
+    p = p + (6656 * div_at(ch, loc, 4, -1));
+    p = p + (6464 * div_at(ch, loc, 4, 0));
+    p = p + (6656 * div_at(ch, loc, 4, 1));
+    p = p + (2752 * div_at(ch, loc, 4, 2));
+    p = p + (1694 * div_at(ch, loc, 4, 3));
+    p = p + (280 * div_at(ch, loc, 4, 4));
+    p = p + (126 * div_at(ch, loc, 4, 5));
+    p = p + (126 * div_at(ch, loc, 5, -4));
+    p = p + (224 * div_at(ch, loc, 5, -3));
+    p = p + (1092 * div_at(ch, loc, 5, -2));
+    p = p + (1280 * div_at(ch, loc, 5, -1));
+    p = p + (2336 * div_at(ch, loc, 5, 0));
+    p = p + (1280 * div_at(ch, loc, 5, 1));
+    p = p + (1092 * div_at(ch, loc, 5, 2));
+    p = p + (224 * div_at(ch, loc, 5, 3));
+    p = p + (126 * div_at(ch, loc, 5, 4));
+    p = p + (84 * div_at(ch, loc, 6, -3));
+    p = p + (112 * div_at(ch, loc, 6, -2));
+    p = p + (436 * div_at(ch, loc, 6, -1));
+    p = p + (320 * div_at(ch, loc, 6, 0));
+    p = p + (436 * div_at(ch, loc, 6, 1));
+    p = p + (112 * div_at(ch, loc, 6, 2));
+    p = p + (84 * div_at(ch, loc, 6, 3));
+    p = p + (36 * div_at(ch, loc, 7, -2));
+    p = p + (32 * div_at(ch, loc, 7, -1));
+    p = p + (97 * div_at(ch, loc, 7, 0));
+    p = p + (32 * div_at(ch, loc, 7, 1));
+    p = p + (36 * div_at(ch, loc, 7, 2));
+    p = p + (9 * div_at(ch, loc, 8, -1));
+    p = p + (4 * div_at(ch, loc, 8, 0));
+    p = p + (9 * div_at(ch, loc, 8, 1));
+    p = p + (1 * div_at(ch, loc, 9, 0));
     return p / 1048576.;
 }
 
@@ -453,38 +473,56 @@ fn buffer_d(frag_coord: vec2<f32>) -> vec4<f32> {
 
 // ---- image: raymarched fog over the tiled floor ----
 
-fn sceneIntersection(ro: vec3<f32>, rd: vec3<f32>, inter: ptr<function, vec3<f32>>, normal: ptr<function, vec3<f32>>, color: ptr<function, vec3<f32>>, dist: f32, lightPos: ptr<function, vec3<f32>>) -> f32 {
+fn sceneIntersection(
+    ro: vec3<f32>,
+    rd: vec3<f32>,
+    inter: ptr<function, vec3<f32>>,
+    normal: ptr<function, vec3<f32>>,
+    color: ptr<function, vec3<f32>>,
+    dist: f32,
+    lightPos: ptr<function, vec3<f32>>,
+) -> f32 {
     var mint: f32 = dist;
-    (*inter) = vec3<f32>(0.);
-    (*normal) = vec3<f32>(0.);
-    (*color) = vec3<f32>(0.);
+    *inter = vec3<f32>(0.);
+    *normal = vec3<f32>(0.);
+    *color = vec3<f32>(0.);
 
-    for (var i: i32 = 0; i < nbSphere; i = i + 1) {
+    for(var i: i32 = 0; i < nbSphere; i = i + 1) {
         let p2d: vec2<f32> = spherePosition(i, i32(i_frame()));
         let pos: vec3<f32> = vec3<f32>(p2d.x, ballRadius, p2d.y);
         var ballColor: vec3<f32> = BALL_COLOR;
-        if (i == 0) {
+        if i == 0 {
             ballColor = vec3<f32>(1.);
-            (*lightPos) = pos + vec3<f32>(0., lightHeight, 0.);
+            *lightPos = pos + vec3<f32>(0., lightHeight, 0.);
         }
         let t: f32 = sphIntersect(ro, rd, pos, ballRadius).x;
-        if (t > 0. && t < mint) {
+        if t > 0. && t < mint {
             mint = t;
-            (*inter) = ro + mint * rd;
-            (*normal) = normalize((*inter) - pos);
-            (*color) = ballColor;
+            *inter = ro + mint * rd;
+            *normal = normalize((*inter) - pos);
+            *color = ballColor;
         }
     }
 
     let aspecRatio: f32 = i_resolution().x / i_resolution().y;
     var boxNormal: vec3<f32> = vec3<f32>(0.);
-    let t: f32 = boxIntersection(ro, rd, vec3<f32>(aspecRatio, 0.1, 1.), vec3<f32>(0., -0.1, 0.), &boxNormal).x;
-    if (t > 0. && t < mint) {
+    let t: f32 = boxIntersection(
+            ro,
+            rd,
+            vec3<f32>(aspecRatio, 0.1, 1.),
+            vec3<f32>(0., -0.1, 0.),
+            &boxNormal,
+        ).x;
+    if t > 0. && t < mint {
         mint = t;
-        (*inter) = ro + mint * rd;
-        (*normal) = boxNormal;
+        *inter = ro + mint * rd;
+        *normal = boxNormal;
         let tileId: vec2<i32> = vec2<i32>(vec2<f32>((*inter).x, (*inter).z) * 3. + 100.);
-        if (((tileId.x & 1) ^ (tileId.y & 1)) == 0) { (*color) = vec3<f32>(0.3); } else { (*color) = vec3<f32>(0.15); };
+        if ((tileId.x & 1) ^ (tileId.y & 1)) == 0 {
+            *color = vec3<f32>(0.3);
+        } else {
+            *color = vec3<f32>(0.15);
+        }
     }
     return mint;
 }
@@ -494,7 +532,7 @@ fn sampleFog(pos: vec3<f32>) -> f32 {
     var uv: vec2<f32> = pos.xz;
     uv.x = uv.x * (R.y / R.x);
     uv = uv * 0.5 + 0.5;
-    if (max(uv.x, uv.y) > 1. || min(uv.x, uv.y) < 0.) {
+    if max(uv.x, uv.y) > 1. || min(uv.x, uv.y) < 0. {
         return 0.;
     }
     return sample_bilinear(i_channel_0, uv).z;
@@ -507,23 +545,24 @@ fn Render(ro: vec3<f32>, rd: vec3<f32>, dist: f32, fudge: f32) -> vec3<f32> {
     var lightPos: vec3<f32> = vec3<f32>(0.);
     let mint: f32 = sceneIntersection(ro, rd, &inter, &normal, &baseColor, dist, &lightPos);
     var color: vec3<f32> = vec3<f32>(0.);
-    if (mint < dist) {
+    if mint < dist {
         let lightDir: vec3<f32> = normalize(lightPos - inter);
         let lightDist2: f32 = dist2(lightPos - inter);
         let shadowStep: vec3<f32> = fogHeigth / f32(nbSlice) * lightDir / lightDir.y;
         var shadowDist: f32 = 0.;
 
-        for (var i: i32 = 0; i < nbSlice; i = i + 1) {
+        for(var i: i32 = 0; i < nbSlice; i = i + 1) {
             let shadowPos: vec3<f32> = inter + shadowStep * f32(i);
             let v: f32 = sampleFog(shadowPos) * fogHeigth;
-            shadowDist = shadowDist + (min(max(0., v - shadowPos.y), fogSlice) * length(shadowStep) / fogSlice);
+            shadowDist = shadowDist
+                + (min(max(0., v - shadowPos.y), fogSlice) * length(shadowStep) / fogSlice);
         }
 
         let shadowFactor: f32 = exp(-shadowDist * shadowDensity * 0.25);
         color = baseColor * (max(0., dot(normal, lightDir) * shadowFactor) + 0.2) / lightDist2;
     }
     var t: f32 = 0.;
-    if (floorIntersect(ro, rd, fogHeigth, &t)) {
+    if floorIntersect(ro, rd, fogHeigth, &t) {
         var curPos: vec3<f32> = ro + rd * t;
         let fogStep: vec3<f32> = fogHeigth / f32(nbSlice) * rd / abs(rd.y);
         curPos = curPos + (fudge * fogStep);
@@ -532,26 +571,28 @@ fn Render(ro: vec3<f32>, rd: vec3<f32>, dist: f32, fudge: f32) -> vec3<f32> {
         var transmittance: f32 = 1.;
         var lightEnergy: f32 = 0.;
 
-        for (var i: i32 = 0; i < nbSlice; i = i + 1) {
-            if (dot(curPos - ro, rd) > mint) {
+        for(var i: i32 = 0; i < nbSlice; i = i + 1) {
+            if dot(curPos - ro, rd) > mint {
                 break;
             }
             let curHeigth: f32 = sampleFog(curPos) * fogHeigth;
             let curSample: f32 = min(max(0., curHeigth - curPos.y), fogSlice) * stepLen / fogSlice;
-            if (curSample > 0.001) {
+            if curSample > 0.001 {
                 let lightDir: vec3<f32> = normalize(lightPos - curPos);
                 let shadowStep: vec3<f32> = fogHeigth / f32(nbSlice) * lightDir / lightDir.y;
                 let lightDist2: f32 = dist2(lightPos - curPos);
                 var shadowPos: vec3<f32> = curPos + shadowStep * fudge;
                 var shadowDist: f32 = 0.;
 
-                for (var j: i32 = 0; j < nbSlice; j = j + 1) {
+                for(var j: i32 = 0; j < nbSlice; j = j + 1) {
                     shadowPos = shadowPos + (shadowStep);
-                    if (shadowPos.y > fogHeigth) {
+                    if shadowPos.y > fogHeigth {
                         break;
                     }
                     let curHeight: f32 = sampleFog(shadowPos) * fogHeigth;
-                    shadowDist = shadowDist + (min(max(0., curHeight - shadowPos.y), fogSlice) * length(shadowStep) / fogSlice);
+                    shadowDist = shadowDist
+                        + (min(max(0., curHeight - shadowPos.y), fogSlice) * length(shadowStep)
+                            / fogSlice);
                 }
 
                 let shadowFactor: f32 = exp(-shadowDist * shadowDensity) / lightDist2;
@@ -577,7 +618,11 @@ fn setCamera(ro: vec3<f32>, ta: vec3<f32>) -> mat3x3<f32> {
     let up: vec3<f32> = vec3<f32>(0., 1., 0.);
     let cu: vec3<f32> = normalize(cross(cw, up));
     let cv: vec3<f32> = normalize(cross(cu, cw));
-    return mat3x3<f32>(cu, cv, cw);
+    return mat3x3<f32>(
+            cu,
+            cv,
+            cw,
+        );
 }
 
 fn radians(degrees: f32) -> f32 {

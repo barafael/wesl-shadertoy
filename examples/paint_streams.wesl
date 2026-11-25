@@ -69,7 +69,7 @@ fn G(x: vec2<f32>) -> f32 {
 fn decode2(input: u32, place: u32, precis: u32) -> f32 {
     let value_u32 = input >> (place - precis);
     var mask: u32 = 4294967295u;
-    if (precis < 32u) {
+    if precis < 32u {
         mask = (1u << precis) - 1u;
     }
     let masked_value_u32 = value_u32 & mask;
@@ -89,7 +89,7 @@ fn encode2(value: f32, input2: u32, place: u32, precis: u32) -> u32 {
     let delta_bits = u32(place - precis);
     let value_u32 = u32(value_f32_normalized) << delta_bits;
     var mask: u32 = 0u;
-    if (precis < 32u) {
+    if precis < 32u {
         mask = 4294967295u - (((1u << precis) - 1u) << (place - precis));
     }
     let input = (input2 & mask) | value_u32;
@@ -146,15 +146,17 @@ fn border(p: vec2<f32>, R2: vec2<f32>) -> f32 {
 fn bN(p: vec2<f32>, R2: vec2<f32>) -> vec3<f32> {
     let dx = vec3<f32>(-h, 0., h);
     let idx = vec4<f32>(-1. / h, 0., 1. / h, 0.25);
-    let r = idx.zyw * border(p + dx.zy, R2) + idx.xyw * border(p + dx.xy, R2) + idx.yzw * border(p + dx.yz, R2) + idx.yxw * border(p + dx.yx, R2);
+    let r =
+        idx.zyw * border(p + dx.zy, R2) + idx.xyw * border(p + dx.xy, R2)
+        + idx.yzw * border(p + dx.yz, R2) + idx.yxw * border(p + dx.yx, R2);
     return vec3<f32>(normalize(r.xy), r.z + 1.0e-4);
 }
 
 // Reintegration Tracking: resample buffer_b's particles onto the grid.
 fn Reintegration(pos: vec2<f32>) -> particle {
     var P = particle(vec2<f32>(0.), vec2<f32>(0.), vec2<f32>(0.));
-    for (var i: i32 = -2; i <= 2; i = i + 1) {
-        for (var j: i32 = -2; j <= 2; j = j + 1) {
+    for(var i: i32 = -2; i <= 2; i = i + 1) {
+        for(var j: i32 = -2; j <= 2; j = j + 1) {
             let tpos = pos + vec2<f32>(f32(i), f32(j));
             let data = textureLoad(i_channel_1, vec2<i32>(tpos), 0);
             var P0 = getParticle(data, tpos);
@@ -168,7 +170,7 @@ fn Reintegration(pos: vec2<f32>) -> particle {
             P.M.x = P.M.x + m;
         }
     }
-    if (P.M.x > 0.0000001) {
+    if P.M.x > 0.0000001 {
         P.X = P.X / P.M.x;
         P.V = P.V / P.M.x;
         P.M.y = P.M.y / P.M.x;
@@ -187,8 +189,8 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
 fn Simulation(PIn: particle, pos: vec2<f32>, mouse: vec4<f32>, R: vec2<f32>) -> particle {
     var P = PIn;
     var F = vec2<f32>(0.);
-    for (var i: i32 = -2; i <= 2; i = i + 1) {
-        for (var j: i32 = -2; j <= 2; j = j + 1) {
+    for(var i: i32 = -2; i <= 2; i = i + 1) {
+        for(var j: i32 = -2; j <= 2; j = j + 1) {
             let tpos = pos + vec2<f32>(f32(i), f32(j));
             let data = textureLoad(i_channel_0, vec2<i32>(tpos), 0);
             let P0 = getParticle(data, tpos);
@@ -200,7 +202,7 @@ fn Simulation(PIn: particle, pos: vec2<f32>, mouse: vec4<f32>, R: vec2<f32>) -> 
 
     F = F + (P.M.x * vec2<f32>(0., -GRAVITY));
 
-    if (mouse.z > 0.) {
+    if mouse.z > 0. {
         let dm = (mouse.xy - mouse.zw) / 10.;
         let d = distance(mouse.xy, P.X) / 20.;
         F = F + (MOUSE_FORCE * dm * exp(-d * d));
@@ -211,13 +213,13 @@ fn Simulation(PIn: particle, pos: vec2<f32>, mouse: vec4<f32>, R: vec2<f32>) -> 
     let vdotN = step(N.z, border_h) * dot(-N.xy, P.V);
     P.V = P.V + (0.5 * (N.xy * vdotN + N.xy * abs(vdotN)));
 
-    if (N.z < 0.) {
+    if N.z < 0. {
         P.V = vec2<f32>(0.);
     }
 
     let v = length(P.V);
     var dum = 1.;
-    if (v > 1.) {
+    if v > 1. {
         dum = v;
     }
     P.V = P.V / dum;
@@ -230,20 +232,20 @@ fn buffer_b(frag_coord: vec2<f32>) -> vec4<f32> {
     let data = textureLoad(i_channel_0, vec2<i32>(pos), 0);
     var P = getParticle(data, pos);
 
-    if (P.M.x != 0.) {
+    if P.M.x != 0. {
         P = Simulation(P, pos, i_mouse(), R);
     }
 
     // Two paint jets near the top, spraying downward; M.y is the dye.
     // (timeMult is a constant 1.0 in the reference, so the spray angles are
     // fixed: sin(0.4 * 2.0 * 1.0) = sin(0.8).)
-    if (length(P.X - R * vec2<f32>(0.55, 0.9)) < JET_RADIUS) {
+    if length(P.X - R * vec2<f32>(0.55, 0.9)) < JET_RADIUS {
         P.X = pos;
         P.V = JET_SPEED * Dir(-PI * 0.75 + 0.3 * sin(0.8));
         P.M = mix(P.M, vec2<f32>(fluid_rho, 1.), 0.4);
     }
 
-    if (length(P.X - R * vec2<f32>(0.45, 0.9)) < JET_RADIUS) {
+    if length(P.X - R * vec2<f32>(0.45, 0.9)) < JET_RADIUS {
         P.X = pos;
         P.V = JET_SPEED * Dir(PI * 0.25 - PI * 0.5 + 0.3 * sin(0.8));
         P.M = mix(P.M, vec2<f32>(fluid_rho, 0.5), 0.4);
@@ -259,8 +261,8 @@ fn buffer_c(frag_coord: vec2<f32>) -> vec4<f32> {
     let data = textureLoad(i_channel_0, p, 0);
     let P = getParticle(data, pos);
     var rho = vec4<f32>(0.);
-    for (var i: i32 = -1; i <= 1; i = i + 1) {
-        for (var j: i32 = -1; j <= 1; j = j + 1) {
+    for(var i: i32 = -1; i <= 1; i = i + 1) {
+        for(var j: i32 = -1; j <= 1; j = j + 1) {
             let ij = vec2<i32>(i, j);
             let d = textureLoad(i_channel_0, p + ij, 0);
             let P0 = getParticle(d, pos + vec2<f32>(ij));
@@ -286,7 +288,8 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let bord = smoothstep(2. * border_h, border_h * 0.5, border(pos, R));
     let rho = V(pos);
     let dx = vec3<f32>(-2., 0., 2.);
-    let grad = -0.5 * vec4<f32>(V(pos + dx.zy).zw - V(pos + dx.xy).zw, V(pos + dx.yz).zw - V(pos + dx.yx).zw);
+    let grad = -0.5
+        * vec4<f32>(V(pos + dx.zy).zw - V(pos + dx.xy).zw, V(pos + dx.yz).zw - V(pos + dx.yx).zw);
     let N = pow(length(grad.xz), 0.2) * normalize(grad.xz + 0.00001);
     let specular = pow(max(dot(N, Dir(1.4)), 0.), 3.5);
 

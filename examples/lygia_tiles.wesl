@@ -6,7 +6,7 @@
 // The tilings, kaleidoscope, noise and palette come from LYGIA
 // (https://lygia.xyz). Each tiling returns the position inside its tile (xy)
 // and the tile's id (zw), which picks the color here.
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::space::hexTile::hexTile;
 import lygia::space::triTile::triTile;
 import lygia::space::sqTile::sqTile;
@@ -30,16 +30,16 @@ fn tiling(i: i32, st: vec2<f32>, t: f32) -> vec2<f32> {
     var tile: vec4<f32>;
     var edge: f32;
     switch i {
-        case 0: {
+        case 0 {
             tile = hexTile(st);
             let p = abs(tile.xy - 0.5);
             edge = 0.5 - max(dot(p, vec2<f32>(0.5, 0.8660254)), p.x);
         }
-        case 1: {
+        case 1 {
             tile = triTile(st);
             edge = min(min(tile.x, tile.y), 1.0 - tile.x - tile.y);
         }
-        default: {
+        default {
             tile = sqTile(st);
             let p = abs(tile.xy - 0.5);
             edge = 0.5 - max(p.x, p.y);
@@ -64,7 +64,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let b = tiling((i + 1) % 3, k, 0.1 * t);
 
     var col = vec3<f32>(0.0);
-    for (var j = 0; j < 2; j++) {
+    for(var j = 0; j < 2; j++) {
         let d = select(a, b, j == 1);
         let w = select(1.0 - blend, blend, j == 1);
         let fw = fwidth(d.x);

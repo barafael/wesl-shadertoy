@@ -23,10 +23,11 @@ struct Volume {
     mate: i32,
     density: f32,
     space: f32,
-};
+}
 
 fn select2(a: Volume, b: Volume) -> Volume {
-    if (a.dist < b.dist) { return a;
+    if a.dist < b.dist {
+        return a;
     }
     return b;
 }
@@ -39,7 +40,10 @@ const mat_glass: i32 = 5; // tweak: off (material id)
 fn rot(a: f32) -> mat2x2<f32> {
     let c: f32 = cos(a);
     var s: f32 = sin(a);
-    return mat2x2<f32>(c, -s, s, c);
+    return mat2x2<f32>(
+            c, -s,
+            s, c,
+        );
 }
 
 fn hash12(p: vec2<f32>) -> f32 {
@@ -72,11 +76,11 @@ fn sdCappedTorus(p2: vec3<f32>, sc: vec2<f32>, ra: f32, rb: f32) -> f32 {
     var p = p2;
     p.x = abs(p.x);
     var k: f32 = 0.;
-    if (sc.y * p.x > sc.x * p.y) {
-        k = dot(p.xy, sc); }
-    else {
+    if sc.y * p.x > sc.x * p.y {
+        k = dot(p.xy, sc);
+    } else {
         k = length(p.xy);
-    };
+    }
     return sqrt(dot(p, p) + ra * ra - 2. * ra * k) - rb;
 }
 
@@ -93,7 +97,11 @@ fn sdCappedCone(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, ra: f32, rb: f32) -> f
     let paba: f32 = dot(p - a, b - a) / baba;
     let x: f32 = sqrt(papa - paba * paba * baba);
     var rab: f32 = 0.;
-    if (paba < 0.5) { rab = ra; } else { rab = rb; }
+    if paba < 0.5 {
+        rab = ra;
+    } else {
+        rab = rb;
+    }
     let cax: f32 = max(0., x - rab);
     var cay: f32 = abs(paba - 0.5) - 0.5;
     let k: f32 = rba * rba + baba;
@@ -101,7 +109,11 @@ fn sdCappedCone(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, ra: f32, rb: f32) -> f
     var cbx: f32 = x - ra - f * rba;
     let cby: f32 = paba - f;
     var s: f32 = 0.;
-    if (cbx < 0. && cay < 0.) { s = -1.; } else { s = 1.; };
+    if cbx < 0. && cay < 0. {
+        s = -1.;
+    } else {
+        s = 1.;
+    }
     return s * sqrt(min(cax * cax + cay * cay * baba, cbx * cbx + cby * cby * baba));
 }
 
@@ -163,7 +175,16 @@ fn map2(pos_in: vec3<f32>) -> Volume {
     ghost.dist = opSmoothSubtraction(shape, ghost.dist, 0.1);
     p = pos - vec3<f32>(0., 1.6, 0.);
     shape = sdRoundedCylinder(p + sin(p.z * 4.) * 0.03, 0.4, 0.01, 0.01);
-    shape = min(shape, sdCappedCone(p + 0.05 * sin(p.z * 8.), vec3<f32>(0., 0.5, 0.), vec3<f32>(0.), 0.3, 0.445));
+    shape = min(
+            shape,
+            sdCappedCone(
+                p + 0.05 * sin(p.z * 8.),
+                vec3<f32>(0., 0.5, 0.),
+                vec3<f32>(0.),
+                0.3,
+                0.445,
+            ),
+        );
     ghost.dist = min(ghost.dist, shape);
     p = pos - vec3<f32>(0., 1., -0.55);
     let s: f32 = sign(p.x);
@@ -192,7 +213,11 @@ fn map2(pos_in: vec3<f32>) -> Volume {
     ghost.dist = opSmoothUnion(ghost.dist, length(p + vec3<f32>(0., 1.8, 0.)) - 0.5, 0.6);
     p.x = abs(p.x) - 0.2;
     p.z = p.z + (0.1 * sin(p.x * 4. + i_time()));
-    ghost.dist = opSmoothUnion(ghost.dist, sdVerticalCapsule(p + vec3<f32>(0., 2.8, 0.), 0.6, 0.01 + max(0., p.y + 3.) * 0.3), 0.2);
+    ghost.dist = opSmoothUnion(
+            ghost.dist,
+            sdVerticalCapsule(p + vec3<f32>(0., 2.8, 0.), 0.6, 0.01 + max(0., p.y + 3.) * 0.3),
+            0.2,
+        );
     p = pos;
     p.x = abs(p.x) - 0.4;
 
@@ -202,15 +227,30 @@ fn map2(pos_in: vec3<f32>) -> Volume {
     p.y = pxy.y;
 
     p.x = p.x + (pos.x * 0.2 * sin(pos.x + i_time()));
-    ghost.dist = opSmoothUnion(ghost.dist, sdVerticalCapsule(p + vec3<f32>(-1.5, 0., 0.), 0.6, 0.2), 0.2);
+    ghost.dist = opSmoothUnion(
+            ghost.dist,
+            sdVerticalCapsule(p + vec3<f32>(-1.5, 0., 0.), 0.6, 0.2),
+            0.2,
+        );
 
     let vvv = select2(ghost, opaque);
     var volume: Volume = select2(vvv, hair);
-    if (!ao_pass) {
+    if !ao_pass {
         p = pos - vec3<f32>(0., 1., -0.65);
         p.x = abs(p.x) - 0.18;
-        glass.dist = sdRoundBox(p + vec3<f32>(-0.1, 0., 0.1), vec3<f32>(0.2 + p.y * 0.1, 0.15 + p.x * 0.05, 0.001), 0.05);
-        glass.dist = max(glass.dist, -sdRoundBox(p + vec3<f32>(-0.1, 0., 0.1), vec3<f32>(0.18 + p.y * 0.1, 0.14 + p.x * 0.05, 0.1), 0.05));
+        glass.dist = sdRoundBox(
+                p + vec3<f32>(-0.1, 0., 0.1),
+                vec3<f32>(0.2 + p.y * 0.1, 0.15 + p.x * 0.05, 0.001),
+                0.05,
+            );
+        glass.dist = max(
+                glass.dist,
+                -sdRoundBox(
+                    p + vec3<f32>(-0.1, 0., 0.1),
+                    vec3<f32>(0.18 + p.y * 0.1, 0.14 + p.x * 0.05, 0.1),
+                    0.05,
+                ),
+            );
         glass.dist = max(glass.dist, abs(p.z) - 0.1);
         volume = select2(volume, glass);
     }
@@ -219,20 +259,25 @@ fn map2(pos_in: vec3<f32>) -> Volume {
 
 fn getNormal(p: vec3<f32>) -> vec3<f32> {
     let off: vec2<f32> = vec2<f32>(0.001, 0.);
-    return normalize(map2(p).dist - vec3<f32>(map2(p - off.xyy).dist, map2(p - off.yxy).dist, map2(p - off.yyx).dist));
+    return normalize(
+            map2(p).dist
+            - vec3<f32>(map2(p - off.xyy).dist, map2(p - off.yxy).dist, map2(p - off.yyx).dist),
+        );
 }
 
 fn getAO(pos: vec3<f32>, nor: vec3<f32>) -> f32 {
     var occ: f32 = 0.;
     var sca: f32 = 1.;
 
-    for (var i: i32 = 0; i < 5; i = i + 1) {
+    for(var i: i32 = 0; i < 5; i = i + 1) {
         let h: f32 = 0.01 + 0.12 * f32(i) / 4.;
         var volume: Volume = map2(pos + h * nor);
         let d: f32 = volume.dist;
         occ = occ + ((h - d) * sca);
         sca = sca * (0.95);
-        if (occ > 0.35) { break; }
+        if occ > 0.35 {
+            break;
+        }
     }
 
     return clamp(1. - 3. * occ, 0., 1.) * (0.5 + 0.5 * nor.y);
@@ -262,11 +307,10 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let rng: f32 = hash12(coordinate + i_time());
     var count: i32 = MARCH_STEPS;
 
-    for (var index: i32 = 0; index < count; index += 1) {
+    for(var index: i32 = 0; index < count; index += 1) {
         var volume: Volume = map2(pos);
-        if (volume.dist < 0.01) {
-
-            if (shade < 0.001) {
+        if volume.dist < 0.01 {
+            if shade < 0.001 {
                 ao_pass = true;
                 ao = getAO(pos, normal);
                 ao_pass = false;
@@ -276,8 +320,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             let fresnel: f32 = pow(dot(ray, normal) * 0.5 + 0.5, 1.2);
             volume.dist = volume.space * fresnel;
             var col: vec3<f32> = vec3<f32>(0.);
-            if (volume.mate == mat_eye_globe) {
-
+            if volume.mate == mat_eye_globe {
                 let globe: f32 = dot(normal, vec3<f32>(0., 1., 0.)) * 0.5 + 0.5;
                 var look: vec3<f32> = vec3<f32>(0., 0., -1.);
                 var lookxz = look.xz;
@@ -291,22 +334,22 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
                 let pupils: f32 = smoothstep(0.01, 0., dot(normal, look) - 0.95);
                 col = col + (vec3<f32>(1.) * globe * pupils);
                 // break;
-            }
-            else if (volume.mate == mat_eyebrows) {
+            } else if volume.mate == mat_eyebrows {
                 col = col + (EYEBROW_COLOR);
                 // break;
-            }
-            else if (volume.mate == mat_glass) {
+            } else if volume.mate == mat_glass {
                 col = col + (GLASS_COLOR);
                 // break;
-            }
-            else {
+            } else {
                 let leftlight: vec3<f32> = normalize(vec3<f32>(6., -5., 1.));
                 let rightlight: vec3<f32> = normalize(vec3<f32>(-3., 1., 1.));
                 let frontlight: vec3<f32> = normalize(vec3<f32>(-1., 1., -2.));
-                let blue: vec3<f32> = vec3<f32>(0., 0., 1.) * pow(dot(normal, leftlight) * 0.5 + 0.5, 0.2);
-                let green: vec3<f32> = vec3<f32>(0., 1., 0.) * pow(dot(normal, frontlight) * 0.5 + 0.5, 2.);
-                let red: vec3<f32> = RIM_LIGHT_COLOR * pow(dot(normal, rightlight) * 0.5 + 0.5, 0.5);
+                let blue: vec3<f32> = vec3<f32>(0., 0., 1.)
+                    * pow(dot(normal, leftlight) * 0.5 + 0.5, 0.2);
+                let green: vec3<f32> = vec3<f32>(0., 1., 0.)
+                    * pow(dot(normal, frontlight) * 0.5 + 0.5, 2.);
+                let red: vec3<f32> = RIM_LIGHT_COLOR
+                    * pow(dot(normal, rightlight) * 0.5 + 0.5, 0.5);
                 col = col + (blue + green + red);
                 col = col * (ao * 0.5 + 0.3);
                 // break;
@@ -319,9 +362,8 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
             color.b = colorrgb.z;
 
             // color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
-
         }
-        if (shade >= 1.) {
+        if shade >= 1. {
             break;
         }
 

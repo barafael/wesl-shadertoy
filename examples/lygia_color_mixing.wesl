@@ -7,7 +7,7 @@
 // RGB, perceptually in Oklab, and like pigments with Kubelka-Munk spectral
 // mixing (blue and yellow make green). The bottom bands push an HDR ramp
 // through five of LYGIA's tonemappers (https://lygia.xyz).
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::color::mixOklab::mixOklab;
 import lygia::color::mixSpectral::mixSpectral;
 import lygia::color::tonemap::aces::tonemapACES3;
@@ -29,13 +29,13 @@ const COLOR_B: vec3<f32> = vec3<f32>(0.97, 0.64, 0.0);
 
 fn tonemap(i: i32, c: vec3<f32>) -> vec3<f32> {
     switch i {
-        case 0: { return tonemapReinhard3(c); }
+        case 0 { return tonemapReinhard3(c); }
         // Hejl's filmic curve and Unreal's bake in gamma 2.2: undo it, since
         // the output is sRGB-encoded for us.
-        case 1: { return pow(tonemapFilmic3(c), vec3<f32>(2.2)); }
-        case 2: { return tonemapACES3(c); }
-        case 3: { return tonemapUncharted23(c); }
-        default: { return pow(tonemapUnreal3(c), vec3<f32>(2.2)); }
+        case 1 { return pow(tonemapFilmic3(c), vec3<f32>(2.2)); }
+        case 2 { return tonemapACES3(c); }
+        case 3 { return tonemapUncharted23(c); }
+        default { return pow(tonemapUnreal3(c), vec3<f32>(2.2)); }
     }
 }
 
@@ -58,13 +58,14 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let b = clamp(drift(COLOR_B, DRIFT * i_time()), vec3<f32>(0.0), vec3<f32>(1.0));
     var col: vec3<f32>;
     switch band {
-        case 0: { col = mix(a, b, x); }
-        case 1: { col = mixOklab(a, b, x); }
-        case 2: { col = mixSpectral(a, b, x); }
-        default: {
+        case 0 { col = mix(a, b, x); }
+        case 1 { col = mixOklab(a, b, x); }
+        case 2 { col = mixSpectral(a, b, x); }
+        default {
             // An HDR rainbow ramp, 0 to PEAK, through tonemapper band-3.
-            let hdr = hsv2rgb(vec3<f32>(fract(0.1 * i_time() + 0.15 * f32(band)), 0.7, 1.0))
-                * PEAK * x * x;
+            let hdr =
+                hsv2rgb(vec3<f32>(fract(0.1 * i_time() + 0.15 * f32(band)), 0.7, 1.0)) * PEAK * x
+                * x;
             col = tonemap(band - 3, hdr);
         }
     }

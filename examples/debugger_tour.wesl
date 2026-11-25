@@ -31,37 +31,27 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     // Top half: red is uv.x and green is uv.y, so the lower probe box reads
     // the pointer's position as fractions of the view.
-    if (uv.y > 0.5) {
+    if uv.y > 0.5 {
         return vec4<f32>(uv.x, uv.y, 0.0, 1.0);
     }
 
     // Bottom half: five patches, left to right. Thin gaps between them.
     let column = floor(uv.x * 5.0);
-    if (fract(uv.x * 5.0) < 0.01 || uv.y > 0.49) {
+    if fract(uv.x * 5.0) < 0.01 || uv.y > 0.49 {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    switch (i32(column)) {
+    switch i32(column) {
         // A constant: pick a color in the Constants window, read it back.
-        case 0: {
-            return vec4<f32>(SWATCH_COLOR, 1.0);
-        }
+        case 0 { return vec4<f32>(SWATCH_COLOR, 1.0); }
         // Brighter than white: the screen shows white, the probe BRIGHT.
-        case 1: {
-            return vec4<f32>(BRIGHT, BRIGHT, BRIGHT, 1.0);
-        }
+        case 1 { return vec4<f32>(BRIGHT, BRIGHT, BRIGHT, 1.0); }
         // Below black: the screen shows black, the probe NEGATIVE.
-        case 2: {
-            return vec4<f32>(NEGATIVE, 0.0, 0.0, 1.0);
-        }
+        case 2 { return vec4<f32>(NEGATIVE, 0.0, 0.0, 1.0); }
         // Alpha: nothing blends with it here, but the probe's a line
         // shows ALPHA.
-        case 3: {
-            return vec4<f32>(0.5, 0.5, 0.5, ALPHA);
-        }
+        case 3 { return vec4<f32>(0.5, 0.5, 0.5, ALPHA); }
         // Moving: watch the numbers change, or freeze them with the
         // toolbar's speed slider at 0.
-        default: {
-            return vec4<f32>(vec3<f32>(0.5 + 0.5 * sin(i_time())), 1.0);
-        }
+        default { return vec4<f32>(vec3<f32>(0.5 + 0.5 * sin(i_time())), 1.0); }
     }
 }

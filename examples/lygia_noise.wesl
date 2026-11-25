@@ -4,7 +4,7 @@
 // tags: 2d, noise
 // The noise, palette and color mixing come from LYGIA (https://lygia.xyz),
 // bundled as the `lygia` WESL package: import any of its modules by path.
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::generative::snoise::snoise3;
 import lygia::generative::worley::worley2;
 import lygia::color::palette::spectral::spectral;

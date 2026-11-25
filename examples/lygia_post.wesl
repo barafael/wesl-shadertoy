@@ -10,7 +10,7 @@
 //   bottom: white balance, vibrance, RYB hue shift
 // The texture filters read the buffer through `i_sampler`; the color ones
 // work per pixel. Their settings sway back and forth over time.
-import package::shadertoy::{i_time, i_resolution, i_mouse};
+import package::shadertoy::{i_mouse, i_resolution, i_time};
 import package::shadertoy::{i_channel_0, i_sampler};
 import lygia::filter::edge::prewitt::edgePrewitt;
 import lygia::filter::sharpen::adaptive::sharpenAdaptive4;
@@ -58,18 +58,29 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     col *= 0.97 + 0.03 * snoise3(vec3<f32>(st * 90.0, 0.0));
 
     // Two rows of shapes across the width, so every panel has some.
-    for (var i = 0; i < 12; i++) {
+    for(var i = 0; i < 12; i++) {
         let fi = f32(i);
         let row = f32(i / 6);
-        let at = vec2<f32>((f32(i % 6) + 0.5 + 0.5 * row) / 6.0 * aspect - 0.1,
-                           0.27 + 0.46 * row + 0.08 * sin(0.7 * t + 1.9 * fi));
+        let at = vec2<f32>(
+                (f32(i % 6) + 0.5 + 0.5 * row) / 6.0 * aspect - 0.1,
+                0.27 + 0.46 * row + 0.08 * sin(0.7 * t + 1.9 * fi),
+            );
         let q = rotate(place(st, at, 0.3), 0.3 * t * select(1.0, -1.0, i % 2 == 0));
         var d: f32;
         var tint: vec3<f32>;
         switch i % 3 {
-            case 0: { d = starSDF(q, 5, 0.1); tint = STAR_COLOR; }
-            case 1: { d = flowerSDF(q, 6); tint = FLOWER_COLOR; }
-            default: { d = circleSDF(q); tint = RING_COLOR; }
+            case 0 {
+                d = starSDF(q, 5, 0.1);
+                tint = STAR_COLOR;
+            }
+            case 1 {
+                d = flowerSDF(q, 6);
+                tint = FLOWER_COLOR;
+            }
+            default {
+                d = circleSDF(q);
+                tint = RING_COLOR;
+            }
         }
         let level = select(0.6, 0.35, i % 3 == 0);
         col = mix(col, tint, fill(d, level));
@@ -90,12 +101,14 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let i = i32(c.x + (1.0 - c.y) * 3.0);
     var col: vec3<f32>;
     switch i {
-        case 0: { col = edgePrewitt(i_channel_0, i_sampler, uv, pixel * (1.5 + s)); }
-        case 1: { col = sharpenAdaptive4(i_channel_0, i_sampler, uv, pixel, SHARPEN * (1.0 + s)).rgb; }
-        case 2: { col = levels3Float(original, 0.15 + 0.1 * s, 1.0 + 0.6 * s, 0.85, 0.0, 1.0); }
-        case 3: { col = whiteBalance3(original, 0.6 * s, 0.3 * cos(3.1415927 * s)); }
-        case 4: { col = vibrance3(original, 1.5 * s); }
-        default: { col = hueShiftRYB(original, 3.1415927 * s); }
+        case 0 { col = edgePrewitt(i_channel_0, i_sampler, uv, pixel * (1.5 + s)); }
+        case 1 {
+            col = sharpenAdaptive4(i_channel_0, i_sampler, uv, pixel, SHARPEN * (1.0 + s)).rgb;
+        }
+        case 2 { col = levels3Float(original, 0.15 + 0.1 * s, 1.0 + 0.6 * s, 0.85, 0.0, 1.0); }
+        case 3 { col = whiteBalance3(original, 0.6 * s, 0.3 * cos(3.1415927 * s)); }
+        case 4 { col = vibrance3(original, 1.5 * s); }
+        default { col = hueShiftRYB(original, 3.1415927 * s); }
     }
 
     // Dragging opens a lens onto the unfiltered scene.

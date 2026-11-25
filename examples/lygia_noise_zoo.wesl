@@ -8,7 +8,7 @@
 //   bottom: Worley F1, Worley F2 − F1 (cell borders), wavelet, and value
 //           noise with analytic derivatives, lit as a height field.
 // All but random drift through their third dimension over time.
-import package::shadertoy::{i_time, i_resolution};
+import package::shadertoy::{i_resolution, i_time};
 import lygia::generative::random::random2;
 import lygia::generative::snoise::snoise3;
 import lygia::generative::cnoise::cnoise3;
@@ -31,10 +31,10 @@ const HIGH_COLOR: vec3<f32> = vec3<f32>(0.95, 0.9, 0.8);
 fn zoo(i: i32, p: vec3<f32>) -> vec3<f32> {
     var v = 0.0;
     switch i {
-        case 0: { v = random2(floor(p.xy * 8.0)); }
-        case 1: { v = 0.5 + 0.5 * snoise3(p); }
-        case 2: { v = 0.5 + 0.7 * cnoise3(p); }
-        case 3: {
+        case 0 { v = random2(floor(p.xy * 8.0)); }
+        case 1 { v = 0.5 + 0.5 * snoise3(p); }
+        case 2 { v = 0.5 + 0.7 * cnoise3(p); }
+        case 3 {
             v = 0.5 + 0.7 * pnoise3(p, vec3<f32>(REPEAT, REPEAT, 1e4));
             // Mark one period, so the seamless wrap is visible.
             let edge = abs(fract(p.xy / REPEAT + 0.5) - 0.5) * REPEAT;
@@ -42,13 +42,13 @@ fn zoo(i: i32, p: vec3<f32>) -> vec3<f32> {
                 return vec3<f32>(0.85, 0.35, 0.2);
             }
         }
-        case 4: { v = worley3(p); }
-        case 5: {
+        case 4 { v = worley3(p); }
+        case 5 {
             let f = worley32(p);
             v = smoothstep(0.0, 0.25, f.y - f.x);
         }
-        case 6: { v = 0.5 + 0.5 * wavelet3(p); }
-        default: {
+        case 6 { v = 0.5 + 0.5 * wavelet3(p); }
+        default {
             // x is the noise, yzw its gradient: shade it like a heightfield.
             let n = noised3(p);
             let normal = normalize(vec3<f32>(-RELIEF * n.yz, 1.0));

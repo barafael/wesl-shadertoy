@@ -24,7 +24,7 @@ fn fbm(p_in: vec2<f32>) -> f32 {
     var v = 0.0;
     var a = 0.5;
     var p = p_in;
-    for (var i = 0; i < OCTAVES; i = i + 1) {
+    for(var i = 0; i < OCTAVES; i = i + 1) {
         // snoise2 is -1..1; squeeze it into 0..1 around 0.5, softly, the
         // way the value noise before it varied.
         v = v + a * (0.5 + 0.35 * snoise2(p));

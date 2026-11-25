@@ -66,7 +66,7 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     var p = vec4<f32>(0.);
     var g = vec2<f32>(0.);
 
-    for (var i: i32 = 0; i < SOLVER_STEPS; i = i + 1) {
+    for(var i: i32 = 0; i < SOLVER_STEPS; i = i + 1) {
         U = U - u.xy;
         A = A - a.xy;
         B = B - b.xy;
@@ -97,22 +97,25 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     let m = mouse.xy - mouse.zw;
     let l = length(m);
 
-    if (mouse.z > 0. && l > 0.) {
-        let stirred =
-            mix(Q.xyw, vec3<f32>(-normalize(m) * min(l, STIR_MAX_SPEED) / 25., 1.), max(0., STIR_RADIUS - q) / 25.);
+    if mouse.z > 0. && l > 0. {
+        let stirred = mix(
+                Q.xyw,
+                vec3<f32>(-normalize(m) * min(l, STIR_MAX_SPEED) / 25., 1.),
+                max(0., STIR_RADIUS - q) / 25.,
+            );
         Q.x = stirred.x;
         Q.y = stirred.y;
         Q.w = stirred.z;
     }
 
     // A puff of dye to start with, so the shader is alive without input.
-    if (i_frame() < 140u && length(U - 0.5 * R) < PUFF_RADIUS) {
+    if i_frame() < 140u && length(U - 0.5 * R) < PUFF_RADIUS {
         Q.x = 0.;
         Q.y = 0.1;
         Q.w = 1.;
     }
     // Boundaries: velocity and dye vanish at the edges (pressure survives).
-    if (U.x < 1. || U.y < 1. || R.x - U.x < 1. || R.y - U.y < 1.) {
+    if U.x < 1. || U.y < 1. || R.x - U.x < 1. || R.y - U.y < 1. {
         Q.x = 0.;
         Q.y = 0.;
         Q.w = 0.;
@@ -125,8 +128,8 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
 fn buffer_d(frag_coord: vec2<f32>) -> vec4<f32> {
     let p = textureLoad(i_channel_3, vec2<i32>(frag_coord), 0);
     let m = i_mouse();
-    if (m.z > 0.) {
-        if (p.z > 0.) {
+    if m.z > 0. {
+        if p.z > 0. {
             return vec4<f32>(m.xy, p.xy);
         }
         return vec4<f32>(m.xy, m.xy);
@@ -146,16 +149,13 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     var C = 1. - DYE_CONTRAST * me.wwww;
 
     let d = vec3<f32>(
-        t(U + vec2<f32>(1., 0.)).w - t(U - vec2<f32>(1., 0.)).w,
-        t(U + vec2<f32>(0., 1.)).w - t(U - vec2<f32>(0., 1.)).w,
-        2.,
-    );
+            t(U + vec2<f32>(1., 0.)).w - t(U - vec2<f32>(1., 0.)).w,
+            t(U + vec2<f32>(0., 1.)).w - t(U - vec2<f32>(0., 1.)).w,
+            2.,
+        );
 
     let shaded = C.xyz
-        - max(
-            vec3<f32>(0.),
-            sin(BAND_FREQ * vec3<f32>(length(me.xy), me.z, d.y) * me.w),
-        );
+        - max(vec3<f32>(0.), sin(BAND_FREQ * vec3<f32>(length(me.xy), me.z, d.y) * me.w));
     C.x = shaded.x;
     C.y = shaded.y;
     C.z = shaded.z;

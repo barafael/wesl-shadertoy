@@ -1281,7 +1281,7 @@ mod tests {
             Some(Definition::User(at("res = ")..at("res = ") + 3))
         );
 
-        // Formatting every example gives text that still compiles.
+        // The examples are formatted: formatting each changes nothing.
         for example in crate::examples::ALL {
             let ticket = analyzer.request_format(example.code, None).unwrap();
             wait_for(&mut analyzer, example.code, &|a| {
@@ -1294,9 +1294,11 @@ mod tests {
                 .unwrap()
                 .value
                 .unwrap_or_else(|| panic!("{} formats", example.name));
-            if let Err(e) = crate::compile::compile_user_shader(&formatted) {
-                panic!("{} formatted no longer compiles: {e:?}", example.name);
-            }
+            assert!(
+                formatted == example.code,
+                "{} is not formatted: run the formatter over examples/",
+                example.name
+            );
         }
     }
 }

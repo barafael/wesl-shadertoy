@@ -19,7 +19,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let t = i_time() * SPEED;
 
     var f = 0.0;
-    for (var i = 0; i < BALLS; i = i + 1) {
+    for(var i = 0; i < BALLS; i = i + 1) {
         let a = t * (0.5 + 0.1 * f32(i)) + f32(i) * 2.3;
         let c = vec2<f32>(sin(a), cos(a * 1.31)) * ORBIT;
         let d = max(dot(uv - c, uv - c), 0.0001);
@@ -28,8 +28,6 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     let glow = smoothstep(0.35, 0.95, f);
     let inside = smoothstep(0.9, 1.05, f);
-    let col = BG_COLOR
-        + GLOW_COLOR * glow * 0.6
-        + CORE_COLOR * inside;
+    let col = BG_COLOR + GLOW_COLOR * glow * 0.6 + CORE_COLOR * inside;
     return vec4<f32>(col, 1.0);
 }

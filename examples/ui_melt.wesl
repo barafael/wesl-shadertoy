@@ -45,7 +45,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     // Rings spreading from the last click (the centre until then).
     var center = vec2<f32>(0.5);
-    if (i_mouse().z != 0.0) {
+    if i_mouse().z != 0.0 {
         center = abs(i_mouse().zw) / res;
     }
     let d = (uv - center) * vec2<f32>(res.x / res.y, 1.0);

@@ -29,13 +29,13 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     var d = 8.0;
     var cell = vec2<f32>(0.0);
-    for (var j = -1; j <= 1; j = j + 1) {
-        for (var i = -1; i <= 1; i = i + 1) {
+    for(var j = -1; j <= 1; j = j + 1) {
+        for(var i = -1; i <= 1; i = i + 1) {
             let o = vec2<f32>(f32(i), f32(j));
             let h = random22(ip + o);
             let pt = o + 0.5 + 0.5 * sin(t + 6.28318 * h) - fp;
             let dd = dot(pt, pt);
-            if (dd < d) {
+            if dd < d {
                 d = dd;
                 cell = h;
             }
@@ -44,9 +44,9 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     d = sqrt(d);
 
     let shade = 0.55 + 0.45 * sin(
-        vec3<f32>(cell.x * HUE_FREQ, cell.y * HUE_FREQ, (cell.x + cell.y) * 9.0)
+            vec3<f32>(cell.x * HUE_FREQ, cell.y * HUE_FREQ, (cell.x + cell.y) * 9.0)
             + PALETTE_PHASE,
-    );
+        );
     let col = shade * (1.0 - SEAM_DARKNESS * smoothstep(SEAM_INNER, SEAM_OUTER, d));
     return vec4<f32>(col, 1.0);
 }

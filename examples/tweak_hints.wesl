@@ -52,7 +52,7 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     col += GLOW * 0.004 / abs(length(p) - RING);
 
     // ...circled by SPOTS spots.
-    for (var i = 0; i < SPOTS; i++) {
+    for(var i = 0; i < SPOTS; i++) {
         let a = t + 6.2832 * f32(i) / f32(SPOTS);
         let spot = SPOT_ORBIT * vec2<f32>(cos(a), sin(a));
         col += GLOW * 0.0004 / dot(p - spot, p - spot);

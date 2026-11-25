@@ -13,13 +13,21 @@
 //             the identity after each bake (`marbleReset`) and is carried
 //             back along the flow every frame.
 // The image pass shows the ink read through the current map (`marble`).
-import package::shadertoy::{i_time, i_resolution, i_mouse, i_frame};
+import package::shadertoy::{i_frame, i_mouse, i_resolution, i_time};
 import package::shadertoy::{i_channel_0, i_channel_1, i_sampler};
-import lygia::distort::marble::{marble, marbleEncode, marbleDecode, marbleReset, marbleBake};
+import lygia::distort::marble::{marble, marbleBake, marbleDecode, marbleEncode, marbleReset};
 import lygia::generative::snoise::snoise3;
 import lygia::generative::random::{random, random21};
 import lygia::math::gaussian::gaussian2;
-import lygia::color::palette::pigments::{CADMIUM_RED, ULTRAMARINE_BLUE, YELLOW_OCHRE, PHTHALO_GREEN, COBALT_VIOLET, CADMIUM_ORANGE, IVORY_BLACK};
+import lygia::color::palette::pigments::{
+    CADMIUM_ORANGE,
+    CADMIUM_RED,
+    COBALT_VIOLET,
+    IVORY_BLACK,
+    PHTHALO_GREEN,
+    ULTRAMARINE_BLUE,
+    YELLOW_OCHRE
+};
 import lygia::color::space::srgb2rgb::srgb2rgb;
 
 // Frames between bakes, each of which also drops new paint.
@@ -36,13 +44,13 @@ const BATH_COLOR: vec3<f32> = vec3<f32>(0.93, 0.89, 0.8);
 
 fn pigment(i: f32) -> vec3<f32> {
     switch i32(i) % 7 {
-        case 0: { return CADMIUM_RED; }
-        case 1: { return ULTRAMARINE_BLUE; }
-        case 2: { return YELLOW_OCHRE; }
-        case 3: { return PHTHALO_GREEN; }
-        case 4: { return COBALT_VIOLET; }
-        case 5: { return CADMIUM_ORANGE; }
-        default: { return IVORY_BLACK; }
+        case 0 { return CADMIUM_RED; }
+        case 1 { return ULTRAMARINE_BLUE; }
+        case 2 { return YELLOW_OCHRE; }
+        case 3 { return PHTHALO_GREEN; }
+        case 4 { return COBALT_VIOLET; }
+        case 5 { return CADMIUM_ORANGE; }
+        default { return IVORY_BLACK; }
     }
 }
 
@@ -55,9 +63,12 @@ fn map_at(p: vec2<f32>) -> vec2<f32> {
     let i = vec2<i32>(floor(q));
     let f = fract(q);
     let a = marbleDecode(textureLoad(i_channel_1, clamp(i, vec2<i32>(0), size), 0));
-    let b = marbleDecode(textureLoad(i_channel_1, clamp(i + vec2<i32>(1, 0), vec2<i32>(0), size), 0));
-    let c = marbleDecode(textureLoad(i_channel_1, clamp(i + vec2<i32>(0, 1), vec2<i32>(0), size), 0));
-    let d = marbleDecode(textureLoad(i_channel_1, clamp(i + vec2<i32>(1, 1), vec2<i32>(0), size), 0));
+    let b =
+        marbleDecode(textureLoad(i_channel_1, clamp(i + vec2<i32>(1, 0), vec2<i32>(0), size), 0));
+    let c =
+        marbleDecode(textureLoad(i_channel_1, clamp(i + vec2<i32>(0, 1), vec2<i32>(0), size), 0));
+    let d =
+        marbleDecode(textureLoad(i_channel_1, clamp(i + vec2<i32>(1, 1), vec2<i32>(0), size), 0));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -84,8 +95,10 @@ fn flow(p: vec2<f32>) -> vec2<f32> {
     let q = p / res.y * SWIRL_SCALE;
     let t = 0.03 * i_time();
     let e = 0.01;
-    let dx = snoise3(vec3<f32>(q + vec2<f32>(e, 0.0), t)) - snoise3(vec3<f32>(q - vec2<f32>(e, 0.0), t));
-    let dy = snoise3(vec3<f32>(q + vec2<f32>(0.0, e), t)) - snoise3(vec3<f32>(q - vec2<f32>(0.0, e), t));
+    let dx = snoise3(vec3<f32>(q + vec2<f32>(e, 0.0), t))
+        - snoise3(vec3<f32>(q - vec2<f32>(e, 0.0), t));
+    let dy = snoise3(vec3<f32>(q + vec2<f32>(0.0, e), t))
+        - snoise3(vec3<f32>(q - vec2<f32>(0.0, e), t));
     var v = FLOW * vec2<f32>(dy, -dx) / (2.0 * e) * 0.3;
     let mouse = i_mouse();
     if mouse.z > 0.0 {

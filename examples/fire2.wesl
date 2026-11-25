@@ -55,7 +55,11 @@ fn snoise(v: vec3<f32>) -> f32 {
 
     // Permutations
     i = mod289(i);
-    let p: vec4<f32> = permute(permute(permute(i.z + vec4<f32>(0., i1.z, i2.z, 1.)) + i.y + vec4<f32>(0., i1.y, i2.y, 1.)) + i.x + vec4<f32>(0., i1.x, i2.x, 1.));
+    let p: vec4<f32> = permute(
+            permute(
+                permute(i.z + vec4<f32>(0., i1.z, i2.z, 1.)) + i.y + vec4<f32>(0., i1.y, i2.y, 1.),
+            ) + i.x + vec4<f32>(0., i1.x, i2.x, 1.),
+        );
 
     // Gradients: 7x7 points over a square, mapped onto an octahedron.
     // The ring size 17*17 = 289 is close to a multiple of 49 (49*6 = 294)
@@ -80,14 +84,18 @@ fn snoise(v: vec3<f32>) -> f32 {
     var p1: vec3<f32> = vec3<f32>(a0.zw, h.y);
     var p2: vec3<f32> = vec3<f32>(a1.xy, h.z);
     var p3: vec3<f32> = vec3<f32>(a1.zw, h.w);
-    let norm: vec4<f32> = inverseSqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+    let norm: vec4<f32> =
+        inverseSqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
     p0 = p0 * (norm.x);
     p1 = p1 * (norm.y);
     p2 = p2 * (norm.z);
     p3 = p3 * (norm.w);
 
     // Mix final noise value
-    var m: vec4<f32> = max(0.6 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.));
+    var m: vec4<f32> = max(
+            0.6 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)),
+            vec4<f32>(0.),
+        );
     m = m * m;
     return 42. * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
 }
@@ -106,17 +114,17 @@ fn noiseStack(pos_in: vec3<f32>, octaves: i32, falloff: f32) -> f32 {
     var pos = pos_in;
     var noise: f32 = snoise(vec3<f32>(pos));
     var off: f32 = 1.;
-    if (octaves > 1) {
+    if octaves > 1 {
         pos = pos * (2.);
         off = off * (falloff);
         noise = (1. - off) * noise + off * snoise(vec3<f32>(pos));
     }
-    if (octaves > 2) {
+    if octaves > 2 {
         pos = pos * (2.);
         off = off * (falloff);
         noise = (1. - off) * noise + off * snoise(vec3<f32>(pos));
     }
-    if (octaves > 3) {
+    if octaves > 3 {
         pos = pos * (2.);
         off = off * (falloff);
         noise = (1. - off) * noise + off * snoise(vec3<f32>(pos));
@@ -161,10 +169,15 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     let coordScaled: vec2<f32> = 0.01 * frag_coord - 0.02 * vec2<f32>(offset.x, 0.);
     let position: vec3<f32> = vec3<f32>(coordScaled, 0.) + vec3<f32>(1223., 6434., 8425.);
-    let flow: vec3<f32> = vec3<f32>(4.1 * (0.5 - xpart) * pow(ypartClippedn, 4.), -2. * xfuel * pow(ypartClippedn, 64.), 0.);
+    let flow: vec3<f32> = vec3<f32>(
+            4.1 * (0.5 - xpart) * pow(ypartClippedn, 4.),
+            -2. * xfuel * pow(ypartClippedn, 64.),
+            0.,
+        );
     let timing: vec3<f32> = realTime * vec3<f32>(0., -1.7, 1.1) + flow;
 
-    let displacePos: vec3<f32> = vec3<f32>(1., 0.5, 1.) * 2.4 * position + realTime * vec3<f32>(0.01, -0.7, 1.3);
+    let displacePos: vec3<f32> = vec3<f32>(1., 0.5, 1.) * 2.4 * position
+        + realTime * vec3<f32>(0.01, -0.7, 1.3);
     let displace3: vec3<f32> = vec3<f32>(noiseStackUV(displacePos, 2, 0.4, 0.1), 0.);
 
     let noiseCoord: vec3<f32> = (vec3<f32>(2., 1., 1.) * position + timing + 0.4 * displace3) / 1.;
@@ -178,25 +191,38 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
 
     // smoke
     let smokeNoise: f32 = 0.5 + snoise(0.4 * position + timing * vec3<f32>(1., 1., 0.2)) / 2.;
-    let smoke: vec3<f32> = vec3<f32>(SMOKE_AMOUNT * pow(xfuel, 3.) * pow(ypart, 2.) * (smokeNoise + 0.4 * (1. - noise)));
+    let smoke: vec3<f32> = vec3<f32>(
+            SMOKE_AMOUNT * pow(xfuel, 3.) * pow(ypart, 2.) * (smokeNoise + 0.4 * (1. - noise)),
+        );
 
     // sparks
     var sparkGridSize: f32 = SPARK_GRID_SIZE;
     var sparkCoord: vec2<f32> = frag_coord - vec2<f32>(2. * offset.x, SPARK_RISE * realTime);
-    sparkCoord = sparkCoord - (30. * noiseStackUV(0.01 * vec3<f32>(sparkCoord, 30. * time), 1, 0.4, 0.1));
+    sparkCoord = sparkCoord
+        - (30. * noiseStackUV(0.01 * vec3<f32>(sparkCoord, 30. * time), 1, 0.4, 0.1));
     sparkCoord = sparkCoord + (100. * flow.xy);
 
-    if (((sparkCoord.y / sparkGridSize) % 2.) < 1.) { sparkCoord.x = sparkCoord.x + (0.5 * sparkGridSize); }
+    if ((sparkCoord.y / sparkGridSize) % 2.) < 1. {
+        sparkCoord.x = sparkCoord.x + (0.5 * sparkGridSize);
+    }
     let sparkGridIndex: vec2<f32> = vec2<f32>(floor(sparkCoord / sparkGridSize));
     let sparkRandom: f32 = prng(sparkGridIndex);
-    let sparkLife: f32 = min(10. * (1. - min((sparkGridIndex.y + SPARK_RISE * realTime / sparkGridSize) / (24. - 20. * sparkRandom), 1.)), 1.);
+    let sparkLife: f32 = min(
+            10. * (1. - min(
+                    (sparkGridIndex.y + SPARK_RISE * realTime / sparkGridSize)
+                    / (24. - 20. * sparkRandom),
+                    1.,
+                )),
+            1.,
+        );
     var sparks: vec3<f32> = vec3<f32>(0.);
-    if (sparkLife > 0.) {
+    if sparkLife > 0. {
         let sparkSize: f32 = xfuel * xfuel * sparkRandom * 0.08;
         let sparkRadians: f32 = 999. * sparkRandom * 2. * PI + 2. * time;
         let sparkCircular: vec2<f32> = vec2<f32>(sin(sparkRadians), cos(sparkRadians));
         let sparkOffset: vec2<f32> = (0.5 - sparkSize) * sparkGridSize * sparkCircular;
-        let sparkModulus: vec2<f32> = ((sparkCoord + sparkOffset) % sparkGridSize) - 0.5 * vec2<f32>(sparkGridSize);
+        let sparkModulus: vec2<f32> = ((sparkCoord + sparkOffset) % sparkGridSize)
+            - 0.5 * vec2<f32>(sparkGridSize);
         let sparkLength: f32 = length(sparkModulus);
         let sparksGray: f32 = max(0., 1. - sparkLength / (sparkSize * sparkGridSize));
         sparks = sparkLife * sparksGray * SPARK_COLOR;

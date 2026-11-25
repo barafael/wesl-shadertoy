@@ -59,11 +59,11 @@ fn simplex3d(p: vec3<f32>) -> f32 {
     var w = vec4<f32>(dot(x, x), dot(x1, x1), dot(x2, x2), dot(x3, x3));
     w = max(0.6 - w, vec4<f32>(0.));
     let d = vec4<f32>(
-        dot(random3(s), x),
-        dot(random3(s + i1), x1),
-        dot(random3(s + i2), x2),
-        dot(random3(s + 1.), x3),
-    );
+            dot(random3(s), x),
+            dot(random3(s + i1), x1),
+            dot(random3(s + i2), x2),
+            dot(random3(s + 1.), x3),
+        );
     w = w * w;
     w = w * w;
     return dot(d * w, vec4<f32>(52.));
@@ -76,7 +76,7 @@ fn dummy(p3: vec3<f32>) -> vec3<f32> {
 fn fbm(p: vec3<f32>) -> vec3<f32> {
     var result = vec3<f32>(0.);
     var amplitude = 0.5;
-    for (var index: f32 = 0.; index < 3.; index = index + 1.) {
+    for(var index: f32 = 0.; index < 3.; index = index + 1.) {
         result = result + dummy(p / amplitude) * amplitude;
         amplitude = amplitude / falloff;
     }
@@ -108,7 +108,7 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     let m = i_mouse();
     let mouse = (m.xy - R / 2.) / R.y;
     let t = i_time() * ORBIT_SPEED;
-    if (m.z > 0.5) {
+    if m.z > 0.5 {
         uv = uv - mouse;
     } else {
         uv = uv - vec2<f32>(cos(t), sin(t)) * ORBIT_RADIUS;
@@ -119,12 +119,12 @@ fn buffer_a(frag_coord: vec2<f32>) -> vec4<f32> {
     let data = field(uv);
     let unit = vec3<f32>(range / R, 0.);
     let normal = normalize(
-        vec3<f32>(
-            field(uv - unit.xz).r - field(uv + unit.xz).r,
-            field(uv - unit.zy).r - field(uv + unit.zy).r,
-            data.x * data.x,
-        ) + 0.001,
-    );
+            vec3<f32>(
+                field(uv - unit.xz).r - field(uv + unit.xz).r,
+                field(uv - unit.zy).r - field(uv + unit.zy).r,
+                data.x * data.x,
+            ) + 0.001,
+        );
 
     // Advect along the surface normal, plus a noise-driven swirl.
     var offset = -normal.xy;
@@ -146,31 +146,34 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     let gray = field(uv).x;
     let unit = vec3<f32>(GLOW_RANGE / R, 0.);
     let normal = normalize(
-        vec3<f32>(
-            field(uv + unit.xz).r - field(uv - unit.xz).r,
-            field(uv - unit.zy).r - field(uv + unit.zy).r,
-            gray * gray * gray,
-        ),
-    );
+            vec3<f32>(
+                field(uv + unit.xz).r - field(uv - unit.xz).r,
+                field(uv - unit.zy).r - field(uv + unit.zy).r,
+                gray * gray * gray,
+            ),
+        );
 
     var color = vec3<f32>(0.3) * (1. - abs(dot(normal, vec3<f32>(0., 0., 1.))));
     let dir = normalize(vec3<f32>(0., 1., 2.));
     let specular = pow(dot(normal, dir) * 0.5 + 0.5, SPECULAR_POWER);
     color = color + vec3<f32>(0.5) * smoothstep(0.2, 1., specular);
-    let tint =
-        0.5 + 0.5 * cos(RAINBOW_PHASE + dot(normal, dir) * 4. - uv.y * 3. - 3.);
+    let tint = 0.5 + 0.5 * cos(RAINBOW_PHASE + dot(normal, dir) * 4. - uv.y * 3. - 3.);
     color = color + tint * smoothstep(0.15, 0., gray);
     color = color - dither * 0.1;
 
     let background = vec3<f32>(1.) * smoothstep(1.5, -0.5, length(uv - 0.5));
-    color = mix(background, clamp(color, vec3<f32>(0.), vec3<f32>(1.)), smoothstep(0.01, 0.1, gray));
+    color = mix(
+            background,
+            clamp(color, vec3<f32>(0.), vec3<f32>(1.)),
+            smoothstep(0.01, 0.1, gray),
+        );
 
     // Debug view: click near the left edge to inspect the passes.
     let m = i_mouse();
-    if (m.z > 0.5 && m.x / R.x < 0.1) {
-        if (uv.x < 0.33) {
+    if m.z > 0.5 && m.x / R.x < 0.1 {
+        if uv.x < 0.33 {
             color = vec3<f32>(gray);
-        } else if (uv.x < 0.66) {
+        } else if uv.x < 0.66 {
             color = normal * 0.5 + 0.5;
         } else {
             color = tint;

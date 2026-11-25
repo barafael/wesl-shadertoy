@@ -8,7 +8,7 @@
 // LYGIA's `space::equirect2xyz` and `space::fisheye2xyz`
 // (https://lygia.xyz) turn the two panels' pixels into directions. Drag to
 // turn and to scrub the time of day.
-import package::shadertoy::{i_time, i_resolution, i_mouse};
+import package::shadertoy::{i_mouse, i_resolution, i_time};
 import lygia::space::equirect2xyz::equirect2xyz;
 import lygia::space::fisheye2xyz::fisheye2xyz;
 import lygia::generative::snoise::snoise3;
@@ -33,7 +33,7 @@ fn fbm(p: vec3<f32>) -> f32 {
     var v = 0.0;
     var a = 0.5;
     var q = p;
-    for (var i = 0; i < 5; i++) {
+    for(var i = 0; i < 5; i++) {
         v += a * snoise3(q);
         q = q * 2.03 + 1.7;
         a *= 0.5;
@@ -88,7 +88,8 @@ fn main_image(frag_coord: vec2<f32>) -> vec4<f32> {
     // The sun circles on a raised, tilted path: high at noon, only briefly
     // below the horizon around midnight.
     let a = 6.2831853 * (hour - 0.25);
-    let sun = normalize(vec3<f32>(cos(a), NIGHT_DIP * sin(a) + (1.0 - NIGHT_DIP), 0.3 + 0.4 * sin(a)));
+    let sun =
+        normalize(vec3<f32>(cos(a), NIGHT_DIP * sin(a) + (1.0 - NIGHT_DIP), 0.3 + 0.4 * sin(a)));
 
     // A 2:1 panorama on the left, a round fisheye on the right, as large
     // as both fit side by side.
