@@ -400,6 +400,8 @@ pub fn show_marked_code_view(
                 let job = cached_job(&mut cache.viewer, text, || {
                     highlight_job(text, font_id.clone(), default_color, &pal)
                 });
+                // Under the text, so the tint does not wash it out.
+                let backdrop = ui.painter().add(bevy_egui::egui::Shape::Noop);
                 let code = ui.add(
                     Label::new(job.clone())
                         .selectable(true)
@@ -417,7 +419,10 @@ pub fn show_marked_code_view(
                     let rows =
                         Rect::from_x_y_ranges(code.rect.x_range(), start.top()..=end.bottom());
                     let tint = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
-                    ui.painter().rect_filled(rows, 0.0, tint);
+                    ui.painter().set(
+                        backdrop,
+                        bevy_egui::egui::Shape::rect_filled(rows, 0.0, tint),
+                    );
                     if std::mem::take(&mut mark.scroll) {
                         // Its start, not the full width: centring that
                         // would scroll sideways too.
@@ -845,9 +850,10 @@ mod tests {
         signature: Option<crate::analyzer::Signature>,
         completion: Option<crate::analyzer::Answer<Vec<crate::analyzer::CompletionItem>>>,
         signature_answer: Option<crate::analyzer::Answer<Option<crate::analyzer::Signature>>>,
-        /// What a format request answers.
+        /// What a format request answers; `None` is unparsable.
         formatted: Option<String>,
-        format_answer: Option<crate::analyzer::Answer<Option<String>>>,
+        format_answer:
+            Option<crate::analyzer::Answer<Result<String, crate::analyzer::FormatError>>>,
         /// `(method, char index)` of each request.
         asked: Vec<(&'static str, usize)>,
         next: crate::analyzer::Ticket,
@@ -875,7 +881,9 @@ mod tests {
         ) -> Option<crate::analyzer::Answer<Option<crate::analyzer::Definition>>> {
             None
         }
-        fn take_format(&mut self) -> Option<crate::analyzer::Answer<Option<String>>> {
+        fn take_format(
+            &mut self,
+        ) -> Option<crate::analyzer::Answer<Result<String, crate::analyzer::FormatError>>> {
             self.format_answer.take()
         }
         fn request_completion(&mut self, _: &str, at: usize) -> Option<crate::analyzer::Ticket> {
@@ -909,7 +917,7 @@ mod tests {
             self.asked.push(("format", 0));
             self.format_answer = Some(crate::analyzer::Answer {
                 ticket: self.next,
-                value: self.formatted.clone(),
+                value: (self.formatted.clone()).ok_or(crate::analyzer::FormatError::Unparsable),
             });
             Some(self.next)
         }
@@ -921,6 +929,7 @@ mod tests {
             kind: crate::analyzer::CompletionKind::Function,
             detail: Some(format!("fn {label}() -> f32")),
             insert: label.into(),
+            replace_from: None,
             filter: label.into(),
             sort: sort.into(),
         }

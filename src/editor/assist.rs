@@ -20,8 +20,8 @@ use bevy_egui::egui::{
 
 use super::byte_index_from_char_index;
 use crate::analyzer::{
-    Analyzer, Answer, CompletionItem, CompletionKind, Definition, Diagnostic, HintKind, InlayHint,
-    Signature, Ticket,
+    Analyzer, Answer, CompletionItem, CompletionKind, Definition, Diagnostic, FormatError,
+    HintKind, InlayHint, Signature, Ticket,
 };
 use crate::highlight::{is_ident_char, is_ident_start};
 use crate::theme::SYNTAX;
@@ -33,7 +33,7 @@ pub trait Assistant {
     fn completion(&self) -> Option<&Answer<Vec<CompletionItem>>>;
     fn signature(&self) -> Option<&Answer<Option<Signature>>>;
     fn take_definition(&mut self) -> Option<Answer<Option<Definition>>>;
-    fn take_format(&mut self) -> Option<Answer<Option<String>>>;
+    fn take_format(&mut self) -> Option<Answer<Result<String, FormatError>>>;
     fn request_completion(&mut self, text: &str, at: usize) -> Option<Ticket>;
     fn request_signature(&mut self, text: &str, at: usize) -> Option<Ticket>;
     fn request_definition(&mut self, text: &str, at: usize) -> Option<Ticket>;
@@ -56,7 +56,7 @@ impl Assistant for Analyzer {
     fn take_definition(&mut self) -> Option<Answer<Option<Definition>>> {
         Analyzer::take_definition(self)
     }
-    fn take_format(&mut self) -> Option<Answer<Option<String>>> {
+    fn take_format(&mut self) -> Option<Answer<Result<String, FormatError>>> {
         Analyzer::take_format(self)
     }
     fn request_completion(&mut self, text: &str, at: usize) -> Option<Ticket> {
@@ -94,7 +94,7 @@ impl Assistant for DiagnosticsOnly<'_> {
     fn take_definition(&mut self) -> Option<Answer<Option<Definition>>> {
         None
     }
-    fn take_format(&mut self) -> Option<Answer<Option<String>>> {
+    fn take_format(&mut self) -> Option<Answer<Result<String, FormatError>>> {
         None
     }
     fn request_completion(&mut self, _: &str, _: usize) -> Option<Ticket> {
@@ -134,8 +134,8 @@ impl Default for AssistOptions {
 pub struct AssistOutput {
     /// A definition outside the editor text, to show read-only.
     pub peek: Option<Definition>,
-    /// Formatting was asked for, but the server could not parse the text.
-    pub format_failed: bool,
+    /// Formatting was asked for, but gave no text.
+    pub format_failed: Option<FormatError>,
 }
 
 /// The editor's popups and the answers it waits for.
@@ -261,6 +261,9 @@ fn accept(
     item: &CompletionItem,
 ) {
     remember_for_undo(state, text);
+    // The server may replace more than the word (a whole `a::b::c` path):
+    // text before the anchor is as it was when it answered.
+    let anchor = item.replace_from.map_or(anchor, |from| from.min(anchor));
     let (from, to) = (
         byte_index_from_char_index(text, anchor),
         byte_index_from_char_index(text, cursor),
@@ -293,7 +296,7 @@ pub fn before(
     {
         assist.format = None;
         match answer.value {
-            Some(formatted) if formatted != *text => {
+            Ok(formatted) if formatted != *text => {
                 let cursor = state.cursor.char_range().map_or(0, |r| r.primary.index.0);
                 let cursor = follow(text, &formatted, cursor);
                 remember_for_undo(&mut state, text);
@@ -305,8 +308,8 @@ pub fn before(
                 assist.completion = None;
                 assist.signature = None;
             }
-            Some(_) => {}
-            None => out.format_failed = true,
+            Ok(_) => {}
+            Err(error) => out.format_failed = Some(error),
         }
     }
 
@@ -408,10 +411,15 @@ pub fn shortcuts(ctx: &Context, focused: bool) -> Shortcuts {
             i.events
                 .retain(|e| !matches!(e, Event::Text(t) if t == " "));
         }
+        let format = i.consume_key(Modifiers::SHIFT | Modifiers::ALT, Key::F);
+        if format {
+            // On macOS, Shift+Option+F also types `Ï`.
+            i.events.retain(|e| !matches!(e, Event::Text(_)));
+        }
         Shortcuts {
             complete,
             definition: i.consume_key(Modifiers::NONE, Key::F12),
-            format: i.consume_key(Modifiers::SHIFT | Modifiers::ALT, Key::F),
+            format,
         }
     })
 }
@@ -553,8 +561,7 @@ pub fn after(
         match &answer.value {
             Some(signature) => paint_signature(ctx, cursor_rect(cursor), signature),
             // The latest answer says the cursor is not in a call.
-            None if answer.ticket >= popup.since => assist.signature = None,
-            None => {}
+            None => assist.signature = None,
         }
     }
 
@@ -628,6 +635,9 @@ fn paint_type_hints(
     hints: &[InlayHint],
 ) {
     let galley = &output.galley;
+    // In text order, so each row's hints gather into one line.
+    let mut hints: Vec<&InlayHint> = hints.iter().collect();
+    hints.sort_by_key(|h| h.at);
     let mut rows: Vec<(usize, String)> = Vec::new();
     for hint in hints {
         // `[error]`: the server could not type it (code mid-edit).
@@ -815,6 +825,7 @@ mod tests {
             kind: CompletionKind::Function,
             detail: None,
             insert: label.into(),
+            replace_from: None,
             filter: label.into(),
             sort: sort.into(),
         }

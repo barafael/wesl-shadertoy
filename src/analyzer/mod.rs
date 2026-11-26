@@ -39,8 +39,8 @@ use web::Transport;
 
 use protocol::lsp_position;
 pub use protocol::{
-    CompletionItem, CompletionKind, Definition, Diagnostic, HintKind, InlayHint, Severity,
-    Signature,
+    CompletionItem, CompletionKind, Definition, Diagnostic, FormatError, HintKind, InlayHint,
+    Severity, Signature,
 };
 
 /// The open document holding the editor text, relative to the workspace root.
@@ -153,9 +153,8 @@ struct Results {
     signature: Option<Answer<Option<Signature>>>,
     /// Taken by the editor once acted on.
     definition: Option<Answer<Option<Definition>>>,
-    /// The formatted text, or `None` where the server could not format
-    /// (it sends `null` for text it cannot parse). Taken once applied.
-    format: Option<Answer<Option<String>>>,
+    /// The formatted text, or why there is none. Taken once applied.
+    format: Option<Answer<Result<String, FormatError>>>,
 }
 
 /// The language-server connection and its latest results.
@@ -207,7 +206,7 @@ impl Analyzer {
     }
 
     /// The latest formatting result, once.
-    pub fn take_format(&mut self) -> Option<Answer<Option<String>>> {
+    pub fn take_format(&mut self) -> Option<Answer<Result<String, FormatError>>> {
         self.client.as_mut()?.results.format.take()
     }
 
@@ -425,13 +424,15 @@ impl<L: Link> Client<L> {
         if !self.initialized && !self.pending.values().any(|r| r.kind == Pending::Init) {
             self.initialize();
         }
+        // Before the answers: one about text the editor has since left (a
+        // keystroke last frame) must see that it is stale.
+        self.observe(text, now);
         for message in self.link.recv() {
             self.handle(message)?;
         }
         if !self.initialized {
             return Ok(false);
         }
-        self.observe(text, now);
         // The document opens at once; edits go out once typing pauses.
         let settled = self
             .changed
@@ -503,6 +504,11 @@ impl<L: Link> Client<L> {
             remap(&mut self.results.diagnostics, old, text);
             remap_hints(&mut self.results.hints, old, text);
         }
+        // Not taken yet (the editor was not shown) and about the old text:
+        // applying them now would select the wrong span, or put the old
+        // text back over the new one.
+        self.results.definition = None;
+        self.results.format = None;
         self.seen = Some(text.to_owned());
         self.changed = Some(now);
     }
@@ -637,7 +643,7 @@ impl<L: Link> Client<L> {
             Pending::Completion => {
                 results.completion = Some(Answer {
                     ticket,
-                    value: protocol::completions(result),
+                    value: protocol::completions(result, &request.text),
                 });
             }
             Pending::Signature => {
@@ -657,7 +663,7 @@ impl<L: Link> Client<L> {
             Pending::Format if unchanged => {
                 results.format = Some(Answer {
                     ticket,
-                    value: protocol::apply_edits(&request.text, result),
+                    value: protocol::formatted(&request.text, result, error),
                 });
             }
             Pending::Hints if request.version == self.version => {
@@ -1082,8 +1088,31 @@ mod tests {
             .at_cursor(text, 19, "textDocument/definition", Pending::Definition)
             .unwrap();
         client.step(&format!("{text}// typed\n")).unwrap();
-        respond(&mut client, ticket, location);
+        respond(&mut client, ticket, location.clone());
         assert_eq!(client.results.definition, None, "applied to moved text");
+        // The answer arriving on the frame the editor's typing first shows.
+        let text = client.seen.clone().unwrap();
+        let ticket = client
+            .at_cursor(&text, 19, "textDocument/definition", Pending::Definition)
+            .unwrap();
+        client
+            .link
+            .inbox
+            .push_back(json!({ "jsonrpc": "2.0", "id": ticket, "result": location.clone() }));
+        client.step(&format!("{text}// more\n")).unwrap();
+        assert_eq!(
+            client.results.definition, None,
+            "applied to the frame's typing"
+        );
+        // Answered, but not taken before the text changed.
+        let text = client.seen.clone().unwrap();
+        let ticket = client
+            .at_cursor(&text, 19, "textDocument/definition", Pending::Definition)
+            .unwrap();
+        respond(&mut client, ticket, location);
+        assert!(client.results.definition.is_some());
+        client.step(&format!("{text}// again\n")).unwrap();
+        assert_eq!(client.results.definition, None, "kept past an edit");
 
         let text = client.seen.clone().unwrap();
         let ticket = client.format(&text, None).unwrap();
@@ -1094,15 +1123,33 @@ mod tests {
         let edit = json!([{ "range": { "start": { "line": 2, "character": 0 },
             "end": { "line": 2, "character": 2 } }, "newText": "//" }]);
         respond(&mut client, ticket, edit);
-        assert_eq!(client.results.format.take().unwrap().value.unwrap(), text);
-        // Range formatting for a selection; `null` (unparsable) is `None`.
+        assert_eq!(
+            client.results.format.take().unwrap().value,
+            Ok(text.clone())
+        );
+        // Range formatting for a selection; `null` means unparsable.
         let ticket = client.format(&text, Some(0..3)).unwrap();
         assert_eq!(
             client.link.sent.last().unwrap()["method"],
             "textDocument/rangeFormatting"
         );
         respond(&mut client, ticket, Value::Null);
-        assert_eq!(client.results.format.take().unwrap().value, None);
+        assert_eq!(
+            client.results.format.take().unwrap().value,
+            Err(FormatError::Unparsable)
+        );
+        // A failed request is the server's fault, not the text's.
+        let ticket = client.format(&text, None).unwrap();
+        client
+            .link
+            .inbox
+            .push_back(json!({ "jsonrpc": "2.0", "id": ticket,
+            "error": { "code": -32603, "message": "boom" } }));
+        client.step(&text).unwrap();
+        assert_eq!(
+            client.results.format.take().unwrap().value,
+            Err(FormatError::Server)
+        );
     }
 
     /// With hints on, every synced version is asked for once; a reply for
@@ -1293,7 +1340,7 @@ mod tests {
                 .take_format()
                 .unwrap()
                 .value
-                .unwrap_or_else(|| panic!("{} formats", example.name));
+                .unwrap_or_else(|e| panic!("{} formats: {e:?}", example.name));
             assert!(
                 formatted == example.code,
                 "{} is not formatted: run the formatter over examples/",

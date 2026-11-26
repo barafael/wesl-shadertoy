@@ -1150,7 +1150,9 @@ fn ui(mut p: UiParams) {
         &p.analyzer,
         &mut format,
     );
-    if format {
+    // The editor asks on its next frame: with it closed, the request would
+    // wait and format whatever text is there once it is opened again.
+    if format && p.wins.editor {
         p.code_assist.request_format();
     }
 
@@ -1194,8 +1196,12 @@ fn ui(mut p: UiParams) {
         if let Some(definition) = assisted.peek {
             p.peek.open(definition);
         }
-        if assisted.format_failed {
-            p.status.note = Some(("format: fix the syntax errors first".into(), false));
+        if let Some(error) = assisted.format_failed {
+            let note = match error {
+                analyzer::FormatError::Unparsable => "format: fix the syntax errors first",
+                analyzer::FormatError::Server => "format: wgsl-analyzer failed",
+            };
+            p.status.note = Some((note.into(), false));
         }
     }
 

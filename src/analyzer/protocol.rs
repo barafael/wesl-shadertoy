@@ -48,6 +48,9 @@ pub struct CompletionItem {
     pub detail: Option<String>,
     /// What accepting it inserts (in editor terms, see [`from_analyzer`]).
     pub insert: String,
+    /// Where its `textEdit` starts replacing (a char index into the text
+    /// the request was made on), when the server says.
+    pub replace_from: Option<usize>,
     /// What the typed word is matched against.
     pub filter: String,
     /// The server's order.
@@ -183,8 +186,9 @@ pub fn diagnostic(text: &str, diagnostic: &Value) -> Option<Diagnostic> {
     })
 }
 
-/// A `textDocument/completion` result (a list or a `CompletionList`).
-pub fn completions(result: &Value) -> Vec<CompletionItem> {
+/// A `textDocument/completion` result (a list or a `CompletionList`) on
+/// `text`, the editor text the request was made on.
+pub fn completions(result: &Value, text: &str) -> Vec<CompletionItem> {
     let items = result
         .as_array()
         .or_else(|| result["items"].as_array())
@@ -193,22 +197,31 @@ pub fn completions(result: &Value) -> Vec<CompletionItem> {
         .iter()
         .filter_map(|item| {
             let label = item["label"].as_str()?.to_owned();
-            let text = |key: &str| item[key].as_str().map(str::to_owned);
-            let insert = item["textEdit"]["newText"]
+            let field = |key: &str| item[key].as_str().map(str::to_owned);
+            let edit = &item["textEdit"];
+            let insert = edit["newText"]
                 .as_str()
                 .map(str::to_owned)
-                .or_else(|| text("insertText"))
+                .or_else(|| field("insertText"))
                 .unwrap_or_else(|| label.clone());
+            // `TextEdit`, or `InsertReplaceEdit` (whose ranges start alike).
+            let range = if edit["range"].is_object() {
+                &edit["range"]
+            } else {
+                &edit["replace"]
+            };
+            let replace_from = char_range(text, range).map(|r| r.start);
             Some(CompletionItem {
                 kind: completion_kind(item["kind"].as_u64()),
-                detail: text("detail").or_else(|| {
+                detail: field("detail").or_else(|| {
                     item["labelDetails"]["detail"]
                         .as_str()
                         .map(|d| format!("{label}{d}"))
                 }),
                 insert: from_analyzer(&insert),
-                filter: text("filterText").unwrap_or_else(|| label.clone()),
-                sort: text("sortText").unwrap_or_else(|| label.clone()),
+                replace_from,
+                filter: field("filterText").unwrap_or_else(|| label.clone()),
+                sort: field("sortText").unwrap_or_else(|| label.clone()),
                 label,
             })
         })
@@ -355,16 +368,39 @@ pub fn inlay_hints(result: &Value, text: &str) -> Vec<InlayHint> {
 /// `text` with a `textDocument/formatting` (or `rangeFormatting`) result's
 /// edits applied, in editor terms; `None` when the result is not a list of
 /// edits (the server sends `null` for text it cannot parse).
+/// Why formatting gave no text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatError {
+    /// The server sent `null`: it cannot parse the text.
+    Unparsable,
+    /// The request failed, or the edits made no sense.
+    Server,
+}
+
+/// The text after a formatting response, `result` or `error`.
+pub fn formatted(text: &str, result: &Value, error: Option<&Value>) -> Result<String, FormatError> {
+    if error.is_some() {
+        return Err(FormatError::Server);
+    }
+    if result.is_null() {
+        return Err(FormatError::Unparsable);
+    }
+    apply_edits(text, result).ok_or(FormatError::Server)
+}
+
 pub fn apply_edits(text: &str, result: &Value) -> Option<String> {
     let edits = result.as_array()?;
     let mut chars: Vec<char> = super::for_analyzer(text).chars().collect();
-    let mut spans: Vec<(Range<usize>, &str)> = edits
+    let mut spans: Vec<(usize, Range<usize>, &str)> = edits
         .iter()
-        .map(|e| Some((char_range(text, &e["range"])?, e["newText"].as_str()?)))
+        .enumerate()
+        .map(|(i, e)| Some((i, char_range(text, &e["range"])?, e["newText"].as_str()?)))
         .collect::<Option<_>>()?;
-    // Back to front, so earlier ranges stay valid.
-    spans.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
-    for (range, new) in spans {
+    // Back to front, so earlier ranges stay valid; of edits at the same
+    // start the last goes first, so their texts end up in the list's order
+    // (as LSP has it for inserts at one position).
+    spans.sort_by_key(|(i, range, _)| std::cmp::Reverse((range.start, *i)));
+    for (_, range, new) in spans {
         let end = range.end.min(chars.len());
         let start = range.start.min(end);
         chars.splice(start..end, new.chars());
@@ -426,15 +462,22 @@ mod tests {
             { "label": "edge", "kind": 3,
               "textEdit": { "range": {}, "newText": "lygia::filtre::edge" } },
         ] });
-        let items = completions(&result);
+        let items = completions(&result, "let n = sn");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, CompletionKind::Function);
         assert_eq!(items[0].insert, "snoise3");
         assert_eq!(items[1].sort, "0");
         assert_eq!(items[1].filter, "st");
         assert_eq!(items[2].insert, "lygia::filter::edge", "renamed back");
-        assert_eq!(completions(&json!([{ "label": "x" }])).len(), 1);
-        assert!(completions(&Value::Null).is_empty());
+        assert_eq!(items[0].replace_from, None);
+        assert_eq!(completions(&json!([{ "label": "x" }]), "").len(), 1);
+        assert!(completions(&Value::Null, "").is_empty());
+        // A `textEdit` that replaces more than the word says where from.
+        let path = json!([{ "label": "edge", "textEdit": { "range": {
+            "start": { "line": 0, "character": 7 }, "end": { "line": 0, "character": 23 } },
+            "newText": "lygia::filtre::edge" } }]);
+        let items = completions(&path, "import lygia::filter::ed");
+        assert_eq!(items[0].replace_from, Some(7));
     }
 
     #[test]
@@ -544,6 +587,9 @@ mod tests {
             "import lygia::filter::edge::prewitt::edgePrewitt;\nfn f() {\n    return;\n}\n"
         );
         assert_eq!(apply_edits(text, &json!([])).unwrap(), text);
+        // Inserts at one position keep the list's order.
+        let edits = json!([edit(1, 0, 0, "a"), edit(1, 0, 0, "b"), edit(1, 0, 2, "F")]);
+        assert!(apply_edits(text, &edits).unwrap().contains("\nabF f(){"));
         assert_eq!(apply_edits(text, &Value::Null), None);
     }
 }
