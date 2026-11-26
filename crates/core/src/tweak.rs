@@ -156,12 +156,25 @@ impl Constant {
 }
 
 /// A float as a WGSL literal: four significant digits, at least one digit
-/// after the point, so it stays a float.
+/// after the point, so it stays a float. Magnitudes too small for that in
+/// eight decimals get an exponent (`1.235e-9`), rather than rounding away.
 fn float_literal(v: f32) -> String {
     if v == 0.0 || !v.is_finite() {
         return "0.0".into();
     }
-    let decimals = (3 - v.abs().log10().floor() as i32).clamp(1, 8) as usize;
+    let decimals = 3 - v.abs().log10().floor() as i32;
+    if decimals > 8 {
+        let s = format!("{v:.3e}");
+        let (mantissa, exponent) = s.split_once('e').unwrap_or((&s, "0"));
+        let mantissa = mantissa.trim_end_matches('0');
+        let mantissa = if mantissa.ends_with('.') {
+            format!("{mantissa}0")
+        } else {
+            mantissa.to_string()
+        };
+        return format!("{mantissa}e{exponent}");
+    }
+    let decimals = decimals.max(1) as usize;
     let s = format!("{v:.decimals$}");
     let s = s.trim_end_matches('0');
     if s.ends_with('.') {
@@ -681,6 +694,12 @@ fn f() {
         assert_eq!(float_literal(-2.5), "-2.5");
         assert_eq!(float_literal(1234.5678), "1234.6");
         assert_eq!(float_literal(0.0), "0.0");
+        // Small values keep their digits instead of rounding to zero.
+        assert_eq!(float_literal(1e-9), "1.0e-9");
+        assert_eq!(float_literal(-1.2345e-7), "-1.234e-7");
+        assert_eq!(float_literal(0.0001), "0.0001");
+        let (v, _, float) = parse_number(&float_literal(4e-9)).unwrap();
+        assert!(float && (v as f32 - 4e-9).abs() < 1e-12);
     }
 
     #[test]

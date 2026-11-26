@@ -42,9 +42,16 @@ impl Transport {
     /// Start `$WGSL_ANALYZER` (default: `wgsl-analyzer` from `PATH`) on a
     /// fresh workspace holding `files`, in the background.
     pub fn start(files: Vec<(String, &'static str)>) -> Result<Self, String> {
+        // One directory per server, not per process: the writer thread of a
+        // server stopped a moment ago may still be removing its own when
+        // the setting is switched back on.
+        static STARTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = STARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let exe = std::env::var_os("WGSL_ANALYZER").unwrap_or_else(|| "wgsl-analyzer".into());
-        let root =
-            std::env::temp_dir().join(format!("wesl-shadertoy-analyzer-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "wesl-shadertoy-analyzer-{}-{n}",
+            std::process::id()
+        ));
         Self::start_in(exe, root, files)
     }
 

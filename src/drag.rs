@@ -778,7 +778,10 @@ pub fn update(mut p: DragParams) {
 
     // A fresh Jacobian (for this compile) replaces the old one.
     match drag.worker.poll() {
-        Some(Ok(e)) if e.generation == grab.generation => grab.estimate = Some(e),
+        Some(Ok(e)) if e.generation == grab.generation => {
+            grab.estimate = Some(e);
+            grab.error = None;
+        }
         Some(Err(e)) => grab.error = Some(e),
         _ => {}
     }

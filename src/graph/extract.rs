@@ -781,10 +781,11 @@ impl Extractor<'_> {
         (text, ATOM)
     }
 
-    /// The base of a `.x` / `[i]` access, parenthesized unless it is an atom.
+    /// The base of a `.x` / `[i]` access, parenthesized unless it is an atom
+    /// (a unary operator binds looser than the access: `(-v).x`, not `-v.x`).
     fn postfix_base(&self, base: Handle<Expression>) -> String {
         let (text, prec) = self.text_prec(base, false);
-        if prec < 9 { format!("({text})") } else { text }
+        if prec < 10 { format!("({text})") } else { text }
     }
 
     /// `.x`, `.field` or `[i]` for constant index `index` into `base`.

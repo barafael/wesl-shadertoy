@@ -39,7 +39,11 @@ export function analyzer_start(root, filesJson) {
         return
       }
       server = started
-      server.onMessage((message) => inbox.push(JSON.stringify(message)))
+      // A stopped server's late messages must not reach the next one's
+      // client (its request ids and document versions start over).
+      server.onMessage((message) => {
+        if (mine === generation) inbox.push(JSON.stringify(message))
+      })
       state = 'ready'
     })
     .catch((error) => {

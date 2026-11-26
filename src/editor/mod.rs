@@ -1132,6 +1132,43 @@ mod tests {
         assert_eq!(text, "x\ns", "undo restores the typed word");
     }
 
+    /// A caret left past the end of a text that shrank while the editor
+    /// was not focused (an example opened, a tweak written back) is not
+    /// clamped by egui; the code assistance must not index with it.
+    #[test]
+    fn caret_past_a_shrunk_text_does_not_panic() {
+        let ctx = Context::default();
+        let mut cache = HighlightCache::default();
+        let mut assist = CodeAssist::default();
+        let mut text = crate::examples::default().code.to_string();
+        let mut frame = |text: &mut String, assist: &mut CodeAssist| {
+            ctx.run_ui(RawInput::default(), |ui| {
+                show_code_editor(
+                    ui,
+                    text,
+                    &mut cache,
+                    assist,
+                    &mut DiagnosticsOnly(&[]),
+                    AssistOptions::default(),
+                );
+            })
+            .drop_without_applying_deltas();
+        };
+        frame(&mut text, &mut assist);
+        let id: Id = ctx.data(|d| d.get_temp(editor_id_marker())).unwrap();
+        let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
+        let end = text.chars().count();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(end))));
+        state.store(&ctx, id);
+        // Not focused: egui leaves the stored caret alone.
+        text = String::from("fn f() {}\n");
+        frame(&mut text, &mut assist);
+        frame(&mut text, &mut assist);
+        assert_eq!(text, "fn f() {}\n");
+    }
+
     /// Formatting from the button (the editor not focused, so egui's
     /// undoer never saw the text before) is still one Ctrl+Z away.
     #[test]

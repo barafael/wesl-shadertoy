@@ -199,12 +199,13 @@ fn mutate_one(c: &Constant, mut value: Vec4, strength: f32, rng: &mut Rng) -> Ve
                 value.x = value.x.max(0.0);
             }
         }
-        // Colors stay colors: rgb within 0..1 (or the source's HDR peak);
-        // alpha is left alone.
+        // Colors stay colors: rgb within 0..1 (or the source's HDR peak, or
+        // its negative component: a name like `COLLISION_NORMAL` reads as a
+        // color too); alpha is left alone.
         Kind::Vec(_) if c.is_color() => {
             for i in 0..3 {
-                let top = c.value[i].max(1.0);
-                value[i] = (value[i] + step(rng, 1.0)).clamp(0.0, top);
+                let (bottom, top) = (c.value[i].min(0.0), c.value[i].max(1.0));
+                value[i] = (value[i] + step(rng, 1.0)).clamp(bottom, top);
             }
         }
         Kind::Vec(n) => {

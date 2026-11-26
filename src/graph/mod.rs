@@ -567,8 +567,13 @@ pub fn show(
         if let Some(slot) = built.thumbs.get(i).copied().flatten() {
             let thumb = egui::Rect::from_min_size(egui::pos2(r.min.x + PAD, y + PAD / 2.0), THUMB);
             let thumb = egui::Rect::from_min_max(to_screen(thumb.min), to_screen(thumb.max));
+            // A slot whose variant was dropped (it did not validate) still
+            // holds an older compile's: that image is not this node's.
+            let shown = built.variants.get(slot).is_some_and(Option::is_some);
             match view.slots.get(slot) {
-                Some(s) if feedback.drawn(PreviewKey::Graph(slot)) && s.holds.is_some() => {
+                Some(s)
+                    if shown && feedback.drawn(PreviewKey::Graph(slot)) && s.holds.is_some() =>
+                {
                     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                     painter.image(s.texture, thumb, uv, egui::Color32::WHITE);
                 }

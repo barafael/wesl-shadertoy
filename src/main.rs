@@ -1826,23 +1826,20 @@ fn constant_control(ui: &mut egui::Ui, c: &tweak::Constant, value: &mut Vec4) {
                 value.x = n.max(min) as f32;
             }
         }
-        // egui's color button round-trips the color through its own
-        // representation every frame, nudging it by float noise: only a
-        // real edit may change the value (and mark it for write-back).
+        // egui's color button round-trips the color through HSV every frame,
+        // which nudges it by float noise, clamps negative components to 0
+        // and drops the rgb of a zero alpha: only a real edit (the button's
+        // `changed`) may change the value and mark it for write-back.
         Kind::Vec(3) if c.is_color() => {
             let mut rgb = value.truncate().to_array();
-            ui.color_edit_button_rgb(&mut rgb);
-            let picked = Vec3::from_array(rgb).extend(0.0);
-            if !picked.abs_diff_eq(*value, 1e-4) {
-                *value = picked;
+            if ui.color_edit_button_rgb(&mut rgb).changed() {
+                *value = Vec3::from_array(rgb).extend(0.0);
             }
         }
         Kind::Vec(4) if c.is_color() => {
             let mut rgba = value.to_array();
-            ui.color_edit_button_rgba_unmultiplied(&mut rgba);
-            let picked = Vec4::from_array(rgba);
-            if !picked.abs_diff_eq(*value, 1e-4) {
-                *value = picked;
+            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                *value = Vec4::from_array(rgba);
             }
         }
         Kind::Vec(n) => {
@@ -2223,6 +2220,28 @@ mod tests {
             [3.0, 1.5, 5.0]
         );
         assert_eq!(tweaks.dirty, 0b100);
+    }
+
+    /// Showing a color the picker cannot represent (a negative component, a
+    /// zero alpha) leaves it alone: only an edit changes it and marks it
+    /// for write-back into the source.
+    #[test]
+    fn showing_colors_changes_nothing() {
+        let mut tweaks = Tweaks::default();
+        let src = "const COLLISION_NORMAL: vec3<f32> = vec3<f32>(0.0, -1.0, 0.0);\n\
+                   const TINT: vec4<f32> = vec4<f32>(1.0, 0.5, 0.25, 0.0);\n";
+        tweaks.replace(tweak::extract(src), Vec::new());
+        assert!(tweaks.constants.iter().all(tweak::Constant::is_color));
+        let before = tweaks.values;
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                constants_ui(ui, &mut tweaks)
+            })
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(tweaks.values, before);
+        assert_eq!(tweaks.dirty, 0);
     }
 
     /// Dragging a window's left (top) edge past what its content needs stops

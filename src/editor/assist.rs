@@ -335,7 +335,7 @@ pub fn before(
         return;
     }
     let chars: Vec<char> = text.chars().collect();
-    let cursor = caret(&state);
+    let cursor = caret(&state).map(|c| c.min(chars.len()));
 
     // The completion list's keys, while it shows.
     let rows = assist
@@ -468,7 +468,10 @@ pub fn after(
     let id = output.response.response.id;
     let chars: Vec<char> = text.chars().collect();
     let state = &output.state;
-    let cursor = caret(state);
+    // An unfocused TextEdit keeps its last caret as it was, even past the
+    // end of a text that has since shrunk (an example opened, a pragma
+    // line or a tweak written back): clamp it before indexing with it.
+    let cursor = caret(state).map(|c| c.min(chars.len()));
     let focused = ctx.memory(|m| m.has_focus(id));
 
     // --- requests ---------------------------------------------------------

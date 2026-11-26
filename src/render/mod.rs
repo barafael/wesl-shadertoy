@@ -45,7 +45,8 @@ pub struct ShaderToyUniform {
     pub resolution: Vec4,
     /// Shadertoy-style mouse (see `i_mouse` in the environment module).
     pub mouse: Vec4,
-    /// x: year, y: month (1-12), z: day of month, w: seconds since midnight.
+    /// Local time, like shadertoy's iDate: x: year, y: month (0 = January),
+    /// z: day of month (from 1), w: seconds since midnight.
     pub date: Vec4,
     /// Audio sample rate in Hz (44100; there is no audio input).
     pub sample_rate: f32,

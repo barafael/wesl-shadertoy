@@ -137,7 +137,13 @@ fn import_tree(
             Some("{") => {
                 i += 1;
                 while toks.get(i).is_some_and(|t| *t != "}") {
-                    i = import_tree(toks, i, prefix.clone(), out);
+                    let next = import_tree(toks, i, prefix.clone(), out);
+                    if next == i {
+                        // Not an import tree (an unclosed `{` while typing,
+                        // with the rest of the file after it): stop here.
+                        return i;
+                    }
+                    i = next;
                     if toks.get(i) == Some(&",") {
                         i += 1;
                     }
@@ -243,6 +249,23 @@ mod tests {
                 "math::consts::TAU",
                 "math::consts::PI",
             ]
+        );
+    }
+
+    /// An import being typed (`{` not closed yet, the rest of the file
+    /// after it) ends the scan of that import instead of looping forever.
+    #[test]
+    fn unclosed_import_braces_terminate() {
+        let src = "import lygia::{\nfn main_image(p: vec2f) -> vec4f { return vec4f(0.0); }\n\
+                   fn g() -> f32 { return lygia::math::consts::PI; }\n";
+        let paths: Vec<String> = package_paths(src, "lygia")
+            .iter()
+            .map(|p| p.join("::"))
+            .collect();
+        assert!(paths.contains(&"math::consts::PI".to_string()), "{paths:?}");
+        assert!(
+            package_paths("import lygia::{ 1 }; import lygia::a::b;", "lygia")
+                .contains(&vec!["a".to_string(), "b".to_string()])
         );
     }
 

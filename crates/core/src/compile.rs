@@ -1251,10 +1251,50 @@ fn storage_sizes(
     Ok(sizes)
 }
 
+/// `src` with its block comments (which nest, as in WGSL) blanked to spaces,
+/// newlines kept: a commented-out `fn compute_a(` is not a declaration.
+fn blank_block_comments(src: &str) -> Cow<'_, str> {
+    if !src.contains("/*") {
+        return Cow::Borrowed(src);
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut depth = 0usize;
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('/', Some('*')) => {
+                chars.next();
+                depth += 1;
+                out.push_str("  ");
+            }
+            ('*', Some('/')) if depth > 0 => {
+                chars.next();
+                depth -= 1;
+                out.push_str("  ");
+            }
+            ('/', Some('/')) if depth == 0 => {
+                // A line comment: copied as is, `/*` inside it included.
+                out.push(c);
+                for c in chars.by_ref() {
+                    out.push(c);
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            ('\n', _) => out.push('\n'),
+            _ if depth > 0 => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// The `N` of a `// dispatch: N` line right above `fn {name}`, if any.
 fn dispatch_hint(user_source: &str, name: &str) -> Result<Option<u32>, CompileError> {
     let mut previous = "";
-    for line in user_source.lines() {
+    let source = blank_block_comments(user_source);
+    for line in source.lines() {
         let line = line.trim();
         let declares = line
             .strip_prefix("fn ")
@@ -1582,6 +1622,13 @@ fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(cells[0]); }
             dispatch_hint("// dispatch: 64\nfn compute_ab(i: u32) {}", "compute_a").unwrap(),
             None
         );
+        // A commented-out copy above the real one is not the declaration.
+        let src = "/* old version:\nfn compute_a(i: u32) {}\n*/\n\
+                   // dispatch: 64\nfn compute_a(i: u32) {}";
+        assert_eq!(dispatch_hint(src, "compute_a").unwrap(), Some(64));
+        let src = "/* // dispatch: 8\nfn compute_a(i: u32) {} /* nested */ */\n\
+                   fn compute_a(i: u32) {}";
+        assert_eq!(dispatch_hint(src, "compute_a").unwrap(), None);
         let src = "// compute_a is only mentioned here.\n\
                    fn main_image(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0); }\n";
         assert!(!compile_user_shader(src).unwrap().compute.is_used());

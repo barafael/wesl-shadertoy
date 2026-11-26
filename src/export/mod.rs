@@ -451,6 +451,7 @@ fn update_uniforms(
     mut shaders: Query<&mut {ty}Shader>,
     mut mouse: Local<Vec4>,
     mut dragging: Local<bool>,
+    mut started: Local<bool>,
 ) {{
     let size = window
         .as_ref()
@@ -479,11 +480,15 @@ fn update_uniforms(
     }}
     let dt = time.delta_secs();
     let slots = tweaks.slots();
+    // `i_frame` is 0 on the first frame drawn, as in wesl-shadertoy.
+    let advance = std::mem::replace(&mut *started, true);
     for mut shader in &mut shaders {{
         shader.mouse = *mouse;
         shader.time = time.elapsed_secs();
         shader.time_delta = dt;
-        shader.frame = shader.frame.wrapping_add(1);
+        if advance {{
+            shader.frame = shader.frame.wrapping_add(1);
+        }}
         shader.resolution = size.extend(1.0).extend(0.0);
         shader.date = date();
         shader.sample_rate = 44100.0;

@@ -346,7 +346,9 @@ pub fn add_import(text: &mut String, module: &str, item: &str) -> Added {
         let at = start + (line.len() - line.trim_start().len()) + prefix.len();
         let rest = rest.trim();
         if let Some(list) = rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')) {
-            let close = at + text[at..].find('}').expect("the import's closing brace");
+            // In the comment-free text: a `}` in a comment inside the
+            // braces is not the closing one.
+            let close = at + blanked[at..].find('}').expect("the import's closing brace");
             let sep = if list.trim().is_empty() { "" } else { ", " };
             text.insert_str(close, &format!("{sep}{item}"));
             return Added::Merged;
@@ -514,6 +516,16 @@ mod tests {
         assert!(
             text.contains("import lygia::generative::snoise::{snoise2, snoise3, snoise4};"),
             "{text}"
+        );
+        // A brace in a comment inside the list is not the list's end.
+        let mut commented = String::from("import lygia::math::consts::{PI /* } */};\n");
+        assert_eq!(
+            add_import(&mut commented, "math::consts", "TAU"),
+            Added::Merged
+        );
+        assert_eq!(
+            commented,
+            "import lygia::math::consts::{PI /* } */, TAU};\n"
         );
         // A tree import covering it counts as imported.
         let mut tree = String::from("import lygia::color::{blend::darken::blendDarken};\n");

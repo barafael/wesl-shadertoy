@@ -372,7 +372,6 @@ struct Request {
 /// server asks gets an empty answer, so it never waits on us.
 struct Client<L> {
     link: L,
-    next_id: i64,
     pending: HashMap<i64, Request>,
     initialized: bool,
     /// Version and text of the document as the server has it.
@@ -395,7 +394,6 @@ impl<L: Link> Client<L> {
     fn new(link: L) -> Self {
         Self {
             link,
-            next_id: 1,
             pending: HashMap::new(),
             initialized: false,
             version: 0,
@@ -708,8 +706,11 @@ impl<L: Link> Client<L> {
 
     /// Send a request about `text` (the editor text it refers to).
     fn request(&mut self, kind: Pending, method: &str, params: Value, text: String) -> Ticket {
-        let id = self.next_id;
-        self.next_id += 1;
+        // Process-wide, not per client: the editor keeps the tickets it
+        // holds across a restart of the server, and a new client's answers
+        // must not pass for (or fall behind) an old client's.
+        static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.link.send(&json!({
             "jsonrpc": "2.0", "id": id, "method": method, "params": params,
         }));

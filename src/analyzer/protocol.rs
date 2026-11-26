@@ -365,9 +365,6 @@ pub fn inlay_hints(result: &Value, text: &str) -> Vec<InlayHint> {
         .collect()
 }
 
-/// `text` with a `textDocument/formatting` (or `rangeFormatting`) result's
-/// edits applied, in editor terms; `None` when the result is not a list of
-/// edits (the server sends `null` for text it cannot parse).
 /// Why formatting gave no text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormatError {
@@ -388,6 +385,9 @@ pub fn formatted(text: &str, result: &Value, error: Option<&Value>) -> Result<St
     apply_edits(text, result).ok_or(FormatError::Server)
 }
 
+/// `text` with a `textDocument/formatting` (or `rangeFormatting`) result's
+/// edits applied, in editor terms; `None` when the result is not a list of
+/// edits (the server sends `null` for text it cannot parse).
 pub fn apply_edits(text: &str, result: &Value) -> Option<String> {
     let edits = result.as_array()?;
     let mut chars: Vec<char> = super::for_analyzer(text).chars().collect();
