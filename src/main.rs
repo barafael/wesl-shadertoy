@@ -2228,7 +2228,7 @@ mod tests {
     #[test]
     fn showing_colors_changes_nothing() {
         let mut tweaks = Tweaks::default();
-        let src = "const COLLISION_NORMAL: vec3<f32> = vec3<f32>(0.0, -1.0, 0.0);\n\
+        let src = "const SKY_COL: vec3<f32> = vec3<f32>(0.0, -1.0, 0.0);\n\
                    const TINT: vec4<f32> = vec4<f32>(1.0, 0.5, 0.25, 0.0);\n";
         tweaks.replace(tweak::extract(src), Vec::new());
         assert!(tweaks.constants.iter().all(tweak::Constant::is_color));

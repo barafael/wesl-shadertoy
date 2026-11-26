@@ -168,8 +168,9 @@ const PI: f32 = 3.14159; // tweak: off             // left out of the window
 ```
 
 Give integer constants a type (`const N: i32 = 8;`): an untyped `8` could be
-an `i32`, `u32` or `f32` at each use. Names containing `color`/`col`/`tint`
-get a color picker on their own. Constants WGSL needs as true constants —
+an `i32`, `u32` or `f32` at each use. Names with a word `color`, `colour`, `col`
+or `tint` (`SKY_COLOR`, `baseCol`, `TINT`; not `COLLISION_NORMAL`) get a color
+picker on their own. Constants WGSL needs as true constants —
 array sizes, other constants' values, `switch` cases — stay fixed, and the
 window lists them. Up to 32 per shader.
 

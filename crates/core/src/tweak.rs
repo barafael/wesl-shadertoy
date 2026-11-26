@@ -90,13 +90,7 @@ impl Constant {
     pub fn is_color(&self) -> bool {
         match self.hint {
             Hint::Color => matches!(self.kind, Kind::Vec(3 | 4)),
-            Hint::Auto => {
-                let name = self.name.to_ascii_lowercase();
-                matches!(self.kind, Kind::Vec(3 | 4))
-                    && ["color", "colour", "col", "tint"]
-                        .iter()
-                        .any(|w| name.contains(w))
-            }
+            Hint::Auto => matches!(self.kind, Kind::Vec(3 | 4)) && names_color(&self.name),
             _ => false,
         }
     }
@@ -153,6 +147,31 @@ impl Constant {
             Kind::Vec(_) => v,
         }
     }
+}
+
+/// Whether a name says color: one of its words (split at `_`, digits and
+/// camelCase humps) is `color`, `colour`, `col` or `tint`, or ends in
+/// `color`/`colour` (`bgcolor`). Whole words, so `COLLISION_NORMAL` and
+/// `PROTOCOL` are not colors, but `SKY_COL` and `col2` are.
+fn names_color(name: &str) -> bool {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        let hump = c.is_ascii_uppercase() && prev_lower;
+        if !c.is_ascii_alphabetic() || hump {
+            words.push(std::mem::take(&mut word));
+        }
+        if c.is_ascii_alphabetic() {
+            word.push(c.to_ascii_lowercase());
+        }
+        prev_lower = c.is_ascii_lowercase();
+    }
+    words.push(word);
+    words.iter().any(|w| {
+        let w = w.strip_suffix('s').unwrap_or(w);
+        matches!(w, "col" | "tint") || w.ends_with("color") || w.ends_with("colour")
+    })
 }
 
 /// A float as a WGSL literal: four significant digits, at least one digit
@@ -626,6 +645,35 @@ fn f() {
         assert!(by("SEA_COLOR").is_color());
         assert_eq!(by("SPLAT").value, [1.5, 1.5, 0.0, 0.0]);
         assert_eq!(by("PI").hint, Hint::Off);
+    }
+
+    #[test]
+    fn color_names_are_whole_words() {
+        for name in [
+            "SEA_COLOR",
+            "TINT",
+            "GRADE_TINT",
+            "SKY_COL",
+            "col2",
+            "skyCol",
+            "headColorDebug",
+            "bgcolor",
+            "BASE_COLOUR",
+            "COLORS",
+            "PAINT_COLOR_A",
+        ] {
+            assert!(names_color(name), "{name}");
+        }
+        for name in [
+            "COLLISION_NORMAL",
+            "PROTOCOL",
+            "COLD",
+            "TINTED_GLASS_IOR",
+            "NORMAL",
+            "SCOL",
+        ] {
+            assert!(!names_color(name), "{name}");
+        }
     }
 
     /// Constants under `@if` / `@else` may be compiled away, so neither
